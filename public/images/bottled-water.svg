@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 360" role="img" aria-label="Bottled water and glass">
+  <rect width="360" height="360" fill="none"/>
+  <g fill="none" stroke="#050505" stroke-width="9" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M92 87h72v32c0 10 5 18 12 25 16 16 27 38 27 62v111c0 15-12 27-27 27H80c-15 0-27-12-27-27V206c0-24 11-46 27-62 7-7 12-15 12-25V87z" fill="#eaf8ff"/>
+    <path d="M93 43h70v44H93z" fill="#c7e6ff"/>
+    <path d="M89 180h78"/>
+    <path d="M55 226h145"/>
+    <path d="M55 278h145"/>
+    <path d="M58 239h140v38H58z" fill="#c7e6ff"/>
+    <path d="M58 291h140v35H58z" fill="#eaf8ff"/>
+    <path d="M129 134c-16 28-28 39-28 56 0 18 13 30 28 30s28-12 28-30c0-17-12-28-28-56z" fill="#c7e6ff"/>
+    <path d="M221 193h95l-14 136h-67l-14-136z" fill="#dff2ff"/>
+    <path d="M236 208h55c-3 44-23 73-49 83l-6-83z" fill="#f7fcff" stroke="none"/>
+    <path d="M232 329h75" />
+  </g>
+</svg>

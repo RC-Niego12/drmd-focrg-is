@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="laravel-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FF2D20;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#E41A12;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="8" fill="url(#laravel-gradient)"/>
+  <!-- Laravel L logo -->
+  <path d="M 14 48 L 14 24 Q 14 18 20 18 L 38 18 Q 44 18 44 24 Q 44 28 40 30 L 22 30 L 22 48 M 50 48 L 50 18 L 58 18 L 58 48" 
+        stroke="white" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="10"/>
+</svg>

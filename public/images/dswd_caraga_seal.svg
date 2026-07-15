@@ -1,0 +1,53 @@
+<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Outer circle background -->
+  <circle cx="100" cy="100" r="100" fill="#003DA5"/>
+  
+  <!-- Inner white circle -->
+  <circle cx="100" cy="100" r="95" fill="white"/>
+  
+  <!-- Outer blue ring -->
+  <circle cx="100" cy="100" r="95" fill="none" stroke="#003DA5" stroke-width="8"/>
+  <circle cx="100" cy="100" r="92" fill="none" stroke="white" stroke-width="2"/>
+  
+  <!-- Blue mountain background -->
+  <polygon points="100,50 65,100 135,100" fill="#003DA5"/>
+  <polygon points="100,50 135,100 160,80" fill="#1e5ba8"/>
+  
+  <!-- Yellow hands -->
+  <g id="left-hand">
+    <path d="M 60 110 Q 70 115 80 110 L 85 105 Q 75 115 65 115 Z" fill="#FFD700"/>
+    <path d="M 60 110 L 50 125 Q 55 130 65 125 Z" fill="#FFD700"/>
+    <ellipse cx="55" cy="120" rx="8" ry="12" fill="#FFD700"/>
+  </g>
+  
+  <g id="right-hand">
+    <path d="M 140 110 Q 130 115 120 110 L 115 105 Q 125 115 135 115 Z" fill="#FFD700"/>
+    <path d="M 140 110 L 150 125 Q 145 130 135 125 Z" fill="#FFD700"/>
+    <ellipse cx="145" cy="120" rx="8" ry="12" fill="#FFD700"/>
+  </g>
+  
+  <!-- Red object being held (like a heart or flame) -->
+  <path d="M 100 100 Q 85 115 85 125 Q 85 135 100 145 Q 115 135 115 125 Q 115 115 100 100" fill="#E31937"/>
+  
+  <!-- Top text arc -->
+  <defs>
+    <path id="topArc" d="M 40,100 A 60,60 0 0,1 160,100" fill="none"/>
+    <path id="bottomArc" d="M 160,100 A 60,60 0 0,1 40,100" fill="none"/>
+  </defs>
+  
+  <text font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#003DA5" letter-spacing="2">
+    <textPath href="#topArc" startOffset="50%" text-anchor="middle">
+      DISASTER RESPONSE MANAGEMENT DIVISION
+    </textPath>
+  </text>
+  
+  <text font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#003DA5" letter-spacing="2">
+    <textPath href="#bottomArc" startOffset="50%" text-anchor="middle">
+      DSWD CARAGA
+    </textPath>
+  </text>
+  
+  <!-- Decorative dots -->
+  <circle cx="35" cy="100" r="3" fill="#003DA5"/>
+  <circle cx="165" cy="100" r="3" fill="#003DA5"/>
+</svg>
