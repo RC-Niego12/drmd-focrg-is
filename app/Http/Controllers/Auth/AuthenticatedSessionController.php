@@ -46,10 +46,17 @@ class AuthenticatedSessionController extends Controller
         }
 
         $request->session()->regenerate();
-        $this->audit->log('auth.login', Auth::user(), [], [
+        $user = Auth::user();
+        $this->audit->log('auth.login', $user, [], [
             'method' => 'password',
             'remember' => $request->boolean('remember'),
         ], Auth::id());
+
+        if (! (bool) config('services.cc_idp.bypass_mfa', true) && $user?->mfa_enabled) {
+            $request->session()->put('mfa_required', true);
+
+            return redirect()->route('mfa.verify');
+        }
 
         return redirect()->intended(route('dashboard'));
     }

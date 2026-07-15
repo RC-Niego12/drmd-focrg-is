@@ -43,8 +43,18 @@ class RequestController extends Controller
         return $this->index($request);
     }
 
-    public function index(Request $request, InventoryBalanceService $inventoryBalanceService): Response
+    public function index(Request $request, InventoryBalanceService $inventoryBalanceService): Response|RedirectResponse
     {
+        if ($request->filled(['epirma_request', 'token', 'status'])) {
+            $assistanceRequest = AssistanceRequest::query()->findOrFail($request->integer('epirma_request'));
+
+            return app(EpirmaSigningController::class)->callback(
+                $request,
+                $assistanceRequest,
+                app(AuditLogger::class)
+            );
+        }
+
         if (RequestParty::query()->doesntExist()) {
             try {
                 app(RequestPartySheetService::class)->sync();
@@ -105,7 +115,7 @@ class RequestController extends Controller
             'psgc' => ['provinces' => $provinces, 'municipalities' => $municipalities, 'barangays' => $barangays],
             'socialWorkers' => User::query()->role('DRRS')->where('is_active', true)->orderBy('name')->get(['id', 'name']),
             'warehouseStock' => $warehouseStock,
-            'defaultTab' => $request->get('default_tab'),
+            'defaultTab' => $request->get('default_tab', $request->get('tab', 'tracker')),
         ]);
     }
 

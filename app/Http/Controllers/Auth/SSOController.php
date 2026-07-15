@@ -9,10 +9,12 @@ use App\Services\SSOAuthService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+use RuntimeException;
+use Spatie\Permission\Models\Role;
 use Throwable;
 
 class SSOController extends Controller
@@ -22,12 +24,22 @@ class SSOController extends Controller
         private readonly AuditLogger $audit,
     ) {}
 
-    public function login(): RedirectResponse
+    /**
+     * Step 1: start SSO — redirect browser to Provider /oauth/authorize
+     */
+    public function login(Request $request): RedirectResponse
     {
         try {
             $this->ensureConfigured();
 
-            return redirect()->away($this->sso->buildAuthorizeRedirect());
+            $authorizeUrl = $this->sso->buildAuthorizeRedirect();
+
+            Log::info('SSO Login - Redirecting', [
+                'authorizeUrl' => $authorizeUrl,
+                'sessionId' => $request->session()->getId(),
+            ]);
+
+            return redirect()->away($authorizeUrl);
         } catch (Throwable $exception) {
             Log::warning('Caraga Connect authorization could not start.', ['exception' => $exception]);
 
@@ -35,71 +47,159 @@ class SSOController extends Controller
         }
     }
 
+    /**
+     * Step 2: callback — verify state, exchange code, fetch profile, log in
+     */
     public function callback(Request $request): RedirectResponse
     {
         try {
-            if ($error = $request->query('error')) {
-                return $this->ssoFailure('Caraga Connect did not authorize the sign-in: '.$error);
+            if ($err = $request->query('error')) {
+                throw ValidationException::withMessages(['sso' => 'Provider error: '.$err]);
             }
 
-            $state = (string) $request->query('state', '');
-            $code = (string) $request->query('code', '');
+            $state = $request->query('state');
+            $code = $request->query('code');
 
-            if (! $state || ! $code || ! $this->sso->hasPendingTransaction($state)) {
-                return $this->ssoFailure('The Caraga Connect sign-in expired or could not be verified. Please start again.');
+            if (! $state || ! $code) {
+                throw ValidationException::withMessages(['sso' => 'Missing authorization response.']);
             }
 
-            $tokens = $this->sso->exchangeCodeForTokens($code, $state);
+            try {
+                $codeVerifier = $this->sso->consumePkceVerifier((string) $state);
+            } catch (RuntimeException) {
+                throw ValidationException::withMessages(['sso' => 'Invalid SSO state. Start Sign in with Caraga Connect again (do not reuse an old browser tab).']);
+            }
+
+            Log::info('SSO Callback - PKCE state accepted', [
+                'sessionId' => $request->session()->getId(),
+                'state' => $state,
+            ]);
+
+            $tokens = $this->sso->exchangeCodeForTokens((string) $code, $codeVerifier);
             $accessToken = $tokens['access_token'] ?? null;
 
             if (! $accessToken) {
-                return $this->ssoFailure('Caraga Connect did not return a valid access token.');
+                throw ValidationException::withMessages(['sso' => 'No access token returned.']);
             }
 
             $profile = $this->sso->fetchUserInfo($accessToken);
-            $user = $this->resolveUser($profile);
+            $username = $profile['preferred_username'] ?? null;
+            $sub = $profile['sub'] ?? null;
+            $name = $profile['name'] ?? null;
+            $email = $profile['email'] ?? null;
+            $idNumber = $profile['id_number'] ?? null;
+            $password = $profile['password'] ?? null;
 
-            $handoff = Str::random(64);
-            Cache::put('caraga-connect:handoff:'.hash('sha256', $handoff), [
+            if (! $sub) {
+                throw ValidationException::withMessages(['sso' => 'Provider did not return a subject (sub).']);
+            }
+
+            $locator = filled($username) ? ['username' => $username] : ['sso_sub' => $sub];
+            $wasCreated = ! User::query()->where($locator)->exists();
+
+            $user = User::updateOrCreate(
+                $locator,
+                [
+                    'sso_sub' => $sub,
+                    'name' => $name ?: 'SSO User',
+                    'username' => $username,
+                    'email' => $email ?: (($username ?: Str::slug($sub)).'@caraga-connect.local'),
+                    'id_number' => $idNumber ?: null,
+                    'password' => Hash::make($password ?: Str::random(40)),
+                    'email_verified_at' => now(),
+                    'is_active' => true,
+                    'office' => config('services.cc_idp.default_office'),
+                ]
+            );
+
+            $guest = Role::firstOrCreate(['name' => 'guest', 'guard_name' => 'web']);
+
+            if ($wasCreated) {
+                // Non-registered SSO users always start as guest + pending access.
+                $user->syncRoles([$guest]);
+                $user->forceFill([
+                    'access_status' => 'pending',
+                    'requested_role' => 'guest',
+                    'access_requested_at' => now(),
+                ])->save();
+            } elseif ($user->roles()->count() === 0) {
+                $user->assignRole($guest);
+            }
+
+            Auth::login($user, true);
+            $request->session()->regenerate();
+
+            session([
+                'idp_access_token' => $accessToken,
+                'idp_refresh_token' => $tokens['refresh_token'] ?? null,
+                'idp_expires_in' => $tokens['expires_in'] ?? null,
+            ]);
+
+            $user->refresh();
+            $this->audit->log('auth.sso_login', $user, [], ['method' => 'caraga_connect'], $user->id);
+
+            if ($wasCreated) {
+                $this->audit->log('user.registered_sso', $user, [], [
+                    'email' => $user->email,
+                    'username' => $user->username,
+                    'access_status' => $user->access_status,
+                ], $user->id);
+            }
+
+            if ($this->shouldBypassMfaAuthentication()) {
+                $request->session()->forget('mfa_required');
+                Log::info('MFA bypass enabled - Redirecting to dashboard', [
+                    'user_id' => $user->id,
+                    'mfa_enabled' => $user->mfa_enabled,
+                ]);
+
+                return $this->redirectToPostAuth($request);
+            }
+
+            if ($user->mfa_enabled) {
+                session(['mfa_required' => true]);
+                Log::info('MFA enabled - Redirecting to verify page', [
+                    'user_id' => $user->id,
+                    'mfa_enabled' => $user->mfa_enabled,
+                ]);
+
+                return redirect()->route('mfa.verify');
+            }
+
+            session(['mfa_required' => true]);
+            Log::info('MFA not enabled - Redirecting to setup page', [
                 'user_id' => $user->id,
-                'access_token' => $accessToken,
-                'refresh_token' => $tokens['refresh_token'] ?? null,
-                'expires_in' => $tokens['expires_in'] ?? null,
-            ], now()->addMinutes(2));
+                'mfa_enabled' => $user->mfa_enabled,
+            ]);
 
-            return redirect()->away(rtrim(config('app.url'), '/').'/sso/complete?token='.urlencode($handoff));
+            return redirect()->route('mfa.setup');
+        } catch (ValidationException $exception) {
+            $message = collect($exception->errors())->flatten()->first() ?: 'Caraga Connect sign-in failed.';
+
+            return $this->ssoFailure($message);
         } catch (Throwable $exception) {
-            Log::warning('Caraga Connect callback failed.', ['exception' => $exception]);
+            Log::warning('Caraga Connect callback failed.', [
+                'exception' => $exception->getMessage(),
+                'trace' => $exception->getTraceAsString(),
+            ]);
 
             return $this->ssoFailure('Caraga Connect sign-in could not be completed. Please try again.');
         }
     }
 
+    /**
+     * Kept for older handoff URLs; new flow logs in during callback.
+     */
     public function complete(Request $request): RedirectResponse
     {
-        $token = (string) $request->query('token', '');
-        $payload = $token ? Cache::pull('caraga-connect:handoff:'.hash('sha256', $token)) : null;
+        return $this->redirectToPostAuth($request);
+    }
 
-        if (! is_array($payload) || empty($payload['user_id'])) {
-            return $this->ssoFailure('The Caraga Connect sign-in handoff expired. Please start again.');
-        }
+    private function redirectToPostAuth(Request $request): RedirectResponse
+    {
+        $user = $request->user();
 
-        $user = User::find($payload['user_id']);
-
-        if (! $user) {
-            return $this->ssoFailure('The Caraga Connect user account could not be found.');
-        }
-
-        Auth::login($user, true);
-        $request->session()->regenerate();
-        $request->session()->put([
-            'idp_access_token' => $payload['access_token'] ?? null,
-            'idp_refresh_token' => $payload['refresh_token'] ?? null,
-            'idp_expires_in' => $payload['expires_in'] ?? null,
-        ]);
-        $this->audit->log('auth.sso_login', $user, [], ['method' => 'caraga_connect'], $user->id);
-
-        if ($user->access_status !== 'approved') {
+        if ($user && $user->access_status !== 'approved') {
             return redirect()->route('access.request')
                 ->with('success', 'Caraga Connect sign-in successful. Please request your user-level access from the Super Admin.');
         }
@@ -107,58 +207,9 @@ class SSOController extends Controller
         return redirect()->intended(route('dashboard'));
     }
 
-    private function resolveUser(array $profile): User
+    private function shouldBypassMfaAuthentication(): bool
     {
-        $sub = $profile['sub'] ?? null;
-
-        if (! $sub) {
-            throw new \RuntimeException('SSO provider did not return a subject identifier.');
-        }
-
-        $email = $profile['email'] ?? null;
-        $username = $profile['preferred_username'] ?? null;
-        $idNumber = $profile['id_number'] ?? null;
-        $contactNumber = $this->normalizeContactNumber($profile['contact_number'] ?? null);
-
-        $user = User::where('sso_sub', $sub)->first()
-            ?? ($email ? User::where('email', $email)->first() : null)
-            ?? new User(['sso_sub' => $sub]);
-        $wasCreated = ! $user->exists;
-
-        $user->fill([
-            'sso_sub' => $user->sso_sub ?: $sub,
-            'name' => $profile['name'] ?? $username ?? 'Caraga Connect User',
-            'email' => $email ?: ($username ?: Str::slug($sub)).'@caraga-connect.local',
-            'username' => $username,
-            'id_number' => $idNumber,
-            'contact_number' => $contactNumber,
-            'mobile_no' => $contactNumber,
-            'office' => $user->office ?: config('services.cc_idp.default_office'),
-            'is_active' => true,
-            'mfa_enabled' => false,
-            'mfa_verified' => false,
-            'email_verified_at' => now(),
-        ]);
-
-        if ($wasCreated) {
-            $user->forceFill([
-                'password' => Hash::make(Str::random(48)),
-                'access_status' => 'pending',
-                'access_requested_at' => now(),
-            ]);
-        }
-
-        $user->save();
-
-        if ($wasCreated) {
-            $this->audit->log('user.registered_sso', $user, [], [
-                'email' => $user->email,
-                'username' => $user->username,
-                'access_status' => $user->access_status,
-            ], $user->id);
-        }
-
-        return $user;
+        return (bool) config('services.cc_idp.bypass_mfa', true);
     }
 
     private function ensureConfigured(): void
@@ -172,25 +223,6 @@ class SSOController extends Controller
 
     private function ssoFailure(string $message): RedirectResponse
     {
-        // This redirect may cross from the registered loopback callback to the
-        // Herd hostname, so a session flash would not be visible there.
         return redirect()->away(rtrim(config('app.url'), '/').'/login?sso_error='.urlencode($message));
-    }
-
-    private function normalizeContactNumber(?string $contactNumber): ?string
-    {
-        if (! $contactNumber) {
-            return null;
-        }
-
-        if (str_starts_with($contactNumber, '+63')) {
-            return $contactNumber;
-        }
-
-        if (str_starts_with($contactNumber, '09')) {
-            return preg_replace('/^09/', '+639', $contactNumber);
-        }
-
-        return $contactNumber;
     }
 }

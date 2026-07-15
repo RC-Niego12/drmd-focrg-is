@@ -4,6 +4,7 @@ use App\Http\Controllers\AccessManagementController;
 use App\Http\Controllers\AccessRequestController;
 use App\Http\Controllers\AuditTrailController;
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
+use App\Http\Controllers\Auth\MfaController;
 use App\Http\Controllers\Auth\SSOController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DispatchPlanController;
@@ -22,6 +23,7 @@ use App\Http\Controllers\PsgcController;
 use App\Http\Controllers\RequestController;
 use App\Http\Controllers\StandbyFundController;
 use App\Http\Controllers\WarehouseController;
+use App\Http\Middleware\EnsureMfaSatisfied;
 use App\Http\Middleware\EnsureUserAccessApproved;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -34,13 +36,23 @@ Route::middleware('guest')->group(function (): void {
     Route::get('sso/complete', [SSOController::class, 'complete'])->name('sso.complete');
 });
 
+// Protected by a temporary signed URL so e-PIRMA can fetch the PDF for signing.
+Route::get('/integrations/epirma/signed-documents/{document}', [EpirmaSigningController::class, 'serveSignedDocument'])
+    ->name('epirma.signed-document');
+
 // Protected by a single-use, hashed callback token rather than a browser
 // session so the external e-PIRMA service can complete the signing handoff.
 Route::match(['get', 'post'], '/integrations/epirma/requests/{assistanceRequest}/callback', [EpirmaSigningController::class, 'callback'])
     ->name('epirma.callback');
 
 Route::middleware('auth')->group(function (): void {
+    Route::get('mfa/setup', [MfaController::class, 'setup'])->name('mfa.setup');
+    Route::post('mfa/setup', [MfaController::class, 'storeSetup'])->name('mfa.setup.store');
+    Route::get('mfa/verify', [MfaController::class, 'verify'])->name('mfa.verify');
+    Route::post('mfa/verify', [MfaController::class, 'storeVerify'])->name('mfa.verify.store');
     Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])->name('logout');
+
+    Route::middleware(EnsureMfaSatisfied::class)->group(function (): void {
     Route::patch('/settings/theme', function (Request $request) {
         $validated = $request->validate([
             'theme_mode' => ['required', 'in:light,dark'],
@@ -95,6 +107,8 @@ Route::middleware('auth')->group(function (): void {
         Route::patch('/requests/{assistanceRequest}/complete-assessment', [RequestController::class, 'completeAssessment'])->name('requests.assessment.complete')->middleware('permission:encode requests');
         Route::patch('/requests/{assistanceRequest}/assessment-status', [RequestController::class, 'assessmentStatus'])->name('requests.assessment.status')->middleware('permission:encode requests');
         Route::post('/requests/{assistanceRequest}/epirma/sign', [EpirmaSigningController::class, 'start'])->name('requests.epirma.sign')->middleware('permission:encode requests');
+        Route::get('/requests/{assistanceRequest}/epirma/status', [EpirmaSigningController::class, 'latestSignedStatus'])->name('requests.epirma.status')->middleware('permission:encode requests');
+        Route::post('/requests/{assistanceRequest}/epirma/retry', [EpirmaSigningController::class, 'retrySigning'])->name('requests.epirma.retry')->middleware('permission:encode requests');
         Route::post('/requests/polish-assessment', [RequestController::class, 'polishAssessment'])->name('requests.assessment.polish')->middleware('permission:encode requests');
         Route::get('/requests/{assistanceRequest}/response-letter', [RequestController::class, 'responseLetter'])->name('requests.response-letter');
         Route::get('/requests/{assistanceRequest}/response-letter-pdf', [RequestController::class, 'responseLetterPdf'])->name('requests.response-letter-pdf');
@@ -141,6 +155,7 @@ Route::middleware('auth')->group(function (): void {
         Route::get('/standby-funds', [StandbyFundController::class, 'index'])->name('standby-funds.index')->middleware('permission:manage standby funds');
         Route::put('/standby-funds', [StandbyFundController::class, 'update'])->name('standby-funds.update')->middleware('permission:manage standby funds');
         Route::post('/standby-funds/sync-google-sheet', [StandbyFundController::class, 'sync'])->name('standby-funds.sync')->middleware('permission:manage standby funds');
+    });
     });
 });
 

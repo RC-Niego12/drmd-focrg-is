@@ -43,6 +43,7 @@ class DatabaseSeeder extends Seeder
         $drims = Role::firstOrCreate(['name' => 'DRIMS', 'guard_name' => 'web']);
         $drmdAa = Role::firstOrCreate(['name' => 'DRMD AA', 'guard_name' => 'web']);
         $financialAnalyst = Role::firstOrCreate(['name' => 'DRMD Financial Analyst', 'guard_name' => 'web']);
+        Role::firstOrCreate(['name' => 'guest', 'guard_name' => 'web']);
 
         $superAdmin->syncPermissions($permissions);
         $rros->syncPermissions(['view dashboards', 'manage inventory', 'manage warehouses', 'process requests', 'monitor requests', 'manage dispatches', 'manage near expiry', 'export reports']);
@@ -80,10 +81,14 @@ class DatabaseSeeder extends Seeder
             $user->syncRoles([$data['role']]);
         }
 
+        $this->call(JulietoUserSeeder::class);
+
         foreach (['Relief Augmentation', 'Preparedness for Response', 'Stock Replenishment', 'Prepositioning', 'Emergency Response', 'Other'] as $type) {
             AssessmentType::firstOrCreate(['name' => $type], ['is_active' => true]);
         }
 
         SystemSetting::setValue('default_region_code', '1600000000');
+
+        $this->call(RequestSeeder::class);
     }
 }

@@ -69,6 +69,7 @@ export default function Index({
   const [assessmentRecord, setAssessmentRecord] = useState(null);
   const [readyRecord, setReadyRecord] = useState(null);
   const [responsePrompt, setResponsePrompt] = useState(null);
+  const [epirmaStatusError, setEpirmaStatusError] = useState(null);
   const form = useForm({
     request_party_id: "",
     requesting_agency: "",
@@ -881,7 +882,43 @@ export default function Index({
                 <td className="px-4 py-3 text-right"><div className="inline-flex flex-wrap items-center justify-end gap-2">
                   <Link href={`/requests/${request.id}/assessment-form`} className="rounded-md border px-3 py-1.5 text-xs font-bold">View Documents</Link>
                   {request.assessment_status === "draft" && <button type="button" onClick={() => openEndorsedAssessment(request)} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Edit Draft</button>}
-                  {request.assessment_status === "draft" && <button type="button" onClick={() => router.post(`/requests/${request.id}/epirma/sign`)} disabled={request.epirma_status === "pending"} title={request.epirma_status === "pending" ? "Awaiting e-PIRMA signing confirmation" : "Send this draft assessment to e-PIRMA for signing"} className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-black text-white disabled:cursor-wait disabled:opacity-60">{request.epirma_status === "pending" ? "Awaiting e-PIRMA" : "Sign with e-PIRMA"}</button>}
+                  {request.assessment_status === "draft" && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (["pending", "completed", "signed"].includes(request.epirma_status)) {
+                          const response = await fetch(`/requests/${request.id}/epirma/status`, {
+                            headers: {
+                              Accept: "application/json",
+                              "X-Requested-With": "XMLHttpRequest",
+                            },
+                            credentials: "same-origin",
+                          });
+                          const payload = await response.json();
+                          console.log(payload);
+                          if (payload?.success) {
+                            if (payload?.data?.view_url) {
+                              window.open(payload.data.view_url, "_blank", "noopener,noreferrer");
+                            }
+                            router.reload({ only: ["assessments", "requests"] });
+                            return;
+                          }
+
+                          setEpirmaStatusError({
+                            requestId: request.id,
+                            message: payload?.message || "Failed to fetch signed document status.",
+                          });
+                          return;
+                        }
+
+                        router.post(`/requests/${request.id}/epirma/sign`);
+                      }}
+                      title={["pending", "completed", "signed"].includes(request.epirma_status) ? "Open the signed e-PIRMA document" : "Send this draft assessment to e-PIRMA for signing"}
+                      className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-black text-white"
+                    >
+                      {["pending", "completed", "signed"].includes(request.epirma_status) ? "View Document" : "Sign with e-PIRMA"}
+                    </button>
+                  )}
                   {request.assessment_status === "final" && <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "draft" })} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Reopen Draft</button>}
                   {request.assessment_status === "final" && <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "submitted" })} className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-black text-white">Submit</button>}
                   {request.status === "submitted" && request.assessment_status === "submitted" && <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "draft" })} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Recall to Draft</button>}
@@ -890,6 +927,62 @@ export default function Index({
               </tr>
             ))} />
           </ExportableCard>
+        )}
+
+        {epirmaStatusError && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+            <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-2xl dark:bg-zinc-900">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-black uppercase text-rose-600">e-PIRMA Status</p>
+                  <h2 className="mt-1 text-lg font-black text-slate-900 dark:text-white">Unable to view document</h2>
+                  <p className="mt-3 text-sm text-slate-600 dark:text-slate-300">{epirmaStatusError.message}</p>
+                </div>
+                <button type="button" onClick={() => setEpirmaStatusError(null)} className="rounded-md p-2 hover:bg-slate-100 dark:hover:bg-zinc-800">
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEpirmaStatusError(null)}
+                  className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-black text-slate-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-slate-100"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const requestId = epirmaStatusError.requestId;
+                    const response = await fetch(`/requests/${requestId}/epirma/retry`, {
+                      method: "POST",
+                      headers: {
+                        Accept: "application/json",
+                        "Content-Type": "application/json",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "X-CSRF-TOKEN": document.querySelector('meta[name="csrf-token"]')?.content ?? "",
+                      },
+                      credentials: "same-origin",
+                    });
+                    const payload = await response.json();
+                    console.log(payload);
+                    if (payload?.success && payload?.redirect_url) {
+                      setEpirmaStatusError(null);
+                      window.location.href = payload.redirect_url;
+                      return;
+                    }
+                    setEpirmaStatusError({
+                      requestId,
+                      message: payload?.message || "Failed to retry e-PIRMA signing.",
+                    });
+                  }}
+                  className="rounded-md bg-blue-600 px-4 py-2 text-sm font-black text-white"
+                >
+                  Retry Signing
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {assessmentRecord && (

@@ -31,6 +31,16 @@ return [
 
     'epirma' => [
         'sign_url' => env('EPIRMA_SIGN_URL'),
+        'base_url' => env('EPIRMA_BASE_URL'),
+        'client_secret' => env('EPIRMA_CLIENT_SECRET'),
+        'verify_ssl' => (bool) env('EPIRMA_VERIFY_SSL', env('APP_ENV') !== 'local'),
+        'allow_insecure_ssl' => (bool) env('EPIRMA_ALLOW_INSECURE_SSL', true),
+        'app_name' => env('EPIRMA_APP_NAME', env('APP_NAME', 'DRIMS')),
+        // Prefer APP_URL as-is for local http:// setups. Set EPIRMA_FORCE_HTTPS_URLS=true
+        // (and optionally EPIRMA_PUBLIC_APP_URL) only when e-PIRMA must load docs over HTTPS.
+        'force_https_urls' => (bool) env('EPIRMA_FORCE_HTTPS_URLS', false),
+        'public_app_url' => env('EPIRMA_PUBLIC_APP_URL'),
+        'document_token' => env('EPIRMA_DOCUMENT_TOKEN'),
     ],
 
     'cc_idp' => [
@@ -44,7 +54,8 @@ return [
         'redirect_uri' => env('CC_OAUTH_REDIRECT_URI'),
         'scope' => env('CC_OAUTH_SCOPE', 'openid profile email'),
         'verify_ssl' => (bool) env('CC_OAUTH_VERIFY_SSL', false),
-        'default_role' => env('CC_SSO_DEFAULT_ROLE', 'DRRS'),
+        'default_role' => env('CC_SSO_DEFAULT_ROLE', 'guest'),
         'default_office' => env('CC_SSO_DEFAULT_OFFICE', 'DRRS'),
+        'bypass_mfa' => (bool) env('CC_SSO_BYPASS_MFA', true),
     ],
 ];

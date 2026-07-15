@@ -59,7 +59,18 @@ it('keeps drafts under review and marks them final only after a verified e-PIRMA
         'assessment_status' => 'draft',
     ]);
 
-    config()->set('services.epirma.sign_url', 'https://epirma.example.test/sign');
+    config()->set('services.epirma.base_url', 'https://epirma.example.test');
+    config()->set('services.epirma.client_secret', 'test-secret');
+    config()->set('services.epirma.app_name', 'DRIMS');
+    config()->set('services.epirma.verify_ssl', true);
+    config()->set('services.epirma.allow_insecure_ssl', false);
+
+    Illuminate\Support\Facades\Http::fake([
+        'https://epirma.example.test/api/microservice/build-authorize' => Illuminate\Support\Facades\Http::response([
+            'success' => true,
+            'token' => 'epirma-auth-token',
+        ]),
+    ]);
 
     $direct = $this->actingAs($user)
         ->patch(route('requests.assessment.status', $record), ['assessment_status' => 'final']);
@@ -71,12 +82,19 @@ it('keeps drafts under review and marks them final only after a verified e-PIRMA
         ->post(route('requests.epirma.sign', $record))
         ->assertStatus(409)
         ->assertHeader('X-Inertia-Location');
-    parse_str((string) parse_url($handoff->headers->get('X-Inertia-Location'), PHP_URL_QUERY), $query);
-    expect($query)->toHaveKeys(['transaction_id', 'document_url', 'callback_url']);
 
-    $this->withHeader('X-Inertia', '')
-        ->get($query['callback_url'].'&status=signed&signature_reference=EPIRMA-SIG-001')
-        ->assertRedirect();
+    $location = $handoff->headers->get('X-Inertia-Location');
+    expect($location)->toContain('/microservice/documents');
+    parse_str((string) parse_url($location, PHP_URL_QUERY), $query);
+    expect($query)->toHaveKeys(['app_name', 'external_document_uuid', 'redirect_url', 'secret', 'token', 'document_url'])
+        ->and($query['token'])->toBe('epirma-auth-token')
+        ->and($query['app_name'])->toBe('DRIMS')
+        ->and(urldecode($query['redirect_url']))->toContain('/requests');
+
+    $this->actingAs($user)
+        ->withHeader('X-Inertia', '')
+        ->get($query['redirect_url'].(str_contains($query['redirect_url'], '?') ? '&' : '?').'status=signed&signature_reference=EPIRMA-SIG-001')
+        ->assertRedirect(url('/requests?default_tab=assessments'));
     expect($record->fresh()->status)->toBe('acted')
         ->and($record->fresh()->assessment_status)->toBe('final')
         ->and($record->fresh()->epirma_status)->toBe('signed')

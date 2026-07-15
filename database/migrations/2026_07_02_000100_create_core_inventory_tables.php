@@ -46,7 +46,10 @@ return new class extends Migration
             $table->string('current_status')->default('available')->index();
             $table->timestamps();
             $table->softDeletes();
-            $table->unique(['inventory_item_id', 'warehouse_id', 'batch_number']);
+            $table->unique(
+                ['inventory_item_id', 'warehouse_id', 'batch_number'],
+                'inv_batches_item_wh_batch_unique'
+            );
         });
 
         Schema::create('inventory_transactions', function (Blueprint $table): void {
@@ -56,7 +59,7 @@ return new class extends Migration
             $table->string('type')->index();
             $table->decimal('quantity', 14, 2);
             $table->decimal('balance_after', 14, 2)->default(0);
-            $table->nullableMorphs('transactionable');
+            $table->nullableMorphs('transactionable', 'inv_txn_transactionable_index');
             $table->text('remarks')->nullable();
             $table->timestamps();
         });
