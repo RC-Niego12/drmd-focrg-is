@@ -908,12 +908,12 @@ export default function AppLayout({ title, children }) {
         </header>
         <main className="min-w-0 px-4 pb-6 pt-28">
           {flash?.success && (
-            <div className="mb-4 rounded-md border border-brand-100 bg-brand-50 px-4 py-3 text-sm text-brand-700">
+            <div className="mb-4 rounded-md border border-brand-100 bg-brand-50 px-4 py-3 text-sm text-brand-700 dark:border-brand-800 dark:bg-brand-950/50 dark:text-brand-100">
               {flash.success}
             </div>
           )}
           {flash?.error && (
-            <div className="mb-4 rounded-md border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <div className="mb-4 rounded-md border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
               {flash.error}
             </div>
           )}

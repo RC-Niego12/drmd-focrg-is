@@ -31,7 +31,7 @@ export default function Index({ standbyFund, defaultSheetUrl, defaultCell }) {
 
             <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
                 <ExportableCard id="standby-current" title="Current Standby Funds" className="relative scroll-mt-28 overflow-hidden p-6">
-                    <div className="absolute -right-8 -top-10 h-36 w-36 rounded-full bg-brand-50 dark:bg-brand-950/50" />
+                    <div className="absolute -right-8 -top-10 h-36 w-36 rounded-full bg-brand-50 dark:bg-brand-800/30" />
                     <div className="relative flex items-start justify-between gap-5">
                         <div>
                             <p className="text-xs font-black uppercase tracking-wide text-slate-500 dark:text-zinc-400">Current Standby Funds</p>
@@ -43,7 +43,7 @@ export default function Index({ standbyFund, defaultSheetUrl, defaultCell }) {
                                 Source: {standbyFund?.source || 'System'}{standbyFund?.synced_at ? ` · Last synced ${formatDateTime(standbyFund.synced_at)}` : ''}
                             </p>
                         </div>
-                        <div className="flex h-16 w-16 items-center justify-center rounded-md bg-white text-brand-700 shadow-sm ring-1 ring-slate-200 dark:bg-transparent dark:text-brand-100 dark:ring-brand-300/40">
+                        <div className="flex h-16 w-16 items-center justify-center rounded-md bg-brand-50 text-brand-700 shadow-sm ring-1 ring-brand-100 dark:bg-brand-900 dark:text-brand-200 dark:ring-brand-700">
                             <BadgeDollarSign className="h-8 w-8" />
                         </div>
                     </div>

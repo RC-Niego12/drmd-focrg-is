@@ -387,7 +387,7 @@ function FamilyFoodPackReport({ data }) {
                 <div className="relative z-30 flex flex-none flex-col">
                     <h3 className="mb-2 text-sm font-black">Family Food Packs per Province</h3>
                     <div className="relative overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-                        <div className="absolute -right-8 -top-10 h-24 w-24 rounded-full bg-brand-50 dark:bg-brand-950/50" />
+                        <div className="absolute -right-8 -top-10 h-24 w-24 rounded-full bg-brand-50 dark:bg-brand-800/30" />
                         <table className="relative w-full table-fixed text-[9px] sm:text-[11px]">
                             <thead className="bg-slate-100 text-left text-[8px] uppercase text-slate-600 sm:text-[10px] dark:bg-zinc-800 dark:text-zinc-300">
                                 <tr>
@@ -423,7 +423,7 @@ function FamilyFoodPackReport({ data }) {
 function ThemeKpi({ title, value }) {
     return (
         <div className="relative overflow-hidden rounded-md border border-slate-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-            <div className="absolute -right-8 -top-10 h-24 w-24 rounded-full bg-brand-50 dark:bg-brand-950/50" />
+            <div className="absolute -right-8 -top-10 h-24 w-24 rounded-full bg-brand-50 dark:bg-brand-800/30" />
             <p className="relative text-xs font-black uppercase tracking-wide text-slate-500 dark:text-zinc-400">{title}</p>
             <p className="relative mt-2 break-words text-[1.05rem] font-black tracking-normal text-slate-950 sm:text-[1.3rem] dark:text-white">{value}</p>
         </div>
@@ -734,7 +734,7 @@ function StandbyStockpileSummary({ summary }) {
 function SummaryTile({ label, value, emphasis = false, compact = false, className = '' }) {
     return (
         <div className={`relative overflow-hidden rounded-md border border-slate-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 ${className}`}>
-            <div className="absolute -right-8 -top-10 h-24 w-24 rounded-full bg-brand-50 dark:bg-brand-950/50" />
+            <div className="absolute -right-8 -top-10 h-24 w-24 rounded-full bg-brand-50 dark:bg-brand-800/30" />
             <p className="relative text-[10px] font-black uppercase tracking-wide text-slate-500 dark:text-zinc-400">{label}</p>
             <p className={`relative mt-2 break-words font-black tracking-normal text-slate-950 dark:text-white ${emphasis ? 'text-3xl' : compact ? 'text-xl' : 'text-2xl'}`}>{value}</p>
         </div>
@@ -859,7 +859,7 @@ function FoodItemWarehouseSummary({ title, description, summary, showHeader = tr
 function ThemePill({ label, value }) {
     return (
         <div className="relative overflow-hidden rounded-md border border-slate-200 bg-white px-4 py-3 text-right shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-            <div className="absolute -right-8 -top-10 h-20 w-20 rounded-full bg-brand-50 dark:bg-brand-950/50" />
+            <div className="absolute -right-8 -top-10 h-20 w-20 rounded-full bg-brand-50 dark:bg-brand-800/30" />
             <p className="relative text-[10px] font-black uppercase tracking-wide text-slate-500 dark:text-zinc-400">{label}</p>
             <p className="relative mt-1 text-xl font-black tracking-normal text-slate-950 dark:text-white">{value}</p>
         </div>
@@ -957,7 +957,7 @@ function MapCallout({ id, label, value, position, align = 'left' }) {
             className="absolute z-20 w-40 overflow-hidden rounded-md border border-slate-200 bg-white p-2.5 shadow-lg dark:border-zinc-800 dark:bg-zinc-900"
             style={position}
         >
-            <div className="absolute -right-8 -top-10 h-20 w-20 rounded-full bg-brand-50 dark:bg-brand-950/50" />
+            <div className="absolute -right-8 -top-10 h-20 w-20 rounded-full bg-brand-50 dark:bg-brand-800/30" />
             <p className={`relative text-[10px] font-black uppercase leading-tight tracking-wide text-brand-700 dark:text-brand-200 ${align === 'right' ? 'text-right' : ''}`}>{label}</p>
             <p className={`relative mt-1.5 text-[10px] font-semibold text-slate-500 dark:text-zinc-400 ${align === 'right' ? 'text-right' : ''}`}>Current No. of FFPs</p>
             <p className={`relative text-xl font-black tracking-normal text-slate-950 dark:text-white ${align === 'right' ? 'text-right' : ''}`}>{formatNumber(value)}</p>
@@ -976,14 +976,14 @@ function HeroMetric({ title, value, subtext, icon: Icon, showExport = true }) {
                         <ExportButtons targetRef={metricRef} filename={exportFilename(title)} label={title} />
                     </div>
                 )}
-                <div className="absolute -right-8 -top-10 h-36 w-36 rounded-full bg-brand-50 dark:bg-brand-950/50" />
+                <div className="absolute -right-8 -top-10 h-36 w-36 rounded-full bg-brand-50 dark:bg-brand-800/30" />
                 <div className="relative flex items-center justify-between gap-4">
                     <div>
                         <p className="text-xs font-black uppercase tracking-wide text-slate-500 dark:text-zinc-400">{title}</p>
                         <p className="mt-2 text-4xl font-black tracking-normal text-slate-950 dark:text-white">{formatNumber(value)}</p>
                         <p className="mt-2 text-sm font-semibold text-slate-500 dark:text-zinc-400">{subtext}</p>
                     </div>
-                    <div className="flex h-16 w-16 items-center justify-center rounded-md bg-white text-brand-700 shadow-sm ring-1 ring-slate-200 dark:bg-transparent dark:text-brand-100 dark:ring-brand-300/40">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-md bg-brand-50 text-brand-700 shadow-sm ring-1 ring-brand-100 dark:bg-brand-900 dark:text-brand-200 dark:ring-brand-700">
                         <Icon className="h-8 w-8" />
                     </div>
                 </div>

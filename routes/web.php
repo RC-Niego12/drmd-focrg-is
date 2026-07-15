@@ -52,7 +52,6 @@ Route::middleware('auth')->group(function (): void {
     Route::post('mfa/verify', [MfaController::class, 'storeVerify'])->name('mfa.verify.store');
     Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])->name('logout');
 
-    Route::middleware(EnsureMfaSatisfied::class)->group(function (): void {
     Route::patch('/settings/theme', function (Request $request) {
         $validated = $request->validate([
             'theme_mode' => ['required', 'in:light,dark'],
@@ -63,6 +62,7 @@ Route::middleware('auth')->group(function (): void {
         return back();
     })->name('settings.theme');
 
+    Route::middleware(EnsureMfaSatisfied::class)->group(function (): void {
     Route::get('/access/request', [AccessRequestController::class, 'show'])->name('access.request');
     Route::post('/access/request', [AccessRequestController::class, 'store'])->name('access.request.store');
 

@@ -55,7 +55,7 @@ export function DocumentDrnFields({ parts, onChange, prefixOptions = [], compact
       </label>)}
       <datalist id={listId}>{prefixOptions.map((prefix) => <option key={prefix} value={prefix} />)}</datalist>
     </div>
-    {!compact && <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 font-mono text-sm font-bold text-emerald-900">
+    {!compact && <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 font-mono text-sm font-bold text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-100">
       {composeDocumentDrn(parts)}
     </div>}
   </div>;

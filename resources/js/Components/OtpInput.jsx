@@ -117,10 +117,10 @@ export default function OtpInput({
                     onPaste={handlePaste}
                     onFocus={(event) => event.target.select()}
                     className={[
-                        'h-12 w-10 rounded-md border-2 bg-white text-center font-serif text-xl font-bold text-[#0A2A6B] shadow-sm outline-none transition sm:h-14 sm:w-12 sm:text-2xl',
+                        'h-12 w-10 rounded-md border-2 bg-white text-center font-serif text-xl font-bold text-brand-800 shadow-sm outline-none transition dark:bg-zinc-950 dark:text-brand-100 sm:h-14 sm:w-12 sm:text-2xl',
                         error
-                            ? 'border-red-500 focus:border-red-600 focus:ring-2 focus:ring-red-200'
-                            : 'border-[#0A2A6B]/40 focus:border-[#CE1126] focus:ring-2 focus:ring-[#FCD116]/70',
+                            ? 'border-red-500 focus:border-red-600 focus:ring-2 focus:ring-red-200 dark:border-red-400 dark:focus:ring-red-900'
+                            : 'border-brand-300 focus:border-brand-600 focus:ring-2 focus:ring-brand-100 dark:border-brand-700 dark:focus:border-brand-400 dark:focus:ring-brand-900/50',
                         disabled ? 'opacity-60' : '',
                     ].join(' ')}
                 />
