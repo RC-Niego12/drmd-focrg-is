@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AccessManagementController;
 use App\Http\Controllers\AccessRequestController;
+use App\Http\Controllers\AiRogerController;
 use App\Http\Controllers\AuditTrailController;
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\Auth\MfaController;
@@ -9,6 +10,7 @@ use App\Http\Controllers\Auth\SSOController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DispatchPlanController;
 use App\Http\Controllers\DistributionPlanController;
+use App\Http\Controllers\DrmdLguRoutingController;
 use App\Http\Controllers\DrmdAaRequestController;
 use App\Http\Controllers\DromicReportController;
 use App\Http\Controllers\EpirmaSigningController;
@@ -17,11 +19,15 @@ use App\Http\Controllers\FniIssuanceController;
 use App\Http\Controllers\FniLibraryController;
 use App\Http\Controllers\InventoryController;
 use App\Http\Controllers\LguDirectoryController;
+use App\Http\Controllers\LguDromicRequestController;
+use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\PopulationController;
+use App\Http\Controllers\UserProfileController;
 use App\Http\Controllers\PsgcAddressController;
 use App\Http\Controllers\PsgcController;
 use App\Http\Controllers\RequestController;
 use App\Http\Controllers\StandbyFundController;
+use App\Http\Controllers\SystemMessageController;
 use App\Http\Controllers\WarehouseController;
 use App\Http\Middleware\EnsureMfaSatisfied;
 use App\Http\Middleware\EnsureUserAccessApproved;
@@ -65,7 +71,14 @@ Route::middleware('auth')->group(function (): void {
     Route::middleware(EnsureMfaSatisfied::class)->group(function (): void {
     Route::get('/access/request', [AccessRequestController::class, 'show'])->name('access.request');
     Route::post('/access/request', [AccessRequestController::class, 'store'])->name('access.request.store');
-
+    Route::get('/notifications', [NotificationController::class, 'index'])->name('notifications.index');
+    Route::patch('/notifications/{notification}/read', [NotificationController::class, 'read'])->name('notifications.read');
+    Route::get('/messages', [SystemMessageController::class, 'index'])->name('messages.index');
+    Route::post('/messages', [SystemMessageController::class, 'store'])->name('messages.store');
+    Route::patch('/messages/{message}/read', [SystemMessageController::class, 'read'])->name('messages.read');
+    Route::post('/ai-roger/chat', [AiRogerController::class, 'chat'])->name('ai-roger.chat');
+    Route::post('/profile/myportal/sync', [UserProfileController::class, 'syncMyPortal'])->name('profile.myportal.sync');
+    Route::get('/profile/photo', [UserProfileController::class, 'photo'])->name('profile.photo');
     Route::middleware(EnsureUserAccessApproved::class)->group(function (): void {
         Route::get('/', DashboardController::class)->name('dashboard');
         Route::get('/dashboard', DashboardController::class);
@@ -99,6 +112,15 @@ Route::middleware('auth')->group(function (): void {
         Route::post('/drmd-aa/requests', [DrmdAaRequestController::class, 'store'])->name('drmd-aa.requests.store')->middleware('permission:submit drmd aa requests');
         Route::get('/drmd-aa/proposals', [DrmdAaRequestController::class, 'proposals'])->name('drmd-aa.proposals.index')->middleware('permission:submit drmd aa requests');
         Route::post('/drmd-aa/proposals', [DrmdAaRequestController::class, 'storeProposal'])->name('drmd-aa.proposals.store')->middleware('permission:submit drmd aa requests');
+        Route::get('/lgu/dromic-requests', [LguDromicRequestController::class, 'index'])->name('lgu.dromic-requests.index')->middleware('permission:submit lgu dromic requests');
+        Route::post('/lgu/dromic-requests', [LguDromicRequestController::class, 'store'])->name('lgu.dromic-requests.store')->middleware('permission:submit lgu dromic requests');
+        Route::post('/lgu/dromic-requests/polish', [LguDromicRequestController::class, 'polish'])->name('lgu.dromic-requests.polish')->middleware('permission:submit lgu dromic requests');
+        Route::get('/lgu/dromic-requests/{assistanceRequest}/pdf', [LguDromicRequestController::class, 'pdf'])->name('lgu.dromic-requests.pdf');
+        Route::get('/drmd-aa/lgu-intake', [DrmdLguRoutingController::class, 'aaIndex'])->name('drmd-aa.lgu-intake.index')->middleware('permission:route lgu dromic requests');
+        Route::patch('/drmd-aa/lgu-intake/{assistanceRequest}/chief', [DrmdLguRoutingController::class, 'routeToChief'])->name('drmd-aa.lgu-intake.route-chief')->middleware('permission:route lgu dromic requests');
+        Route::patch('/drmd-aa/lgu-intake/{assistanceRequest}/drrs', [DrmdLguRoutingController::class, 'routeToDrrs'])->name('drmd-aa.lgu-intake.route-drrs')->middleware('permission:route lgu dromic requests');
+        Route::get('/drmd-chief/lgu-intake', [DrmdLguRoutingController::class, 'chiefIndex'])->name('drmd-chief.lgu-intake.index')->middleware('permission:route lgu dromic requests');
+        Route::patch('/drmd-chief/lgu-intake/{assistanceRequest}/directive', [DrmdLguRoutingController::class, 'chiefDirective'])->name('drmd-chief.lgu-intake.directive')->middleware('permission:route lgu dromic requests');
         Route::post('/requests/{assistanceRequest}/decision', [RequestController::class, 'approve'])->name('requests.decision')->middleware('permission:process requests');
         Route::get('/requests/{assistanceRequest}/assessment-form', [RequestController::class, 'assessmentForm'])->name('requests.assessment');
         Route::get('/requests/{assistanceRequest}/source-document', [RequestController::class, 'sourceDocument'])->name('requests.source-document')->middleware('permission:submit drmd aa requests|encode requests|monitor requests|process requests');
@@ -134,7 +156,12 @@ Route::middleware('auth')->group(function (): void {
 
         Route::get('/audit-trail', AuditTrailController::class)->name('audit-trail.index')->middleware('permission:view audit logs');
         Route::get('/access-management', [AccessManagementController::class, 'index'])->name('access-management.index')->middleware('permission:manage users');
+        Route::post('/access-management/super-admin', [AccessManagementController::class, 'assignSuperAdmin'])->name('access-management.super-admin')->middleware('permission:manage users');
+        Route::post('/access-management/{user}/restore', [AccessManagementController::class, 'restore'])->name('access-management.restore')->middleware('permission:manage users')->whereNumber('user');
+        Route::delete('/access-management/{user}/force', [AccessManagementController::class, 'forceDelete'])->name('access-management.force-delete')->middleware('permission:manage users')->whereNumber('user');
         Route::patch('/access-management/{user}', [AccessManagementController::class, 'update'])->name('access-management.update')->middleware('permission:manage users');
+        Route::delete('/access-management/{user}', [AccessManagementController::class, 'destroy'])->name('access-management.destroy')->middleware('permission:manage users');
+        Route::post('/access-management/{user}/decision', [AccessManagementController::class, 'decide'])->name('access-management.decision')->middleware('permission:manage users');
         Route::get('/lgu-library', [LguDirectoryController::class, 'index'])->name('lgu-library.index')->middleware('permission:manage users');
         Route::post('/lgu-library/sync', [LguDirectoryController::class, 'sync'])->name('lgu-library.sync')->middleware('permission:manage users');
         Route::post('/lgu-library/sync-preview', [LguDirectoryController::class, 'preview'])->name('lgu-library.preview')->middleware('permission:manage users');

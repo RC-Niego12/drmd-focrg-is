@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\AssistanceRequest;
 use App\Models\DromicReport;
 use App\Services\AuditLogger;
+use App\Services\WorkflowNotificationService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -25,7 +26,7 @@ class DromicReportController extends Controller
         ]);
     }
 
-    public function store(Request $request, AuditLogger $audit): RedirectResponse
+    public function store(Request $request, AuditLogger $audit, WorkflowNotificationService $workflowNotifications): RedirectResponse
     {
         abort_unless($request->user()?->can('manage dromic reports'), 403);
 
@@ -57,6 +58,7 @@ class DromicReportController extends Controller
         ]);
 
         $audit->log('dromic_report.created', $report, [], $report->toArray());
+        $workflowNotifications->notifyDromicCreated($assistanceRequest->fresh(['encoder']));
 
         return back()->with('success', 'DROMIC report created.');
     }

@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 
 class CheckCaragaConnectSSO extends Command
@@ -38,9 +39,18 @@ class CheckCaragaConnectSSO extends Command
             'code_challenge_method' => 'S256',
         ]);
 
-        $response = Http::when(! config('services.cc_idp.verify_ssl'), fn ($http) => $http->withoutVerifying())
-            ->withOptions(['allow_redirects' => false])
-            ->get($url);
+        try {
+            $response = Http::when(! config('services.cc_idp.verify_ssl'), fn ($http) => $http->withoutVerifying())
+                ->withOptions(['allow_redirects' => false])
+                ->get($url);
+        } catch (ConnectionException $exception) {
+            $this->error('Could not connect to the configured Caraga Connect host.');
+            $this->warn($exception->getMessage());
+            $this->line('Confirm that you are connected to the DSWD/VPN network or that DNS can resolve:');
+            $this->line(parse_url($authorizeUrl, PHP_URL_HOST) ?: $authorizeUrl);
+
+            return self::FAILURE;
+        }
 
         $body = $response->body();
 

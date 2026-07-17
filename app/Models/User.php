@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
@@ -25,6 +26,9 @@ class User extends Authenticatable
         'office',
         'position',
         'designation',
+        'area_of_assignment',
+        'employment_status',
+        'sso_profile_payload',
         'contact_number',
         'mobile_no',
         'avatar',
@@ -37,6 +41,11 @@ class User extends Authenticatable
         'access_requested_at',
         'access_approved_at',
         'access_approved_by',
+        'access_response_message',
+        'access_decided_at',
+        'lgu_psgc_code',
+        'lgu_level',
+        'lgu_name',
     ];
 
     protected $hidden = [
@@ -55,6 +64,18 @@ class User extends Authenticatable
             'mfa_verified' => 'boolean',
             'access_requested_at' => 'datetime',
             'access_approved_at' => 'datetime',
+            'access_decided_at' => 'datetime',
+            'sso_profile_payload' => 'array',
         ];
+    }
+
+    public function sentSystemMessages(): HasMany
+    {
+        return $this->hasMany(SystemMessage::class, 'sender_id');
+    }
+
+    public function receivedSystemMessages(): HasMany
+    {
+        return $this->hasMany(SystemMessage::class, 'recipient_id');
     }
 }

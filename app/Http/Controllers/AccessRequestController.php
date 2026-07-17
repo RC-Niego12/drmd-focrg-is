@@ -4,15 +4,20 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Services\AuditLogger;
+use App\Services\AccessNotificationCenter;
+use App\Notifications\AccessRequestedNotification;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
-use Spatie\Permission\Models\Role;
+use Illuminate\Validation\Rule;
 
 class AccessRequestController extends Controller
 {
-    public function __construct(private readonly AuditLogger $audit) {}
+    public function __construct(
+        private readonly AuditLogger $audit,
+        private readonly AccessNotificationCenter $notificationCenter,
+    ) {}
 
     public function show(Request $request): Response
     {
@@ -26,20 +31,17 @@ class AccessRequestController extends Controller
                 'approved_at' => $user->access_approved_at?->toDateTimeString(),
                 'assigned_role' => $user->getRoleNames()->first(),
                 'home_url' => route('dashboard'),
+                'response_message' => $user->access_response_message,
+                'decided_at' => $user->access_decided_at?->toDateTimeString(),
             ],
-            'roleOptions' => Role::query()
-                ->whereIn('name', ['RROS', 'DRRS', 'DRIMS', 'DRMD AA', 'DRMD Financial Analyst'])
-                ->orderByRaw("case name when 'RROS' then 0 when 'DRRS' then 1 when 'DRIMS' then 2 when 'DRMD AA' then 3 when 'DRMD Financial Analyst' then 4 else 5 end")
-                ->pluck('name')
-                ->map(fn (string $role): array => ['value' => $role, 'label' => $role])
-                ->values(),
+            'roleOptions' => $this->notificationCenter->roleOptions(),
         ]);
     }
 
     public function store(Request $request): RedirectResponse
     {
         $validated = $request->validate([
-            'requested_role' => ['required', 'string', 'exists:roles,name'],
+            'requested_role' => ['required', 'string', Rule::in(AccessNotificationCenter::REQUESTABLE_ROLES)],
         ]);
 
         $user = $request->user();
@@ -49,9 +51,16 @@ class AccessRequestController extends Controller
             'access_status' => $user->access_status === 'approved' ? 'approved' : 'pending',
             'requested_role' => $validated['requested_role'],
             'access_requested_at' => now(),
+            'access_response_message' => null,
+            'access_decided_at' => null,
         ]);
 
         $this->audit->log('access.requested', $user, $old, $user->only(['access_status', 'requested_role', 'access_requested_at']), $user->id);
+
+        User::role('Super Admin')
+            ->where('is_active', true)
+            ->get()
+            ->each(fn (User $admin) => $admin->notify(new AccessRequestedNotification($user->fresh())));
 
         return back()->with('success', 'Access request submitted. Please wait for the Super Admin to grant your user level.');
     }

@@ -20,6 +20,7 @@ class AssistanceRequest extends Model
         'incident_id',
         'assessment_type_id',
         'encoded_by',
+        'lgu_submitted_by',
         'request_party_id',
         'requesting_agency',
         'lgu',
@@ -36,12 +37,15 @@ class AssistanceRequest extends Model
         'recommendations',
         'remarks',
         'status',
+        'lgu_routing_status',
         'submitted_at',
         'completed_at',
         'date_received_by_drmd', 'request_drn', 'office_agency_details', 'endorsed_to_drrs', 'date_endorsed_to_drrs',
         'incident_details', 'incident_count', 'response_drn', 'assessment_drn', 'source_document_url', 'response_letter_url',
         'coordinated_with_rros', 'date_coordinated_with_rros', 'requester_position', 'requester_address', 'contact_number',
         'affected_families', 'assigned_social_worker',
+        'lgu_dromic_payload', 'lgu_dromic_narrative', 'drmd_aa_remarks', 'drmd_aa_routed_by', 'drmd_aa_routed_at',
+        'drmd_chief_remarks', 'drmd_chief_routed_by', 'drmd_chief_routed_at', 'drmd_assigned_to', 'drmd_assigned_section',
         'epirma_status', 'epirma_transaction_id', 'epirma_callback_token', 'epirma_signature_reference', 'epirma_signed_at',
     ];
 
@@ -54,6 +58,9 @@ class AssistanceRequest extends Model
             'date_received_by_drmd' => 'date', 'date_endorsed_to_drrs' => 'date', 'date_coordinated_with_rros' => 'date',
             'endorsed_to_drrs' => 'boolean', 'coordinated_with_rros' => 'boolean',
             'assessment_form_data' => 'array',
+            'lgu_dromic_payload' => 'array',
+            'drmd_aa_routed_at' => 'datetime',
+            'drmd_chief_routed_at' => 'datetime',
             'epirma_signed_at' => 'datetime',
         ];
     }
@@ -76,6 +83,16 @@ class AssistanceRequest extends Model
     public function encoder(): BelongsTo
     {
         return $this->belongsTo(User::class, 'encoded_by');
+    }
+
+    public function lguSubmitter(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_submitted_by');
+    }
+
+    public function drmdAssignedUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'drmd_assigned_to');
     }
 
     public function requestParty(): BelongsTo

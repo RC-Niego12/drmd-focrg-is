@@ -6,11 +6,12 @@ use App\Models\User;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 
 uses(RefreshDatabase::class);
 
-it('completes Caraga Connect through a host-independent one-time handoff', function (): void {
+it('completes Caraga Connect during the OAuth callback', function (): void {
     config()->set('app.url', 'https://drmd-focrg-is.test');
     config()->set('services.cc_idp', [
         'client_id' => '158',
@@ -24,12 +25,17 @@ it('completes Caraga Connect through a host-independent one-time handoff', funct
         'default_office' => 'DRRS',
     ]);
     Http::fake([
+        '*/sso/login*' => Http::response('<html>Authorization Request</html>'),
         '*/oauth/token' => Http::response(['access_token' => 'access-token', 'refresh_token' => 'refresh-token', 'expires_in' => 3600]),
         '*/api/userinfo' => Http::response([
             'sub' => 'cc-user-001',
             'name' => 'Caraga Connect User',
             'email' => 'caraga-connect@example.test',
             'preferred_username' => 'cc.user',
+            'id_number' => '16-00001',
+            'contact_number' => '09170000000',
+            'mobile_no' => '09171111111',
+            'image' => 'https://caraga-connect-api-staging.dswd.gov.ph/avatar.png',
         ]),
     ]);
 
@@ -38,11 +44,237 @@ it('completes Caraga Connect through a host-independent one-time handoff', funct
     expect($authorizeQuery['redirect_uri'])->toBe('http://127.0.0.1:8010/login-sso/callback');
 
     $callback = $this->get(route('sso.callback', ['state' => $authorizeQuery['state'], 'code' => 'authorization-code']))
-        ->assertRedirect();
-    expect($callback->headers->get('Location'))->toStartWith('https://drmd-focrg-is.test/sso/complete?token=');
-
-    $this->get($callback->headers->get('Location'))->assertRedirect(route('access.request'));
+        ->assertRedirect(route('access.request'));
     $this->assertAuthenticated();
+    $user = User::where('username', 'cc.user')->firstOrFail();
+    expect($user->id_number)->toBe('16-00001')
+        ->and($user->office)->toBe('DRRS')
+        ->and($user->position)->toBeNull()
+        ->and($user->designation)->toBeNull()
+        ->and($user->area_of_assignment)->toBeNull()
+        ->and($user->employment_status)->toBeNull()
+        ->and($user->contact_number)->toBe('09170000000')
+        ->and($user->mobile_no)->toBe('09171111111')
+        ->and($user->avatar)->toBe('https://caraga-connect-api-staging.dswd.gov.ph/avatar.png')
+        ->and(data_get($user->sso_profile_payload, 'sso.id_number'))->toBe('16-00001');
+});
+
+it('does not erase existing employee profile fields when SSO returns only basic identity', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    config()->set('app.url', 'https://drmd-focrg-is.test');
+    config()->set('services.cc_idp', [
+        'client_id' => '158',
+        'client_secret' => 'test-secret',
+        'authorize_url' => 'https://caraga-connect-dev.dswd.gov.ph/sso/login',
+        'token_url' => 'https://caraga-connect-dev.dswd.gov.ph/oauth/token',
+        'userinfo_url' => 'https://caraga-connect-dev.dswd.gov.ph/api/userinfo',
+        'redirect_uri' => 'https://drmd-focrg-is.test/login-sso/callback',
+        'scope' => 'basic',
+        'verify_ssl' => false,
+        'default_office' => 'DRRS',
+        'bypass_mfa' => true,
+    ]);
+
+    $user = User::where('email', 'drmd-aa@example.test')->firstOrFail();
+    $user->forceFill([
+        'sso_sub' => '117',
+        'username' => 'rlongue',
+        'email' => 'rlongue@dswd.gov.ph',
+        'name' => 'Roger L. Ongue',
+        'id_number' => '16-11720',
+        'office' => 'Disaster Response Information Management Section',
+        'position' => 'Project Development Officer II',
+        'designation' => 'DRIMS System Developer',
+        'area_of_assignment' => 'DRMD - DRIMS',
+        'employment_status' => 'Contract of Service',
+        'avatar' => 'https://caraga-connect-dev.dswd.gov.ph/storage/employees/rlongue.jpg',
+        'contact_number' => '09510914209',
+    ])->save();
+
+    Http::fake([
+        '*/sso/login*' => Http::response('<html>Authorization Request</html>'),
+        '*/oauth/token' => Http::response(['access_token' => 'access-token', 'refresh_token' => 'refresh-token', 'expires_in' => 3600]),
+        '*/api/userinfo' => Http::response([
+            'sub' => '117',
+            'name' => 'Roger L. Ongue',
+            'email' => 'rlongue@dswd.gov.ph',
+            'preferred_username' => 'rlongue',
+            'id_number' => '16-11720',
+            'contact_number' => '09510914209',
+        ]),
+        '*' => Http::response([], 404),
+    ]);
+
+    $authorization = $this->get(route('sso.login'))->assertRedirect();
+    parse_str((string) parse_url($authorization->headers->get('Location'), PHP_URL_QUERY), $authorizeQuery);
+    $this->get(route('sso.callback', ['state' => $authorizeQuery['state'], 'code' => 'authorization-code']))
+        ->assertRedirect(route('dashboard'));
+
+    $user->refresh();
+    expect($user->office)->toBe('Disaster Response Information Management Section')
+        ->and($user->position)->toBe('Project Development Officer II')
+        ->and($user->designation)->toBe('DRIMS System Developer')
+        ->and($user->area_of_assignment)->toBe('DRMD - DRIMS')
+        ->and($user->employment_status)->toBe('Contract of Service')
+        ->and($user->avatar)->toBe('https://caraga-connect-dev.dswd.gov.ph/storage/employees/rlongue.jpg')
+        ->and($user->contact_number)->toBe('09510914209');
+});
+
+it('returns to login when Caraga Connect rejects the configured callback', function (): void {
+    config()->set('app.url', 'https://drmd-focrg-is.test');
+    config()->set('services.cc_idp', [
+        'client_id' => '189',
+        'client_secret' => 'test-secret',
+        'authorize_url' => 'https://caraga-connect.dswd.gov.ph/sso/login',
+        'token_url' => 'https://caraga-connect.dswd.gov.ph/oauth/token',
+        'userinfo_url' => 'https://caraga-connect.dswd.gov.ph/api/userinfo',
+        'redirect_uri' => 'https://drmd-focrg-is.test/login-sso/callback',
+        'scope' => 'basic',
+        'verify_ssl' => false,
+        'default_office' => 'DRRS',
+        'bypass_mfa' => false,
+    ]);
+    Http::fake([
+        '*/sso/login*' => Http::response('SSO Access Denied - System Not Registered or Revoked'),
+    ]);
+
+    $this->get(route('sso.login'))
+        ->assertRedirect('https://drmd-focrg-is.test/login?sso_error='.urlencode('Caraga Connect rejected this SSO client or callback URL. Please ask Caraga Connect admin/RICTMS to register this exact redirect URI: https://drmd-focrg-is.test/login-sso/callback'));
+});
+
+it('refreshes the employee profile through the documented MyPortal API token flow', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    config()->set('services.cc_idp.myportal_login_url', 'https://caraga-connect-dev.dswd.gov.ph/api/v1/staff/login');
+    config()->set('services.cc_idp.myportal_me_details_url', 'https://caraga-connect-dev.dswd.gov.ph/api/v1/staff/portal/me/details');
+    config()->set('services.cc_idp.myportal_access_token', null);
+    config()->set('services.cc_idp.myportal_username', 'rlongue');
+    config()->set('services.cc_idp.myportal_password', 'portal-passkey');
+    config()->set('services.cc_idp.verify_ssl', false);
+    Cache::forget('myportal:staff-token:'.sha1('https://caraga-connect-dev.dswd.gov.ph/api/v1/staff/login|rlongue'));
+
+    $user = User::where('email', 'drmd-aa@example.test')->firstOrFail();
+
+    Http::fake([
+        '*/api/v1/staff/login' => Http::response([
+            'status' => 'success',
+            'description' => 'OK',
+            'token' => 'portal-token',
+        ]),
+        '*/api/v1/staff/portal/me/details' => function ($request) {
+            $authorization = $request->header('Authorization');
+            $authorization = is_array($authorization) ? ($authorization[0] ?? null) : $authorization;
+
+            if ($authorization !== 'Bearer portal-token') {
+                return Http::response(['message' => 'Unauthenticated.'], 401);
+            }
+
+            return Http::response([
+                'status' => 'success',
+                'data' => [
+                    'employee_id' => '1410',
+                    'id_number' => '16-11720',
+                    'first_name' => 'ROGER',
+                    'middle_name' => 'L',
+                    'last_name' => 'ONGUE',
+                    'username' => 'rlongue',
+                    'contact' => '09510914209',
+                    'position' => 'PROJECT DEVELOPMENT OFFICER II',
+                    'division' => 'Disaster Response Management Division',
+                    'section' => 'Disaster Response Information Management Section',
+                    'area_of_assignment' => 'Field Office Caraga',
+                    'image_path' => 'https://caraga-portal.dswd.gov.ph/media/picture/roger.jpg',
+                    'status' => 'Active',
+                ],
+            ]);
+        },
+    ]);
+
+    $this->actingAs($user)
+        ->post(route('profile.myportal.sync'))
+        ->assertRedirect()
+        ->assertSessionHas('success', 'Employee profile refreshed from MyPortal.');
+
+    $user->refresh();
+    expect($user->name)->toBe('Roger L. Ongue')
+        ->and($user->username)->toBe('rlongue')
+        ->and($user->id_number)->toBe('16-11720')
+        ->and($user->position)->toBe('PROJECT DEVELOPMENT OFFICER II')
+        ->and($user->office)->toBe('Disaster Response Information Management Section')
+        ->and($user->area_of_assignment)->toBe('Field Office Caraga')
+        ->and($user->employment_status)->toBe('Active')
+        ->and($user->avatar)->toBe('https://caraga-portal.dswd.gov.ph/media/picture/roger.jpg')
+        ->and(data_get($user->sso_profile_payload, 'myportal.data.image_path'))->toBe('https://caraga-portal.dswd.gov.ph/media/picture/roger.jpg');
+});
+
+it('refreshes the employee profile with a configured MyPortal access token', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    config()->set('services.cc_idp.myportal_me_details_url', 'https://caraga-connect-dev.dswd.gov.ph/api/v1/staff/portal/me/details');
+    config()->set('services.cc_idp.myportal_access_token', 'ready-token');
+    config()->set('services.cc_idp.verify_ssl', false);
+
+    $user = User::where('email', 'drmd-aa@example.test')->firstOrFail();
+
+    Http::fake([
+        '*/api/v1/staff/login' => Http::response(['message' => 'This should not be called when a token is configured.'], 500),
+        '*/api/v1/staff/portal/me/details' => function ($request) {
+            $authorization = $request->header('Authorization');
+            $authorization = is_array($authorization) ? ($authorization[0] ?? null) : $authorization;
+
+            expect($authorization)->toBe('Bearer ready-token');
+
+            return Http::response([
+                'status' => 'success',
+                'data' => [
+                    'employee_id' => '1410',
+                    'id_number' => '16-11720',
+                    'first_name' => 'ROGER',
+                    'middle_name' => 'L',
+                    'last_name' => 'ONGUE',
+                    'username' => 'rlongue',
+                    'contact' => '09510914209',
+                    'position' => 'ADMINISTRATIVE ASSISTANT II',
+                    'section' => 'Disaster Response Information Management Section',
+                    'area_of_assignment' => 'Field Office Caraga',
+                    'status' => 'Active',
+                    'image_path' => 'https://caraga-portal.dswd.gov.ph/media/picture/roger.jpg',
+                ],
+            ]);
+        },
+    ]);
+
+    $this->actingAs($user)
+        ->post(route('profile.myportal.sync'))
+        ->assertRedirect()
+        ->assertSessionHas('success', 'Employee profile refreshed from MyPortal.');
+
+    $user->refresh();
+    expect($user->name)->toBe('Roger L. Ongue')
+        ->and($user->id_number)->toBe('16-11720')
+        ->and($user->position)->toBe('ADMINISTRATIVE ASSISTANT II')
+        ->and($user->area_of_assignment)->toBe('Field Office Caraga')
+        ->and($user->employment_status)->toBe('Active')
+        ->and($user->avatar)->toBe('https://caraga-portal.dswd.gov.ph/media/picture/roger.jpg');
+});
+
+it('reports rejected MyPortal credentials without breaking the profile page', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    config()->set('services.cc_idp.myportal_login_url', 'https://caraga-connect-dev.dswd.gov.ph/api/v1/staff/login');
+    config()->set('services.cc_idp.myportal_access_token', null);
+    config()->set('services.cc_idp.myportal_username', 'rlongue');
+    config()->set('services.cc_idp.myportal_password', 'wrong-passkey');
+    config()->set('services.cc_idp.verify_ssl', false);
+    Cache::forget('myportal:staff-token:'.sha1('https://caraga-connect-dev.dswd.gov.ph/api/v1/staff/login|rlongue'));
+
+    Http::fake([
+        '*/api/v1/staff/login' => Http::response(['message' => 'Unauthorized'], 401),
+    ]);
+
+    $user = User::where('email', 'drmd-aa@example.test')->firstOrFail();
+
+    $this->actingAs($user)
+        ->post(route('profile.myportal.sync'))
+        ->assertRedirect()
+        ->assertSessionHas('error', 'MyPortal login failed. The configured portal username/passkey was rejected.');
 });
 
 it('uses the long system name publicly and the short system name in authenticated layouts', function (): void {
@@ -119,6 +351,58 @@ it('returns a safe configuration error when Groq is not configured', function ()
         ->postJson('/requests/polish-assessment', ['mode' => 'polish', 'text' => 'Initial assessment draft.'])
         ->assertStatus(503)
         ->assertJsonPath('message', 'Groq AI is not configured. Add GROQ_API_KEY to the server environment, then clear the configuration cache.');
+});
+
+it('lets AI Roger answer through Groq when configured', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    $user = User::where('email', 'rros@example.test')->firstOrFail();
+    AssistanceRequest::create([
+        'reference_number' => 'REQ-AIROGER-CONTEXT',
+        'requesting_agency' => 'Test City LGU',
+        'province' => 'Agusan del Norte',
+        'municipality' => 'Test City',
+        'requester' => 'Test Requester',
+        'date_requested' => now()->toDateString(),
+        'purpose' => 'Relief Augmentation',
+        'status' => 'endorsed',
+        'submitted_at' => now(),
+    ]);
+    config()->set('services.groq.api_key', 'test-groq-key');
+    config()->set('services.groq.base_url', 'https://api.groq.test/openai/v1');
+    config()->set('services.groq.model', 'test-model');
+
+    Http::fake([
+        'https://api.groq.test/openai/v1/chat/completions' => Http::response([
+            'choices' => [
+                ['message' => ['content' => 'DROMIS is the Disaster Response Operations Management Integrated System.']],
+            ],
+        ]),
+    ]);
+
+    $this->actingAs($user)
+        ->postJson(route('ai-roger.chat'), [
+            'message' => 'What can you tell me about REQ-AIROGER-CONTEXT?',
+            'current_url' => '/dashboard',
+            'history' => [
+                ['role' => 'assistant', 'content' => 'Hi, I am AI Roger.'],
+            ],
+        ])
+        ->assertOk()
+        ->assertJsonPath('provider', 'Groq')
+        ->assertJsonPath('model', 'test-model')
+        ->assertJsonPath('answer', 'DROMIS is the Disaster Response Operations Management Integrated System.');
+
+    Http::assertSent(function ($request): bool {
+        $payload = $request->data();
+        $systemPrompt = (string) data_get($payload, 'messages.0.content');
+
+        return str_contains($systemPrompt, 'Permission-scoped database context')
+            && str_contains($systemPrompt, 'Permission-scoped page and process map')
+            && str_contains($systemPrompt, 'Developer: Roger L. Ongue, PDO II')
+            && str_contains($systemPrompt, '/requests')
+            && str_contains($systemPrompt, 'REQ-AIROGER-CONTEXT')
+            && str_contains($systemPrompt, 'Test City LGU');
+    });
 });
 
 it('keeps assessment generation and polishing as distinct Groq operations', function (): void {

@@ -57,7 +57,7 @@ export default function Login() {
                             </div>
                         </div>
                         <div className="text-sm font-semibold uppercase text-brand-700 dark:text-brand-100">DSWD FO Caraga</div>
-                        <h1 className="text-2xl font-bold text-slate-950 dark:text-white">{systemNameLong || systemName}</h1>
+                        <h1 className="text-[1em] font-bold text-slate-950 dark:text-white">{systemNameLong || systemName}</h1>
                         <p className="mt-1 text-sm text-slate-500 dark:text-zinc-400">Secure integrated disaster response workflow.</p>
                     </div>
                     <label className="mb-3 block text-sm font-medium text-slate-800 dark:text-zinc-100">Email<input className="mt-1 w-full" value={form.data.email} onChange={(e) => form.setData('email', e.target.value)} /></label>

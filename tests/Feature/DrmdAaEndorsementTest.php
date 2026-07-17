@@ -64,6 +64,8 @@ it('keeps drafts under review and marks them final only after a verified e-PIRMA
     config()->set('services.epirma.app_name', 'DRIMS');
     config()->set('services.epirma.verify_ssl', true);
     config()->set('services.epirma.allow_insecure_ssl', false);
+    config()->set('services.epirma.public_app_url', null);
+    config()->set('services.epirma.force_https_urls', false);
 
     Illuminate\Support\Facades\Http::fake([
         'https://epirma.example.test/api/microservice/build-authorize' => Illuminate\Support\Facades\Http::response([

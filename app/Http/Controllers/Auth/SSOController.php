@@ -33,6 +33,14 @@ class SSOController extends Controller
             $this->ensureConfigured();
 
             $authorizeUrl = $this->sso->buildAuthorizeRedirect();
+            if ($problem = $this->sso->authorizationProblem($authorizeUrl)) {
+                Log::warning('Caraga Connect rejected authorization preflight.', [
+                    'authorizeUrl' => $authorizeUrl,
+                    'message' => $problem,
+                ]);
+
+                return $this->ssoFailure($problem);
+            }
 
             Log::info('SSO Login - Redirecting', [
                 'authorizeUrl' => $authorizeUrl,
@@ -82,33 +90,47 @@ class SSOController extends Controller
                 throw ValidationException::withMessages(['sso' => 'No access token returned.']);
             }
 
-            $profile = $this->sso->fetchUserInfo($accessToken);
-            $username = $profile['preferred_username'] ?? null;
-            $sub = $profile['sub'] ?? null;
-            $name = $profile['name'] ?? null;
-            $email = $profile['email'] ?? null;
-            $idNumber = $profile['id_number'] ?? null;
-            $password = $profile['password'] ?? null;
+            $ssoLookupProfile = $this->sso->fetchUserInfo($accessToken);
+            $ssoMappedProfile = $this->sso->mapProfileToUserFields($ssoLookupProfile);
+            $username = $ssoMappedProfile['username'];
+            $sub = $ssoMappedProfile['sso_sub'];
+            $name = $ssoMappedProfile['name'];
+            $email = $ssoMappedProfile['email'];
+            $idNumber = $ssoMappedProfile['id_number'];
 
             if (! $sub) {
                 throw ValidationException::withMessages(['sso' => 'Provider did not return a subject (sub).']);
             }
 
             $locator = filled($username) ? ['username' => $username] : ['sso_sub' => $sub];
-            $wasCreated = ! User::query()->where($locator)->exists();
+            $existingUser = User::query()->where($locator)->first();
+            $wasCreated = ! $existingUser;
+            $existingProfilePayload = is_array($existingUser?->sso_profile_payload) ? $existingUser->sso_profile_payload : [];
 
             $user = User::updateOrCreate(
                 $locator,
                 [
                     'sso_sub' => $sub,
                     'name' => $name ?: 'SSO User',
-                    'username' => $username,
-                    'email' => $email ?: (($username ?: Str::slug($sub)).'@caraga-connect.local'),
-                    'id_number' => $idNumber ?: null,
-                    'password' => Hash::make($password ?: Str::random(40)),
+                    'username' => $username ?: $existingUser?->username,
+                    'email' => $email ?: $existingUser?->email ?: (($username ?: Str::slug($sub)).'@caraga-connect.local'),
+                    'id_number' => $idNumber ?: $existingUser?->id_number,
+                    'office' => $existingUser?->office ?: config('services.cc_idp.default_office'),
+                    'position' => $existingUser?->position,
+                    'designation' => $existingUser?->designation,
+                    'area_of_assignment' => $ssoMappedProfile['area_of_assignment'] ?: $existingUser?->area_of_assignment,
+                    'employment_status' => $ssoMappedProfile['employment_status'] ?: $existingUser?->employment_status,
+                    'sso_profile_payload' => [
+                        ...$existingProfilePayload,
+                        'sso' => $ssoLookupProfile,
+                        'sso_checked_at' => now()->toISOString(),
+                    ],
+                    'contact_number' => $ssoMappedProfile['contact_number'] ?: $existingUser?->contact_number,
+                    'mobile_no' => $ssoMappedProfile['mobile_no'] ?: $existingUser?->mobile_no,
+                    'avatar' => $ssoMappedProfile['avatar'] ?: $existingUser?->avatar,
+                    'password' => $existingUser?->password ?: Hash::make(Str::random(40)),
                     'email_verified_at' => now(),
                     'is_active' => true,
-                    'office' => config('services.cc_idp.default_office'),
                 ]
             );
 

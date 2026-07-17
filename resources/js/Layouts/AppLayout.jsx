@@ -5,6 +5,8 @@ import {
   ArrowUp,
   ArrowUpDown,
   BadgeDollarSign,
+  Bell,
+  Bot,
   Boxes,
   CheckCircle2,
   ChevronDown,
@@ -14,15 +16,24 @@ import {
   Database,
   FileClock,
   FileText,
+  IdCard,
   LayoutDashboard,
   LogOut,
+  Mail,
+  LoaderCircle,
+  MessageCircle,
   Moon,
   PackageCheck,
+  Phone,
   Send,
+  Sparkles,
   Sun,
   Truck,
+  UserCog,
   UserRound,
   UsersRound,
+  Volume2,
+  VolumeX,
   Warehouse,
   X,
 } from "lucide-react";
@@ -37,6 +48,7 @@ import {
 } from "react";
 import CreativePageLoader from "@/Components/CreativePageLoader";
 import ExportButtons, { exportFilename } from "@/Components/ExportButtons";
+import AccessDecisionModal from "@/Components/AccessDecisionModal";
 
 const nav = [
   {
@@ -92,6 +104,24 @@ const nav = [
     label: "Proposals",
     icon: FileText,
     permissions: ["submit drmd aa requests"],
+  },
+  {
+    href: "/lgu/dromic-requests",
+    label: "LGU DROMIC",
+    icon: FileText,
+    permissions: ["submit lgu dromic requests"],
+  },
+  {
+    href: "/drmd-aa/lgu-intake",
+    label: "LGU Intake",
+    icon: FileText,
+    permissions: ["route lgu dromic requests"],
+  },
+  {
+    href: "/drmd-chief/lgu-intake",
+    label: "Chief Directives",
+    icon: ClipboardList,
+    permissions: ["route lgu dromic requests"],
   },
   {
     href: "/dispatches",
@@ -300,7 +330,7 @@ const isRrosPage = (url) => {
 };
 
 export default function AppLayout({ title, children }) {
-  const { auth, flash, activeRegion, systemName, systemNameShort } = usePage().props;
+  const { auth, flash, activeRegion, systemName, systemNameShort, notificationCenter: initialNotificationCenter } = usePage().props;
   const currentUrl = usePage().url.split("?")[0];
   const permissions = auth.user?.permissions ?? [];
   const userTheme = auth.user?.theme_mode;
@@ -320,11 +350,270 @@ export default function AppLayout({ title, children }) {
   const [toast, setToast] = useState(null);
   const [openPageTrees, setOpenPageTrees] = useState({});
   const [openAccessGroups, setOpenAccessGroups] = useState({});
+  const [notificationCenter, setNotificationCenter] = useState(initialNotificationCenter);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [messageCenterOpen, setMessageCenterOpen] = useState(false);
+  const [messageCenter, setMessageCenter] = useState({ unread_count: 0, messages: [], contacts: [] });
+  const [messageDraft, setMessageDraft] = useState({ recipient_id: "", subject: "", body: "" });
+  const [messageSending, setMessageSending] = useState(false);
+  const [messageLoading, setMessageLoading] = useState(false);
+  const [selectedAccessRequest, setSelectedAccessRequest] = useState(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [aiRogerOpen, setAiRogerOpen] = useState(false);
+  const [aiRogerMessages, setAiRogerMessages] = useState([
+    {
+      role: "assistant",
+      content: "Hi, I’m AI Roger. Ask me anything about DROMIS workflows, reports, access levels, routing, or drafting official text.",
+    },
+  ]);
+  const [aiRogerDraft, setAiRogerDraft] = useState("");
+  const [aiRogerThinking, setAiRogerThinking] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("dromis-access-alerts") !== "off");
   const loaderStartedAt = useRef(0);
   const loaderTimeout = useRef(null);
   const toastTimeout = useRef(null);
   const inactivityTimeout = useRef(null);
   const inactivityLoggedOut = useRef(false);
+  const previousUnread = useRef(0);
+  const previousPendingRequests = useRef(0);
+
+  const playAccessAlert = (request) => {
+    if (!soundEnabled || !request) return;
+
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      const context = AudioContext ? new AudioContext() : null;
+      if (context) {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.frequency.setValueAtTime(740, context.currentTime);
+        oscillator.frequency.exponentialRampToValueAtTime(1040, context.currentTime + 0.25);
+        gain.gain.setValueAtTime(0.0001, context.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.18, context.currentTime + 0.03);
+        gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.45);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start();
+        oscillator.stop(context.currentTime + 0.48);
+      }
+      window.speechSynthesis?.cancel();
+      const speech = new SpeechSynthesisUtterance(`New DROMIS access request from ${request.name}. Please review and act on the request.`);
+      speech.rate = 0.95;
+      window.speechSynthesis?.speak(speech);
+    } catch {
+      // Browsers may block audio until the first user interaction.
+    }
+  };
+
+  const refreshNotificationCenter = async () => {
+    try {
+      const response = await fetch("/notifications", { headers: { Accept: "application/json" }, credentials: "same-origin" });
+      if (!response.ok) return;
+      const next = await response.json();
+      const hasNew = next.unread_count > previousUnread.current || next.action_required_count > previousPendingRequests.current;
+      const newestRequest = next.pending_requests?.[next.pending_requests.length - 1];
+      if (hasNew && auth.user?.roles?.includes("Super Admin")) playAccessAlert(newestRequest);
+      previousUnread.current = next.unread_count;
+      previousPendingRequests.current = next.action_required_count;
+      setNotificationCenter(next);
+    } catch {
+      // Poll again after transient connection failures.
+    }
+  };
+
+  const refreshMessageCenter = async () => {
+    setMessageLoading(true);
+
+    try {
+      const response = await fetch("/messages", { headers: { Accept: "application/json" }, credentials: "same-origin" });
+      if (!response.ok) return;
+      setMessageCenter(await response.json());
+    } catch {
+      // Keep the last visible inbox during transient connection failures.
+    } finally {
+      setMessageLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const interval = window.setInterval(refreshNotificationCenter, 10000);
+    return () => window.clearInterval(interval);
+  }, [soundEnabled]);
+
+  useEffect(() => {
+    refreshMessageCenter();
+    const interval = window.setInterval(refreshMessageCenter, 15000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (messageCenterOpen) {
+      refreshMessageCenter();
+    }
+  }, [messageCenterOpen]);
+
+  const toggleNotificationSound = () => {
+    const next = !soundEnabled;
+    setSoundEnabled(next);
+    localStorage.setItem("dromis-access-alerts", next ? "on" : "off");
+  };
+
+  const askAiRoger = async (event) => {
+    event.preventDefault();
+    const message = aiRogerDraft.trim();
+
+    if (!message || aiRogerThinking) {
+      return;
+    }
+
+    const nextMessages = [...aiRogerMessages, { role: "user", content: message }];
+    setAiRogerMessages(nextMessages);
+    setAiRogerDraft("");
+    setAiRogerThinking(true);
+
+    try {
+      const { data } = await window.axios.post(
+        "/ai-roger/chat",
+        {
+          message,
+          current_url: window.location.pathname + window.location.search,
+          history: nextMessages.slice(-8),
+        },
+        {
+          headers: { Accept: "application/json" },
+          withXSRFToken: true,
+        },
+      );
+      setAiRogerMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content: data.answer || "AI Roger could not prepare a response. Please try again.",
+        },
+      ]);
+    } catch (error) {
+      const message = error?.response?.data?.answer
+        || error?.response?.data?.message
+        || (error?.response?.status === 419
+          ? "AI Roger could not verify your session token. Please refresh the page, then try again."
+          : "AI Roger could not connect right now. Existing DROMIS features are unaffected.");
+      setAiRogerMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content: message,
+        },
+      ]);
+    } finally {
+      setAiRogerThinking(false);
+    }
+  };
+
+  const sendSystemMessage = async (event) => {
+    event.preventDefault();
+
+    if (!messageDraft.recipient_id || !messageDraft.body.trim() || messageSending) {
+      return;
+    }
+
+    setMessageSending(true);
+
+    try {
+      const { data } = await window.axios.post(
+        "/messages",
+        {
+          recipient_id: messageDraft.recipient_id,
+          subject: messageDraft.subject,
+          body: messageDraft.body,
+        },
+        {
+          headers: { Accept: "application/json" },
+          withXSRFToken: true,
+        },
+      );
+
+      setMessageCenter((current) => ({
+        ...current,
+        messages: [data.item, ...(current.messages ?? [])].slice(0, 40),
+      }));
+      setMessageDraft({ recipient_id: "", subject: "", body: "" });
+      showToast({ type: "success", message: "Message sent." });
+    } catch (error) {
+      showToast({
+        type: "error",
+        message: error?.response?.data?.message || "Message was not sent. Please check the recipient and try again.",
+      });
+    } finally {
+      setMessageSending(false);
+      refreshMessageCenter();
+    }
+  };
+
+  const markSystemMessageRead = async (message) => {
+    if (message.is_mine || message.read_at) {
+      return;
+    }
+
+    try {
+      await window.axios.patch(`/messages/${message.id}/read`, {}, {
+        headers: { Accept: "application/json" },
+        withXSRFToken: true,
+      });
+      refreshMessageCenter();
+    } catch {
+      // Non-blocking: message details are still visible.
+    }
+  };
+
+  const hideWorkspaceLoaderNow = () => {
+    if (loaderTimeout.current) {
+      clearTimeout(loaderTimeout.current);
+    }
+
+    window.__drmdPageLoaderVisibleUntil = 0;
+    loaderStartedAt.current = 0;
+    setPageLoading(false);
+  };
+
+  const openNotification = async (notification) => {
+    if (notification.action_required && notification.acted) {
+      hideWorkspaceLoaderNow();
+      setNotificationsOpen(false);
+      showToast({ message: "This notification has already been acted on.", type: "success" });
+      if (!notification.read_at) {
+        const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+        fetch(`/notifications/${notification.id}/read`, {
+          method: "PATCH",
+          credentials: "same-origin",
+          headers: { "X-CSRF-TOKEN": csrf, Accept: "application/json" },
+        }).then(refreshNotificationCenter).catch(() => {});
+      }
+      return;
+    }
+
+    if (!notification.read_at) {
+      const csrf = document.querySelector('meta[name="csrf-token"]')?.content;
+      await fetch(`/notifications/${notification.id}/read`, {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: { "X-CSRF-TOKEN": csrf, Accept: "application/json" },
+      });
+    }
+
+    if (notification.kind === "access_requested") {
+      const pending = notificationCenter?.pending_requests?.find((item) => item.id === notification.access_user_id);
+      if (pending) {
+        setSelectedAccessRequest(pending);
+        setNotificationsOpen(false);
+      } else {
+        router.visit(notification.url || "/access-management");
+      }
+    } else {
+      router.visit(notification.url || "/access/request");
+    }
+
+    refreshNotificationCenter();
+  };
 
   const showToast = (nextToast) => {
     if (!nextToast?.message) {
@@ -762,13 +1051,23 @@ export default function AppLayout({ title, children }) {
                   </div>
                 )}
               </div>
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
                   Signed in
                 </p>
-                <p className="truncate text-sm font-bold text-slate-950 dark:text-white">
-                  {auth.user?.name}
-                </p>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <p className="truncate text-sm font-bold text-slate-950 dark:text-white">
+                    {auth.user?.name}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setProfileOpen(true)}
+                    title="View employee profile"
+                    className="shrink-0 rounded-md p-1 text-slate-400 transition hover:bg-white hover:text-brand-700 dark:hover:bg-zinc-800 dark:hover:text-brand-100"
+                  >
+                    <IdCard className="h-3.5 w-3.5" />
+                  </button>
+                </div>
                 <p className="truncate text-xs text-slate-500 dark:text-zinc-400">
                   {auth.user?.office}
                 </p>
@@ -883,6 +1182,69 @@ export default function AppLayout({ title, children }) {
               </p>
             </div>
             <div className="flex items-center gap-2">
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNotificationsOpen((open) => !open);
+                    setMessageCenterOpen(false);
+                  }}
+                  title="Notifications"
+                  className="relative rounded-md border border-slate-200 bg-white p-2 shadow-sm hover:bg-slate-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                >
+                  <Bell className="h-4 w-4" />
+                  {Math.max(notificationCenter?.unread_count ?? 0, notificationCenter?.action_required_count ?? 0) > 0 && <span className="absolute -right-2 -top-2 flex min-h-5 min-w-5 items-center justify-center rounded-full bg-rose-600 px-1 text-[10px] font-black text-white">{Math.min(Math.max(notificationCenter?.unread_count ?? 0, notificationCenter?.action_required_count ?? 0), 99)}</span>}
+                </button>
+                {notificationsOpen && (
+                  <div className="absolute right-0 top-12 z-50 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
+                    <div className="flex items-center justify-between border-b border-slate-200 p-4 dark:border-zinc-800">
+                      <div><p className="font-black">Notifications</p><p className="text-xs text-slate-500">{notificationCenter?.unread_count ?? 0} unread · {notificationCenter?.action_required_count ?? 0} awaiting action</p></div>
+                      {isSuperAdmin && <button type="button" onClick={toggleNotificationSound} title={soundEnabled ? "Disable voice alerts" : "Enable voice alerts"} className="rounded-md p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-zinc-900">{soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}</button>}
+                    </div>
+                    <div className="max-h-96 overflow-y-auto">
+                      {(notificationCenter?.notifications ?? []).length ? notificationCenter.notifications.map((notification) => (
+                        <button key={notification.id} type="button" onClick={() => openNotification(notification)} className={clsx("block w-full border-b border-slate-100 p-4 text-left transition dark:border-zinc-900", notification.action_required && notification.acted ? "cursor-default opacity-70" : "hover:bg-slate-50 dark:hover:bg-zinc-900", !notification.read_at && "bg-brand-50/70 dark:bg-brand-950/20")}>
+                          <div className="flex items-start justify-between gap-3">
+                            <p className="text-sm font-black">{notification.title}</p>
+                            {notification.action_required && notification.acted && <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black uppercase text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-950 dark:text-emerald-100 dark:ring-emerald-800">Acted</span>}
+                          </div>
+                          <p className="mt-1 text-sm text-slate-600 dark:text-zinc-300">{notification.message}</p>
+                          <p className="mt-2 text-xs text-slate-400">{notification.created_at ? new Date(notification.created_at).toLocaleString() : ""}</p>
+                        </button>
+                      )) : <p className="p-6 text-center text-sm text-slate-500">No notifications yet.</p>}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMessageCenterOpen((open) => !open);
+                    setNotificationsOpen(false);
+                  }}
+                  title="DROMIS Messages"
+                  className="relative rounded-md border border-slate-200 bg-white p-2 shadow-sm transition hover:bg-slate-50 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                >
+                  <MessageCircle className="h-4 w-4" />
+                  {(messageCenter?.unread_count ?? 0) > 0 && (
+                    <span className="absolute -right-2 -top-2 flex min-h-5 min-w-5 items-center justify-center rounded-full bg-sky-600 px-1 text-[10px] font-black text-white">
+                      {Math.min(messageCenter.unread_count, 99)}
+                    </span>
+                  )}
+                </button>
+                {messageCenterOpen && (
+                  <MessageCenterPanel
+                    center={messageCenter}
+                    draft={messageDraft}
+                    setDraft={setMessageDraft}
+                    loading={messageLoading}
+                    sending={messageSending}
+                    onSubmit={sendSystemMessage}
+                    onRead={markSystemMessageRead}
+                  />
+                )}
+              </div>
               <button
                 type="button"
                 onClick={toggleTheme}
@@ -919,6 +1281,371 @@ export default function AppLayout({ title, children }) {
           )}
           {children}
         </main>
+      </div>
+      {selectedAccessRequest && (
+        <AccessDecisionModal
+          user={selectedAccessRequest}
+          roleOptions={notificationCenter?.role_options ?? []}
+          onClose={() => setSelectedAccessRequest(null)}
+          onSuccess={refreshNotificationCenter}
+        />
+      )}
+      {profileOpen && (
+        <EmployeeProfileModal
+          user={auth.user}
+          onClose={() => setProfileOpen(false)}
+        />
+      )}
+      <AiRogerWidget
+        open={aiRogerOpen}
+        onToggle={() => setAiRogerOpen((open) => !open)}
+        messages={aiRogerMessages}
+        draft={aiRogerDraft}
+        setDraft={setAiRogerDraft}
+        thinking={aiRogerThinking}
+        onSubmit={askAiRoger}
+      />
+    </div>
+  );
+}
+
+function MessageCenterPanel({ center, draft, setDraft, loading, sending, onSubmit, onRead }) {
+  const messages = center?.messages ?? [];
+  const contacts = center?.contacts ?? [];
+
+  return (
+    <div className="absolute right-0 top-12 z-50 w-[min(28rem,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
+      <div className="border-b border-slate-200 bg-gradient-to-r from-sky-700 to-brand-700 p-4 text-white dark:border-zinc-800">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-white/15 ring-1 ring-white/25">
+            <MessageCircle className="h-5 w-5" />
+          </div>
+          <div>
+            <p className="font-black">DROMIS Messages</p>
+            <p className="text-xs text-white/80">{center?.unread_count ?? 0} unread · send quick coordination notes</p>
+          </div>
+        </div>
+      </div>
+
+      <form noValidate onSubmit={onSubmit} className="space-y-2 border-b border-slate-200 bg-slate-50 p-4 dark:border-zinc-800 dark:bg-zinc-900/60">
+        <div className="space-y-2">
+          <select
+            value={draft.recipient_id}
+            onChange={(event) => setDraft((current) => ({ ...current, recipient_id: event.target.value }))}
+            className="w-full rounded-xl text-sm"
+          >
+            <option value="">Send to...</option>
+            {contacts.map((contact) => (
+              <option key={contact.id} value={contact.id}>
+                {contact.name} {contact.office ? `— ${contact.office}` : ""}
+              </option>
+            ))}
+          </select>
+          <input
+            type="text"
+            value={draft.subject}
+            onChange={(event) => setDraft((current) => ({ ...current, subject: event.target.value }))}
+            placeholder="Subject (optional)"
+            maxLength={120}
+            className="w-full rounded-xl text-sm"
+          />
+        </div>
+        <div className="flex items-end gap-2">
+          <textarea
+            rows={2}
+            value={draft.body}
+            onChange={(event) => setDraft((current) => ({ ...current, body: event.target.value }))}
+            placeholder="Type a message for coordination..."
+            maxLength={3000}
+            className="min-h-11 flex-1 resize-none rounded-xl text-sm"
+          />
+          <button
+            type="submit"
+            disabled={sending || !draft.recipient_id || !draft.body.trim()}
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-700 text-white shadow-sm transition hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-50"
+            title="Send message"
+          >
+            {sending ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+          </button>
+        </div>
+      </form>
+
+      <div className="max-h-[24rem] overflow-y-auto">
+        {loading && !messages.length ? (
+          <div className="flex items-center justify-center gap-2 p-8 text-sm font-bold text-slate-500 dark:text-zinc-400">
+            <LoaderCircle className="h-4 w-4 animate-spin" />
+            Loading messages...
+          </div>
+        ) : messages.length ? (
+          messages.map((message) => {
+            const unread = !message.is_mine && !message.read_at;
+
+            return (
+              <button
+                key={message.id}
+                type="button"
+                onClick={() => onRead(message)}
+                className={clsx(
+                  "block w-full border-b border-slate-100 p-4 text-left transition dark:border-zinc-900",
+                  unread ? "bg-sky-50/80 dark:bg-sky-950/20" : "hover:bg-slate-50 dark:hover:bg-zinc-900",
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-black text-slate-950 dark:text-white">
+                      {message.is_mine ? `To ${message.other_user?.name}` : message.other_user?.name}
+                    </p>
+                    <p className="truncate text-xs text-slate-500 dark:text-zinc-400">
+                      {message.is_mine ? message.recipient?.office : message.sender?.office}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {message.is_mine && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black uppercase text-slate-500 dark:bg-zinc-800 dark:text-zinc-300">Sent</span>}
+                    {unread && <span className="h-2.5 w-2.5 rounded-full bg-sky-600" />}
+                  </div>
+                </div>
+                <p className="mt-2 text-sm font-bold text-slate-800 dark:text-zinc-100">{message.subject}</p>
+                <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-sm text-slate-600 dark:text-zinc-300">{message.body}</p>
+                <p className="mt-2 text-xs text-slate-400">{message.created_at ? new Date(message.created_at).toLocaleString() : ""}</p>
+              </button>
+            );
+          })
+        ) : (
+          <div className="p-8 text-center">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-sky-50 text-sky-700 dark:bg-sky-950/30 dark:text-sky-200">
+              <Mail className="h-5 w-5" />
+            </div>
+            <p className="mt-3 text-sm font-black">No messages yet</p>
+            <p className="mt-1 text-xs text-slate-500 dark:text-zinc-400">Start a quick coordination thread with another DROMIS user.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AiRogerWidget({ open, onToggle, messages, draft, setDraft, thinking, onSubmit }) {
+  const listRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, open]);
+
+  return (
+    <div className="fixed bottom-5 right-5 z-40">
+      {open && (
+        <div className="mb-3 flex h-[min(38rem,calc(100vh-7rem))] w-[min(26rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
+          <div className="flex items-start justify-between border-b border-slate-200 bg-gradient-to-r from-brand-700 to-emerald-700 p-4 text-white dark:border-zinc-800">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-white/15 ring-1 ring-white/30">
+                <Bot className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="font-black">AI Roger</p>
+                <p className="text-xs text-white/80">Read-only DROMIS assistant</p>
+              </div>
+            </div>
+            <button type="button" onClick={onToggle} className="rounded-md p-1.5 text-white/80 transition hover:bg-white/10 hover:text-white">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-slate-50 p-4 dark:bg-zinc-900/60">
+            {messages.map((message, index) => (
+              <div key={`${message.role}-${index}`} className={clsx("flex", message.role === "user" ? "justify-end" : "justify-start")}>
+                <div className={clsx(
+                  "max-w-[85%] rounded-2xl px-3 py-2 text-sm leading-relaxed shadow-sm",
+                  message.role === "user"
+                    ? "rounded-br-sm bg-brand-700 text-white"
+                    : "rounded-bl-sm border border-slate-200 bg-white text-slate-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100",
+                )}>
+                  <p className="whitespace-pre-wrap">{message.content}</p>
+                </div>
+              </div>
+            ))}
+            {thinking && (
+              <div className="flex justify-start">
+                <div className="inline-flex items-center gap-2 rounded-2xl rounded-bl-sm border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-500 shadow-sm dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                  AI Roger is thinking...
+                </div>
+              </div>
+            )}
+          </div>
+          <form onSubmit={onSubmit} className="border-t border-slate-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950">
+            <label className="sr-only" htmlFor="ai-roger-message">Ask AI Roger</label>
+            <div className="flex items-end gap-2">
+              <textarea
+                id="ai-roger-message"
+                rows={2}
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+                placeholder="Ask about DROMIS..."
+                className="min-h-11 flex-1 resize-none rounded-xl text-sm"
+              />
+              <button
+                type="submit"
+                disabled={thinking || !draft.trim()}
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-brand-700 text-white shadow-sm transition hover:bg-brand-800 disabled:cursor-not-allowed disabled:opacity-50"
+                title="Send to AI Roger"
+              >
+                {thinking ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              </button>
+            </div>
+            <p className="mt-2 text-[11px] text-slate-400 dark:text-zinc-500">AI Roger can guide and draft, but cannot change records or approvals.</p>
+          </form>
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={onToggle}
+        className={clsx(
+          "group relative ml-auto flex items-center gap-3 overflow-hidden rounded-full text-white shadow-2xl ring-4 ring-white transition hover:-translate-y-0.5 hover:scale-[1.02] dark:ring-zinc-950",
+          open
+            ? "h-14 w-14 justify-center bg-brand-800 shadow-brand-900/30"
+            : "min-h-14 bg-gradient-to-r from-emerald-700 via-brand-700 to-sky-700 px-4 pr-5 shadow-brand-900/30",
+        )}
+        title={open ? "Close AI Roger" : "Open AI Roger"}
+      >
+        {!open && (
+          <>
+            <span className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.32),transparent_30%),radial-gradient(circle_at_80%_0%,rgba(255,255,255,0.22),transparent_28%)] opacity-90" />
+            <span className="absolute -left-4 top-1/2 h-20 w-20 -translate-y-1/2 rounded-full bg-white/10 blur-xl transition group-hover:translate-x-10" />
+          </>
+        )}
+        <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/15 ring-1 ring-white/30">
+          {open ? <X className="h-5 w-5" /> : <Bot className="h-5 w-5" />}
+          {!open && <span className="absolute -right-0.5 -top-0.5 h-3 w-3 animate-ping rounded-full bg-cyan-200 opacity-70" />}
+        </span>
+        {!open && (
+          <span className="relative hidden text-left sm:block">
+            <span className="flex items-center gap-1 text-sm font-black leading-tight">
+              Ask AI Roger
+              <Sparkles className="h-3.5 w-3.5 text-cyan-100" />
+            </span>
+            <span className="block text-[11px] font-semibold text-white/75">DROMIS guide & drafting help</span>
+          </span>
+        )}
+      </button>
+    </div>
+  );
+}
+
+function EmployeeProfileModal({ user, onClose }) {
+  const roles = user?.roles?.length ? user.roles.join(", ") : "-";
+  const ssoCheckedAt = user?.sso_profile?.sso_checked_at;
+  const myPortalVerified = Boolean(user?.myportal_profile?.verified);
+  const myPortalCheckedAt = user?.myportal_profile?.last_checked_at;
+  const [syncing, setSyncing] = useState(false);
+  const profileValue = (value) => value || "Not returned yet";
+  const refreshMyPortal = () => {
+    setSyncing(true);
+    router.post("/profile/myportal/sync", {}, {
+      preserveScroll: true,
+      onSuccess: () => router.reload({ only: ["auth", "flash"], preserveScroll: true }),
+      onFinish: () => setSyncing(false),
+    });
+  };
+  const employeeFields = [
+    { label: "Employee Name", value: profileValue(user?.name), icon: UserRound },
+    { label: "Employee ID", value: profileValue(user?.id_number), icon: IdCard },
+    { label: "SSO Username", value: profileValue(user?.username), icon: UserCog },
+    { label: "Email", value: profileValue(user?.email), icon: Mail },
+    { label: "Contact Number", value: profileValue(user?.contact_number || user?.mobile_no), icon: Phone },
+    { label: "Office / Section", value: profileValue(user?.office), icon: UserCog },
+    { label: "Area of Assignment", value: profileValue(user?.area_of_assignment), icon: UserCog },
+    { label: "Position", value: profileValue(user?.position), icon: UserCog },
+    { label: "Designation", value: profileValue(user?.designation), icon: UserCog },
+    { label: "Employment Status", value: profileValue(user?.employment_status), icon: CheckCircle2 },
+    { label: "DROMIS User Level", value: roles, icon: UsersRound },
+    { label: "Access Status", value: profileValue(user?.access_status), icon: CheckCircle2 },
+    { label: "SSO Subject", value: profileValue(user?.sso_sub), icon: Database },
+  ];
+  const avatar = user?.avatar || null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-4 py-6 backdrop-blur-sm sm:items-center">
+      <div className="flex max-h-[calc(100vh-3rem)] w-full max-w-2xl flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
+        <div className="shrink-0 flex items-start justify-between border-b border-slate-200 bg-slate-50 p-5 dark:border-zinc-800 dark:bg-zinc-900">
+          <div className="flex min-w-0 items-center gap-4">
+            <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-white text-brand-700 shadow-sm ring-1 ring-slate-200 dark:bg-zinc-950 dark:text-brand-100 dark:ring-zinc-700">
+              {avatar ? (
+                <img src={avatar} alt={user?.name ?? "Employee"} className="h-full w-full object-cover" />
+              ) : (
+                <UserRound className="h-7 w-7 opacity-70" />
+              )}
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-black uppercase tracking-wide text-brand-700 dark:text-brand-100">Caraga Connect SSO profile</p>
+              <h2 className="mt-1 truncate text-xl font-black text-slate-950 dark:text-white">{user?.name || "SSO User"}</h2>
+              <p className="truncate text-sm text-slate-500 dark:text-zinc-400">{user?.email || user?.username || "Signed in through Caraga Connect"}</p>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-md p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-zinc-800 dark:hover:text-white">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="min-h-0 overflow-y-auto">
+          <div className="border-b border-slate-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-950">
+            <div className={clsx("rounded-md border p-4", myPortalVerified ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-100" : "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100")}>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-black">{myPortalVerified ? "MyPortal profile connected" : "MyPortal profile not yet refreshed"}</p>
+                  <p className="mt-1 text-sm">
+                    {myPortalVerified
+                      ? "These fields were refreshed from the documented Caraga Connect MyPortal API."
+                      : "Click refresh to retrieve the employee profile through the MyPortal API token flow."}
+                  </p>
+                  {myPortalCheckedAt && (
+                    <p className="mt-2 text-xs font-semibold opacity-80">Latest MyPortal check: {myPortalCheckedAt}</p>
+                  )}
+                  {ssoCheckedAt && !myPortalCheckedAt && (
+                    <p className="mt-2 text-xs font-semibold opacity-80">Latest SSO sign-in: {ssoCheckedAt}</p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={refreshMyPortal}
+                  disabled={syncing}
+                  className="shrink-0 rounded-md bg-brand-700 px-3 py-2 text-xs font-black text-white shadow-sm transition hover:bg-brand-800 disabled:opacity-60"
+                >
+                  {syncing ? "Refreshing..." : "Refresh from MyPortal"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-3 p-5 sm:grid-cols-2">
+            {employeeFields.map(({ label, value, icon: Icon }) => (
+              <div key={label} className="rounded-md border border-slate-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950">
+                <div className="flex items-start gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-brand-50 text-brand-700 dark:bg-brand-950 dark:text-brand-100">
+                    <Icon className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-black uppercase tracking-wide text-slate-400">{label}</p>
+                    <p className="mt-1 break-words text-sm font-bold text-slate-800 dark:text-zinc-100">{value || "-"}</p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+        </div>
+
+        <div className="shrink-0 border-t border-slate-200 bg-slate-50 px-5 py-3 text-xs text-slate-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
+          DROMIS signs users in through SSO, then uses the configured MyPortal API credential only when profile refresh is requested.
+        </div>
       </div>
     </div>
   );

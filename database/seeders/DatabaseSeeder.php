@@ -31,6 +31,8 @@ class DatabaseSeeder extends Seeder
             'manage population',
             'manage standby funds',
             'submit drmd aa requests',
+            'submit lgu dromic requests',
+            'route lgu dromic requests',
         ];
 
         foreach ($permissions as $permission) {
@@ -42,6 +44,8 @@ class DatabaseSeeder extends Seeder
         $drrs = Role::firstOrCreate(['name' => 'DRRS', 'guard_name' => 'web']);
         $drims = Role::firstOrCreate(['name' => 'DRIMS', 'guard_name' => 'web']);
         $drmdAa = Role::firstOrCreate(['name' => 'DRMD AA', 'guard_name' => 'web']);
+        $drmdChief = Role::firstOrCreate(['name' => 'DRMD Chief', 'guard_name' => 'web']);
+        $lgu = Role::firstOrCreate(['name' => 'LGU', 'guard_name' => 'web']);
         $financialAnalyst = Role::firstOrCreate(['name' => 'DRMD Financial Analyst', 'guard_name' => 'web']);
         Role::firstOrCreate(['name' => 'guest', 'guard_name' => 'web']);
 
@@ -49,7 +53,9 @@ class DatabaseSeeder extends Seeder
         $rros->syncPermissions(['view dashboards', 'manage inventory', 'manage warehouses', 'process requests', 'monitor requests', 'manage dispatches', 'manage near expiry', 'export reports']);
         $drrs->syncPermissions(['view dashboards', 'encode requests', 'monitor requests', 'manage near expiry', 'export reports']);
         $drims->syncPermissions(['view dashboards', 'monitor requests', 'manage dromic reports', 'export reports']);
-        $drmdAa->syncPermissions(['submit drmd aa requests']);
+        $drmdAa->syncPermissions(['submit drmd aa requests', 'route lgu dromic requests']);
+        $drmdChief->syncPermissions(['view dashboards', 'route lgu dromic requests']);
+        $lgu->syncPermissions(['submit lgu dromic requests']);
         $financialAnalyst->syncPermissions(['view dashboards', 'manage standby funds', 'export reports']);
 
         $users = [
@@ -58,6 +64,7 @@ class DatabaseSeeder extends Seeder
             ['name' => 'DRRS Request Encoder', 'email' => 'drrs@example.test', 'office' => 'DRRS', 'role' => $drrs],
             ['name' => 'DRIMS Monitoring Officer', 'email' => 'drims@example.test', 'office' => 'DRIMS', 'role' => $drims],
             ['name' => 'DRMD AA User', 'email' => 'drmd-aa@example.test', 'office' => 'DRMD AA', 'role' => $drmdAa],
+            ['name' => 'DRMD Chief', 'email' => 'drmd-chief@example.test', 'office' => 'DRMD', 'role' => $drmdChief],
             ['name' => 'DRMD Financial Analyst', 'email' => 'financial@example.test', 'office' => 'DRMD Financial Analyst', 'role' => $financialAnalyst],
         ];
 

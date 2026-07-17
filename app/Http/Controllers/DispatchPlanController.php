@@ -8,6 +8,7 @@ use App\Models\Receiver;
 use App\Models\Vehicle;
 use App\Models\OperationalLibraryValue;
 use App\Services\AuditLogger;
+use App\Services\WorkflowNotificationService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -27,7 +28,7 @@ class DispatchPlanController extends Controller
         ]);
     }
 
-    public function store(Request $request, AuditLogger $audit): RedirectResponse
+    public function store(Request $request, AuditLogger $audit, WorkflowNotificationService $workflowNotifications): RedirectResponse
     {
         abort_unless($request->user()?->can('manage dispatches'), 403);
 
@@ -52,7 +53,9 @@ class DispatchPlanController extends Controller
         ]);
 
         AssistanceRequest::whereKey($data['request_id'])->update(['status' => 'released']);
+        $assistanceRequest = AssistanceRequest::with(['encoder', 'items', 'assessmentType'])->findOrFail($data['request_id']);
         $audit->log('dispatch.created', $dispatch, [], $dispatch->toArray());
+        $workflowNotifications->notifyDispatchCreated($assistanceRequest);
 
         return back()->with('success', 'Dispatch plan created.');
     }

@@ -6,6 +6,7 @@ use App\Models\AssistanceRequest;
 use App\Models\RequestParty;
 use App\Models\SystemSetting;
 use App\Services\AuditLogger;
+use App\Services\WorkflowNotificationService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -17,7 +18,10 @@ use Inertia\Response;
 
 class DrmdAaRequestController extends Controller
 {
-    public function __construct(private readonly AuditLogger $audit) {}
+    public function __construct(
+        private readonly AuditLogger $audit,
+        private readonly WorkflowNotificationService $workflowNotifications,
+    ) {}
 
     public function index(Request $request): Response
     {
@@ -113,6 +117,7 @@ class DrmdAaRequestController extends Controller
         });
 
         $this->audit->log($submissionType === 'proposal' ? 'proposal.drmd_aa_submitted' : 'request.drmd_aa_submitted', $requestRecord, [], $requestRecord->toArray());
+        $this->workflowNotifications->notifyDrmdAaEndorsed($requestRecord->fresh(['encoder']));
 
         $route = $submissionType === 'proposal' ? 'drmd-aa.proposals.index' : 'drmd-aa.requests.index';
         $label = $submissionType === 'proposal' ? 'Proposal' : 'FNI Request';

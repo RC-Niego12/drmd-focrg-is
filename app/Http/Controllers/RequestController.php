@@ -18,6 +18,7 @@ use App\Services\InventoryService;
 use App\Services\InventoryBalanceService;
 use App\Services\RequestPartySheetService;
 use App\Services\ResponseLetterDocumentService;
+use App\Services\WorkflowNotificationService;
 use App\Services\WordToPdfService;
 use App\Support\DocumentReferenceNumber;
 use App\Support\AssessmentNarrative;
@@ -152,7 +153,7 @@ class RequestController extends Controller
         return redirect()->route('requests.assessment', $assistanceRequest)->with('success', 'Assessment submitted and document files are ready.');
     }
 
-    public function approve(Request $request, AssistanceRequest $assistanceRequest, InventoryService $inventory, AuditLogger $audit): RedirectResponse
+    public function approve(Request $request, AssistanceRequest $assistanceRequest, InventoryService $inventory, AuditLogger $audit, WorkflowNotificationService $workflowNotifications): RedirectResponse
     {
         abort_unless($request->user()?->can('process requests'), 403);
         abort_unless($assistanceRequest->assessment_status === 'submitted', 422, 'Submit the finalized assessment before recording a decision.');
@@ -188,6 +189,7 @@ class RequestController extends Controller
 
             $audit->log('request.decision_recorded', $assistanceRequest, [], $assistanceRequest->fresh('items')->toArray());
         });
+        $workflowNotifications->notifyRrosDecisionRecorded($assistanceRequest->fresh(['encoder', 'items', 'assessmentType']));
 
         return back()->with('success', 'Request decision recorded.');
     }
@@ -305,7 +307,7 @@ class RequestController extends Controller
         return back()->with('success', "Assessment for {$fresh->reference_number} saved. Assessment and response-letter downloads are ready.");
     }
 
-    public function assessmentStatus(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit): RedirectResponse
+    public function assessmentStatus(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit, WorkflowNotificationService $workflowNotifications): RedirectResponse
     {
         $data = $request->validate(['assessment_status' => ['required', 'in:draft,final,submitted']]);
         abort_if(blank($assistanceRequest->assessment_status), 422, 'Create the assessment before changing its status.');
@@ -328,6 +330,9 @@ class RequestController extends Controller
             },
         ]);
         $audit->log('request.assessment_status_changed', $assistanceRequest, ['assessment_status' => $old], ['assessment_status' => $data['assessment_status']]);
+        if ($data['assessment_status'] === 'submitted') {
+            $workflowNotifications->notifyDrrsAssessmentSubmitted($assistanceRequest->fresh(['encoder', 'items']));
+        }
 
         return back()->with('success', 'Assessment status updated to '.str($data['assessment_status'])->title().'.');
     }
