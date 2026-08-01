@@ -24,28 +24,105 @@ class EpirmaSigningController extends Controller
     public function __construct(private EpirmaService $epirmaService) {}
 
     /**
-     * Build an assessment PDF and hand it off to e-PIRMA for signing
-     * (same flow as sign_document in the e-PIRMA integration sample).
+     * Hand assessment signing to e-PIRMA.
+     *
+     * Prefer the develop-compatible EPIRMA_SIGN_URL redirect (no build-authorize).
+     * Use the microservice authorize flow only when SIGN_URL is unset.
      */
     public function start(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit): RedirectResponse|Response|JsonResponse
     {
         abort_unless($assistanceRequest->assessment_status === 'draft', 422, 'Only a draft assessment can be sent for e-PIRMA signing.');
 
-        if (! $this->epirmaService->isConfigured()) {
-            $message = 'e-PIRMA is ready for integration, but EPIRMA_BASE_URL / EPIRMA_CLIENT_SECRET have not yet been configured. The draft was not changed.';
-
-            if ($request->expectsJson()) {
-                return response()->json(['success' => false, 'message' => $message], 422);
-            }
-
-            return back()->with('error', $message);
+        $signUrl = $this->resolvedSignUrl();
+        if ($signUrl !== '') {
+            return $this->startSignUrlHandoff($request, $assistanceRequest, $audit, $signUrl);
         }
 
+        if ($this->epirmaService->isConfigured()) {
+            return $this->startMicroserviceHandoff($request, $assistanceRequest, $audit);
+        }
+
+        $message = 'e-PIRMA is ready for integration, but EPIRMA_SIGN_URL (or EPIRMA_BASE_URL / EPIRMA_CLIENT_SECRET) have not yet been configured. The draft was not changed.';
+
+        if ($request->expectsJson()) {
+            return response()->json(['success' => false, 'message' => $message], 422);
+        }
+
+        return back()->with('error', $message);
+    }
+
+    /**
+     * Develop-branch handoff: redirect to EPIRMA_SIGN_URL with document/callback query params.
+     * Does not call build-authorize or require an e-PIRMA employee account linkage.
+     */
+    private function startSignUrlHandoff(
+        Request $request,
+        AssistanceRequest $assistanceRequest,
+        AuditLogger $audit,
+        string $signUrl
+    ): RedirectResponse|Response|JsonResponse {
+        $transactionId = (string) Str::uuid();
+        $callbackToken = Str::random(64);
+        $assistanceRequest->update([
+            'epirma_status' => 'pending',
+            'epirma_transaction_id' => $transactionId,
+            'epirma_callback_token' => hash('sha256', $callbackToken),
+            'epirma_signature_reference' => null,
+            'epirma_signed_at' => null,
+        ]);
+
+        $callbackUrl = URL::route('epirma.callback', [
+            'assistanceRequest' => $assistanceRequest->id,
+            'token' => $callbackToken,
+        ]);
+        $handoffUrl = rtrim($signUrl, '?&').(str_contains($signUrl, '?') ? '&' : '?').http_build_query([
+            'transaction_id' => $transactionId,
+            'reference_number' => $assistanceRequest->reference_number,
+            'document_url' => URL::route('requests.assessment-pdf', $assistanceRequest),
+            'callback_url' => $callbackUrl,
+            'return_url' => URL::route('requests.index', ['tab' => 'assessments']),
+        ]);
+
+        $audit->log('request.epirma_signing_started', $assistanceRequest, [], [
+            'transaction_id' => $transactionId,
+            'assessment_status' => 'draft',
+            'handoff' => 'sign_url',
+        ]);
+
+        if ($this->shouldUseLocalBypass($signUrl)) {
+            return $this->completeLocalBypass(
+                $request,
+                $assistanceRequest,
+                $audit,
+                $transactionId,
+                'e-PIRMA is not reachable at '.$signUrl.'. Local bypass signed the assessment so you can continue testing.'
+            );
+        }
+
+        if ($request->expectsJson()) {
+            return response()->json([
+                'success' => true,
+                'redirect_url' => $handoffUrl,
+            ]);
+        }
+
+        return Inertia::location($handoffUrl);
+    }
+
+    /**
+     * Microservice handoff: generate PDF, build-authorize with employee ID,
+     * then open /microservice/document-routing (official Caraga Connect guide).
+     */
+    private function startMicroserviceHandoff(
+        Request $request,
+        AssistanceRequest $assistanceRequest,
+        AuditLogger $audit
+    ): RedirectResponse|Response|JsonResponse {
         $path = null;
 
         try {
-            DB::beginTransaction();
-
+            // Keep PDF generation + authorize outside a DB transaction so SQLite is not
+            // locked for the multi-second DomPDF render (avoids "database is locked").
             $record = $assistanceRequest->load(['items.sourceWarehouse', 'assessmentType', 'incident', 'encoder']);
             $pdfBinary = Pdf::loadView('documents.assessment', [
                 'request' => $record,
@@ -58,15 +135,80 @@ class EpirmaSigningController extends Controller
             $path = 'epirma_signed_documents/'.$storedFileName;
             Storage::disk('public')->put($path, $pdfBinary);
 
-            $document = EpirmaSignedDocument::create([
-                'assistance_request_id' => $assistanceRequest->id,
-                'document_name' => $originalName.'.pdf',
-                'document_path' => $path,
-                'description_subject' => 'Assessment form for '.$record->reference_number,
-                'encoded_by' => (string) ($request->user()->name ?? $request->user()->id),
-                'timestamp' => now(),
-                'document_uuid' => $uuid,
-            ]);
+            $currentUser = $request->user();
+            $responseData = $this->epirmaService->buildAuthorize(
+                trim((string) ($currentUser->id_number ?? ''))
+            );
+
+            if (! isset($responseData['success']) || ! $responseData['success'] || ! isset($responseData['token'])) {
+                if ($path && Storage::disk('public')->exists($path)) {
+                    Storage::disk('public')->delete($path);
+                }
+
+                $fallbackSignUrl = $this->resolvedSignUrl();
+                if ($fallbackSignUrl !== '' && $this->shouldFallbackToSignUrl($responseData)) {
+                    Log::warning('E-Pirma microservice authorize failed; falling back to explicit SIGN_URL handoff.', [
+                        'request_id' => $assistanceRequest->id,
+                        'message' => $responseData['message'] ?? null,
+                    ]);
+
+                    return $this->startSignUrlHandoff($request, $assistanceRequest, $audit, $fallbackSignUrl);
+                }
+
+                $idUsed = trim((string) ($currentUser->id_number ?? ''));
+                $message = $this->authorizeFailureMessage($responseData, $idUsed);
+
+                if ($request->expectsJson()) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => $message,
+                        'details' => $responseData,
+                        'id_number' => $idUsed !== '' ? $idUsed : null,
+                    ], 422);
+                }
+
+                return back()->with('error', $message);
+            }
+
+            $callbackToken = Str::random(64);
+
+            $document = DB::transaction(function () use (
+                $assistanceRequest,
+                $request,
+                $path,
+                $originalName,
+                $uuid,
+                $callbackToken,
+                $audit
+            ) {
+                $document = EpirmaSignedDocument::create([
+                    'assistance_request_id' => $assistanceRequest->id,
+                    'document_name' => $originalName.'.pdf',
+                    'document_path' => $path,
+                    'description_subject' => 'Assessment form for '.$assistanceRequest->reference_number,
+                    'encoded_by' => (string) ($request->user()->name ?? $request->user()->id),
+                    'timestamp' => now(),
+                    'document_uuid' => $uuid,
+                ]);
+
+                $assistanceRequest->update([
+                    'epirma_status' => 'pending',
+                    'epirma_transaction_id' => $uuid,
+                    'epirma_callback_token' => hash('sha256', $callbackToken),
+                    'epirma_signature_reference' => null,
+                    'epirma_signed_at' => null,
+                ]);
+
+                $audit->log('request.epirma_signing_started', $assistanceRequest, [], [
+                    'transaction_id' => $uuid,
+                    'document_id' => $document->id,
+                    'assessment_status' => 'draft',
+                    'handoff' => 'microservice',
+                    'return_url' => url('/requests?default_tab=assessments'),
+                ]);
+
+                return $document;
+            });
 
             $documentUrl = URL::temporarySignedRoute(
                 'epirma.signed-document',
@@ -78,64 +220,19 @@ class EpirmaSigningController extends Controller
             $separator = str_contains($documentUrl, '?') ? '&' : '?';
             $documentUrl .= $separator.'filename='.rawurlencode((string) $document->document_name);
 
-            $currentUser = $request->user();
-            $responseData = $this->epirmaService->buildAuthorize(
-                (string) ($currentUser->id_number ?? $currentUser->id)
-            );
-
-            if (! isset($responseData['success']) || ! $responseData['success'] || ! isset($responseData['token'])) {
-                DB::rollBack();
-
-                if ($path && Storage::disk('public')->exists($path)) {
-                    Storage::disk('public')->delete($path);
-                }
-
-                $message = 'Failed to initialize E-Pirma document creation. You must have an ePIRMA Account to use this feature.';
-
-                if ($request->expectsJson()) {
-                    return response()->json([
-                        'success' => false,
-                        'message' => $message,
-                        'details' => $responseData,
-                    ], 422);
-                }
-
-                return back()->with('error', $message);
-            }
-
-            $callbackToken = Str::random(64);
-            $assistanceRequest->update([
-                'epirma_status' => 'pending',
-                'epirma_transaction_id' => $uuid,
-                'epirma_callback_token' => hash('sha256', $callbackToken),
-                'epirma_signature_reference' => null,
-                'epirma_signed_at' => null,
-            ]);
-
-            // e-PIRMA redirects here after signing. Keep the opaque token + request id so
-            // /requests can verify the callback and open the Created Assessments tab.
             $callbackUrl = url('/requests').'?'.http_build_query([
                 'default_tab' => 'assessments',
                 'epirma_request' => $assistanceRequest->id,
                 'token' => $callbackToken,
             ]);
 
-            $redirectUrl = $this->epirmaService->generateDocumentRoutingUrlforSigning(
-                (string) config('services.epirma.app_name', config('app.name')),
+            $redirectUrl = $this->epirmaService->generateDocumentRoutingUrl(
+                (string) config('services.epirma.app_name', 'DRIMS'),
                 $uuid,
                 $responseData['token'],
                 $callbackUrl,
                 $documentUrl
             );
-
-            $audit->log('request.epirma_signing_started', $assistanceRequest, [], [
-                'transaction_id' => $uuid,
-                'document_id' => $document->id,
-                'assessment_status' => 'draft',
-                'return_url' => url('/requests?default_tab=assessments'),
-            ]);
-
-            DB::commit();
 
             if ($request->expectsJson()) {
                 return response()->json([
@@ -144,13 +241,8 @@ class EpirmaSigningController extends Controller
                 ]);
             }
 
-            // An Inertia XHR cannot safely follow a cross-origin 302. This emits
-            // the protocol's external-location response so the browser performs a
-            // normal top-level navigation to e-PIRMA.
             return Inertia::location($redirectUrl);
         } catch (Throwable $e) {
-            DB::rollBack();
-
             if ($path && Storage::disk('public')->exists($path)) {
                 Storage::disk('public')->delete($path);
             }
@@ -160,14 +252,16 @@ class EpirmaSigningController extends Controller
                 'request_id' => $assistanceRequest->id,
             ]);
 
+            $message = $this->transactionFailureMessage($e);
+
             if ($request->expectsJson()) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'Failed to process document transaction.',
+                    'message' => $message,
                 ], 500);
             }
 
-            return back()->with('error', 'Failed to process document transaction.');
+            return back()->with('error', $message);
         }
     }
 
@@ -251,88 +345,27 @@ class EpirmaSigningController extends Controller
     {
         abort_unless($assistanceRequest->assessment_status === 'draft', 422, 'Only a draft assessment can retry e-PIRMA signing.');
 
-        if (! $this->epirmaService->isConfigured()) {
+        $request->headers->set('Accept', 'application/json');
+        $result = $this->start($request, $assistanceRequest, app(AuditLogger::class));
+
+        if ($result instanceof JsonResponse) {
+            return $result;
+        }
+
+        $location = $result->headers->get('X-Inertia-Location')
+            ?: $result->headers->get('Location');
+
+        if (filled($location)) {
             return response()->json([
-                'success' => false,
-                'message' => 'e-PIRMA is not configured.',
-            ], 422);
+                'success' => true,
+                'redirect_url' => $location,
+            ]);
         }
-
-        $document = EpirmaSignedDocument::query()
-            ->where('assistance_request_id', $assistanceRequest->id)
-            ->when(
-                filled($assistanceRequest->epirma_transaction_id),
-                fn ($query) => $query->where('document_uuid', $assistanceRequest->epirma_transaction_id)
-            )
-            ->latest('id')
-            ->first();
-
-        if (! $document || ! $document->document_path || ! Storage::disk('public')->exists($document->document_path)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Document file not found.',
-            ], 422);
-        }
-
-        $uuid = (string) ($document->document_uuid ?: Str::uuid());
-        if (! $document->document_uuid) {
-            $document->document_uuid = $uuid;
-            $document->save();
-        }
-
-        $documentUrl = URL::temporarySignedRoute(
-            'epirma.signed-document',
-            now()->addHours(6),
-            [
-                'document' => $document->id,
-            ],
-            absolute: false
-        );
-
-        $documentUrl = url($documentUrl);
-        $separator = str_contains($documentUrl, '?') ? '&' : '?';
-        $documentUrl .= $separator.'filename='.rawurlencode((string) $document->document_name);
-
-        $currentUser = $request->user();
-        $responseData = $this->epirmaService->buildAuthorize(
-            (string) ($currentUser->id_number ?? $currentUser->id)
-        );
-
-        if (! isset($responseData['success']) || ! $responseData['success'] || ! isset($responseData['token'])) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to initialize E-Pirma document creation. You must have an ePIRMA Account to use this feature.',
-                'details' => $responseData,
-            ], 422);
-        }
-
-        $callbackToken = Str::random(64);
-        $assistanceRequest->update([
-            'epirma_status' => 'pending',
-            'epirma_transaction_id' => $uuid,
-            'epirma_callback_token' => hash('sha256', $callbackToken),
-            'epirma_signature_reference' => null,
-            'epirma_signed_at' => null,
-        ]);
-
-        $callbackUrl = url('/requests').'?'.http_build_query([
-            'default_tab' => 'assessments',
-            'epirma_request' => $assistanceRequest->id,
-            'token' => $callbackToken,
-        ]);
-
-        $redirectUrl = $this->epirmaService->generateDocumentRoutingUrlforSigning(
-            (string) config('services.epirma.app_name', config('app.name')),
-            $uuid,
-            $responseData['token'],
-            $callbackUrl,
-            $documentUrl
-        );
 
         return response()->json([
-            'success' => true,
-            'redirect_url' => $redirectUrl,
-        ]);
+            'success' => false,
+            'message' => 'Failed to retry e-PIRMA signing.',
+        ], 422);
     }
 
     public function serveSignedDocument(Request $request, EpirmaSignedDocument $document)
@@ -400,5 +433,123 @@ class EpirmaSigningController extends Controller
         return redirect()
             ->to(url('/requests?default_tab=assessments'))
             ->with($signed ? 'success' : 'error', $message);
+    }
+
+    private function authorizeFailureMessage(array $responseData, string $idUsed): string
+    {
+        $apiMessage = trim((string) ($responseData['message'] ?? $responseData['error'] ?? ''));
+        if ($apiMessage !== '') {
+            if (stripos($apiMessage, 'invalid secret') !== false) {
+                return 'e-PIRMA rejected EPIRMA_CLIENT_SECRET (Invalid secret). Update .env with the microservice secret registered for this app in Caraga e-PIRMA / RICTMS, then run php artisan config:clear.';
+            }
+
+            return $apiMessage;
+        }
+
+        if ($idUsed === '') {
+            return 'Failed to initialize e-PIRMA signing. Your DROMIS profile has no employee ID number.';
+        }
+
+        return 'Failed to initialize e-PIRMA signing for employee ID '.$idUsed.'. Confirm e-PIRMA is running and this ID is registered there, then try again.';
+    }
+
+    private function transactionFailureMessage(Throwable $e): string
+    {
+        $raw = $e->getMessage();
+
+        if (str_contains($raw, 'database is locked')) {
+            return 'Could not save the e-PIRMA document because the database is busy. Wait a moment and click Sign with e-PIRMA again.';
+        }
+
+        if (str_contains($raw, 'Failed to connect') || str_contains($raw, 'Could not reach e-PIRMA')) {
+            return 'Could not reach e-PIRMA at '.config('services.epirma.base_url').'. Start the e-PIRMA service, then try signing again.';
+        }
+
+        return 'Failed to process document transaction. '.$raw;
+    }
+
+    /**
+     * Only an explicit EPIRMA_SIGN_URL is used for the develop-compatible handoff.
+     */
+    private function resolvedSignUrl(bool $allowBaseUrlFallback = false): string
+    {
+        return trim((string) config('services.epirma.sign_url', ''));
+    }
+
+    private function shouldFallbackToSignUrl(array $responseData): bool
+    {
+        return trim((string) config('services.epirma.sign_url', '')) !== '';
+    }
+
+    private function localBypassEnabled(): bool
+    {
+        return (bool) config('services.epirma.local_bypass', app()->environment('local'));
+    }
+
+    private function shouldUseLocalBypass(string $targetUrl): bool
+    {
+        if (! $this->localBypassEnabled() || $targetUrl === '') {
+            return false;
+        }
+
+        return ! $this->hostReachable($targetUrl);
+    }
+
+    private function hostReachable(string $url): bool
+    {
+        $parts = parse_url($url);
+        $host = (string) ($parts['host'] ?? '');
+        if ($host === '') {
+            return false;
+        }
+
+        $scheme = strtolower((string) ($parts['scheme'] ?? 'http'));
+        $port = (int) ($parts['port'] ?? ($scheme === 'https' ? 443 : 80));
+        $connection = @fsockopen($host, $port, $errno, $errstr, 1.5);
+        if (! is_resource($connection)) {
+            return false;
+        }
+
+        fclose($connection);
+
+        return true;
+    }
+
+    private function completeLocalBypass(
+        Request $request,
+        AssistanceRequest $assistanceRequest,
+        AuditLogger $audit,
+        string $transactionId,
+        string $message
+    ): RedirectResponse|JsonResponse {
+        $reference = 'LOCAL-BYPASS-'.Str::upper(Str::random(8));
+        $assistanceRequest->update([
+            'epirma_status' => 'signed',
+            'epirma_transaction_id' => $transactionId,
+            'epirma_callback_token' => null,
+            'epirma_signature_reference' => $reference,
+            'epirma_signed_at' => now(),
+            'assessment_status' => 'final',
+            'status' => 'acted',
+        ]);
+
+        $audit->log('request.epirma_signing_completed', $assistanceRequest, [], [
+            'epirma_status' => 'signed',
+            'signature_reference' => $reference,
+            'handoff' => 'local_bypass',
+        ]);
+
+        if ($request->expectsJson()) {
+            return response()->json([
+                'success' => true,
+                'message' => $message,
+                'status' => 'signed',
+                'local_bypass' => true,
+            ]);
+        }
+
+        return redirect()
+            ->to(url('/requests?default_tab=assessments'))
+            ->with('success', $message);
     }
 }

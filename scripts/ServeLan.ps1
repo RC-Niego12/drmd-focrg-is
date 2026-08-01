@@ -12,13 +12,16 @@ if ($null -eq $configuration) {
 }
 
 $address = $configuration.IPv4Address.IPAddress
-Write-Host "Serving DRIMS on http://$($env:COMPUTERNAME):$Port (current address: $address; OAuth loopback enabled)"
+$computerName = $env:COMPUTERNAME
+
+Write-Host "Serving DROMIS on http://$computerName`:$Port"
+Write-Host "LAN fallback URL: http://$address`:$Port"
+Write-Host "Keep this window open while other users are accessing the system."
 $router = Join-Path $PSScriptRoot '..\vendor\laravel\framework\src\Illuminate\Foundation\resources\server.php'
 Push-Location (Join-Path $PSScriptRoot '..\public')
 try {
-    # Listen on every local interface. Caraga Connect client 158 currently has
-    # 127.0.0.1:8010 registered as its callback, while LAN users reach this
-    # process through the computer name/current IPv4 address.
+    # Listen on every local interface. LAN users can reach this process through
+    # the Windows computer name or current IPv4 address.
     & php -S "0.0.0.0:$Port" $router
 } finally {
     Pop-Location

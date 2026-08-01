@@ -141,8 +141,8 @@ class SSOAuthService
 
         $response = Http::acceptJson()
             ->withToken($token)
-            ->connectTimeout(5)
-            ->timeout(20)
+            ->connectTimeout(3)
+            ->timeout(8)
             ->when(! config('services.cc_idp.verify_ssl'), fn ($http) => $http->withoutVerifying())
             ->get($url);
 
@@ -170,9 +170,214 @@ class SSOAuthService
         return $payload;
     }
 
+    public function fetchMyPortalProfileForIdentity(array $identity): array
+    {
+        $idNumber = trim((string) ($identity['id_number'] ?? ''));
+
+        if (filled($idNumber)) {
+            try {
+                $profile = $this->fetchMyPortalProfileByIdNumber($idNumber);
+
+                if ($this->profileMatchesIdentity($profile, $identity)) {
+                    return $profile;
+                }
+
+                Log::warning('MyPortal details-by-ID returned a profile that does not match SSO identity.', [
+                    'id_number' => $idNumber,
+                    'returned_id_number' => data_get($profile, 'data.id_number') ?: data_get($profile, 'id_number'),
+                ]);
+            } catch (\Throwable $exception) {
+                Log::warning('MyPortal details-by-ID lookup failed; trying search fallback.', [
+                    'id_number' => $idNumber,
+                    'message' => $exception->getMessage(),
+                ]);
+            }
+        }
+
+        $queries = collect([
+            $identity['id_number'] ?? null,
+            $identity['email'] ?? null,
+            $identity['username'] ?? null,
+            $identity['name'] ?? null,
+        ])->filter(fn ($value): bool => filled($value))
+            ->map(fn ($value): string => trim((string) $value))
+            ->unique()
+            ->values();
+
+        foreach ($queries as $query) {
+            $profile = $this->searchMyPortalProfile($query, $identity);
+
+            if ($profile !== null) {
+                return $profile;
+            }
+        }
+
+        try {
+            $profile = $this->fetchMyPortalProfile();
+
+            if ($this->profileMatchesIdentity($profile, $identity) || ! $this->hasReliableIdentity($identity)) {
+                return $profile;
+            }
+
+            Log::warning('MyPortal generic profile fallback returned a profile that does not match SSO identity.', [
+                'sso_username' => $identity['username'] ?? null,
+                'sso_email' => $identity['email'] ?? null,
+                'sso_id_number' => $identity['id_number'] ?? null,
+                'myportal_username' => data_get($profile, 'data.username') ?: data_get($profile, 'username'),
+                'myportal_email' => data_get($profile, 'data.email') ?: data_get($profile, 'email'),
+                'myportal_id_number' => data_get($profile, 'data.id_number') ?: data_get($profile, 'id_number'),
+            ]);
+        } catch (\Throwable $exception) {
+            Log::warning('MyPortal generic profile fallback failed.', [
+                'message' => $exception->getMessage(),
+            ]);
+        }
+
+        throw new RuntimeException('MyPortal did not return a matching employee profile for the signed-in SSO user.');
+    }
+
+    private function hasReliableIdentity(array $identity): bool
+    {
+        $idNumber = trim((string) ($identity['id_number'] ?? ''));
+        $username = trim((string) ($identity['username'] ?? ''));
+        $email = Str::lower(trim((string) ($identity['email'] ?? '')));
+
+        return $idNumber !== ''
+            || ($username !== '' && ! str_contains($username, 'example'))
+            || ($email !== '' && ! str_ends_with($email, '@example.test') && ! str_ends_with($email, '@test'));
+    }
+
+    private function fetchMyPortalProfileByIdNumber(string $idNumber): array
+    {
+        $token = $this->myPortalToken();
+        $template = (string) config('services.cc_idp.myportal_employee_details_url');
+
+        if (blank($template)) {
+            $template = rtrim((string) config('services.cc_idp.myportal_me_details_url'), '/').'/'.$idNumber;
+        }
+
+        $url = str_replace('{id_number}', rawurlencode($idNumber), $template);
+        $response = $this->myPortalJsonRequest($token)->get($url);
+
+        Log::info('MyPortal employee details API response:', [
+            'status' => $response->status(),
+            'url' => $url,
+            'has_data' => is_array(data_get($response->json(), 'data')),
+            'has_image_path' => filled(data_get($response->json(), 'data.image_path')),
+        ]);
+
+        if (! $response->ok()) {
+            throw new RuntimeException('MyPortal employee details lookup failed: '.$this->myPortalFailureMessage($response->status(), $response->json(), $response->body()));
+        }
+
+        $payload = $response->json();
+
+        if (! is_array($payload)) {
+            throw new RuntimeException('MyPortal returned an invalid employee details response.');
+        }
+
+        return $payload;
+    }
+
+    private function searchMyPortalProfile(string $query, array $identity): ?array
+    {
+        $token = $this->myPortalToken();
+        $url = (string) config('services.cc_idp.myportal_employee_search_url');
+
+        if (blank($url)) {
+            return null;
+        }
+
+        $response = $this->myPortalJsonRequest($token)->get($url, ['q' => $query]);
+
+        Log::info('MyPortal employee search API response:', [
+            'status' => $response->status(),
+            'url' => $url,
+            'query' => $query,
+            'has_data' => is_array(data_get($response->json(), 'data')),
+        ]);
+
+        if (! $response->ok()) {
+            return null;
+        }
+
+        $payload = $response->json();
+
+        if (! is_array($payload)) {
+            return null;
+        }
+
+        $records = $this->extractEmployeeRecords($payload);
+
+        foreach ($records as $record) {
+            $wrapped = ['status' => data_get($payload, 'status', 'success'), 'data' => $record];
+
+            if ($this->profileMatchesIdentity($wrapped, $identity)) {
+                return $wrapped;
+            }
+        }
+
+        return null;
+    }
+
+    private function myPortalJsonRequest(string $token): \Illuminate\Http\Client\PendingRequest
+    {
+        return Http::acceptJson()
+            ->withToken($token)
+            ->connectTimeout(3)
+            ->timeout(6)
+            ->when(! config('services.cc_idp.verify_ssl'), fn ($http) => $http->withoutVerifying());
+    }
+
+    private function extractEmployeeRecords(array $payload): array
+    {
+        $data = data_get($payload, 'data');
+
+        if (is_array($data) && array_is_list($data)) {
+            return $data;
+        }
+
+        foreach (['data.data', 'employees', 'results', 'records'] as $key) {
+            $records = data_get($payload, $key);
+
+            if (is_array($records) && array_is_list($records)) {
+                return $records;
+            }
+        }
+
+        return is_array($data) ? [$data] : [];
+    }
+
+    public function profileMatchesIdentity(array $profile, array $identity): bool
+    {
+        $checks = [
+            'username' => ['data.username', 'username'],
+            'email' => ['data.email', 'data.official_email', 'email', 'official_email'],
+            'id_number' => ['data.id_number', 'id_number'],
+        ];
+
+        foreach ($checks as $field => $keys) {
+            $expected = Str::lower(trim((string) ($identity[$field] ?? '')));
+
+            if ($expected === '') {
+                continue;
+            }
+
+            foreach ($keys as $key) {
+                $actual = Str::lower(trim((string) data_get($profile, $key)));
+
+                if ($actual !== '' && $actual === $expected) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     public function mapProfileToUserFields(array $profile): array
     {
-        $name = $this->profileValue($profile, ['name', 'full_name', 'fullname', 'display_name', 'displayname'])
+        $name = $this->profileValue($profile, ['name', 'full_name', 'fullname', 'display_name', 'displayname', 'data.fullname'])
             ?: $this->composedNameFromProfile($profile);
 
         return [
@@ -185,10 +390,10 @@ class SSOAuthService
             'position' => $this->profileValue($profile, ['position', 'position_title', 'job_title', 'title', 'data.position', 'data.job_title']),
             'designation' => $this->profileValue($profile, ['designation', 'designation_title', 'functional_designation', 'data.designation']),
             'area_of_assignment' => $this->profileValue($profile, ['area_of_assignment', 'area_assignment', 'place_of_assignment', 'station', 'duty_station', 'data.area_of_assignment']),
-            'employment_status' => $this->profileValue($profile, ['data.employment_status', 'data.employee_status', 'data.status', 'employment_status', 'employee_status', 'employment_type', 'status']),
+            'employment_status' => $this->profileValue($profile, ['data.empstatus', 'data.employment_status', 'data.employee_status', 'data.status', 'empstatus', 'employment_status', 'employee_status', 'employment_type', 'status']),
             'contact_number' => $this->profileValue($profile, ['contact_number', 'contact', 'phone_number', 'telephone', 'contact_no', 'data.contact_number', 'data.contact']),
             'mobile_no' => $this->profileValue($profile, ['mobile_no', 'mobile_number', 'mobile', 'cellphone', 'data.mobile_no', 'data.mobile']),
-            'avatar' => $this->normalizeAvatarUrl($this->profileValue($profile, ['image', 'image_path', 'avatar', 'photo', 'photo_url', 'profile_photo_url', 'picture', 'data.image', 'data.image_path', 'data.avatar', 'data.photo'])),
+            'avatar' => $this->normalizeAvatarUrl($this->profileValue($profile, ['data.saved_image_path', 'data.image_path', 'image', 'image_path', 'saved_image_path', 'avatar', 'photo', 'photo_url', 'profile_photo_url', 'picture', 'data.image', 'data.avatar', 'data.photo'])),
         ];
     }
 
@@ -271,8 +476,8 @@ class SSOAuthService
 
         return Cache::remember($cacheKey, max(60, (int) config('services.cc_idp.myportal_token_cache_seconds')), function () use ($username, $password, $url): string {
             $response = Http::acceptJson()
-                ->connectTimeout(5)
-                ->timeout(20)
+                ->connectTimeout(3)
+                ->timeout(8)
                 ->when(! config('services.cc_idp.verify_ssl'), fn ($http) => $http->withoutVerifying())
                 ->asMultipart()
                 ->post($url, [

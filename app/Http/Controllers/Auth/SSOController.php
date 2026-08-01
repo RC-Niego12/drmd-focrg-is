@@ -115,9 +115,9 @@ class SSOController extends Controller
                     'username' => $username ?: $existingUser?->username,
                     'email' => $email ?: $existingUser?->email ?: (($username ?: Str::slug($sub)).'@caraga-connect.local'),
                     'id_number' => $idNumber ?: $existingUser?->id_number,
-                    'office' => $existingUser?->office ?: config('services.cc_idp.default_office'),
-                    'position' => $existingUser?->position,
-                    'designation' => $existingUser?->designation,
+                    'office' => $ssoMappedProfile['office'] ?: $existingUser?->office ?: config('services.cc_idp.default_office'),
+                    'position' => $ssoMappedProfile['position'] ?: $existingUser?->position,
+                    'designation' => $ssoMappedProfile['designation'] ?: $existingUser?->designation,
                     'area_of_assignment' => $ssoMappedProfile['area_of_assignment'] ?: $existingUser?->area_of_assignment,
                     'employment_status' => $ssoMappedProfile['employment_status'] ?: $existingUser?->employment_status,
                     'sso_profile_payload' => [
@@ -133,6 +133,13 @@ class SSOController extends Controller
                     'is_active' => true,
                 ]
             );
+
+            $this->syncMyPortalProfileAfterSso($user, $ssoLookupProfile, [
+                'username' => $username,
+                'email' => $email,
+                'id_number' => $idNumber,
+                'name' => $name,
+            ]);
 
             $guest = Role::firstOrCreate(['name' => 'guest', 'guard_name' => 'web']);
 
@@ -227,6 +234,91 @@ class SSOController extends Controller
         }
 
         return redirect()->intended(route('dashboard'));
+    }
+
+    private function syncMyPortalProfileAfterSso(User $user, array $ssoProfile, array $identity): void
+    {
+        try {
+            $identity = [
+                ...$identity,
+                'username' => $identity['username'] ?? $user->username,
+                'email' => $identity['email'] ?? $user->email,
+                'id_number' => $identity['id_number'] ?? $user->id_number,
+                'name' => $identity['name'] ?? $user->name,
+            ];
+
+            $myPortalProfile = $this->profileHasRichEmployeeData($ssoProfile)
+                ? $ssoProfile
+                : $this->sso->fetchMyPortalProfileForIdentity($identity);
+
+            if (! $this->sso->profileMatchesIdentity($myPortalProfile, $identity)) {
+                Log::warning('Automatic MyPortal sync skipped because returned profile does not match signed-in SSO identity.', [
+                    'user_id' => $user->id,
+                    'sso_username' => $identity['username'] ?? null,
+                    'sso_email' => $identity['email'] ?? null,
+                    'sso_id_number' => $identity['id_number'] ?? null,
+                    'myportal_username' => data_get($myPortalProfile, 'data.username') ?: data_get($myPortalProfile, 'username'),
+                    'myportal_email' => data_get($myPortalProfile, 'data.email') ?: data_get($myPortalProfile, 'email'),
+                    'myportal_id_number' => data_get($myPortalProfile, 'data.id_number') ?: data_get($myPortalProfile, 'id_number'),
+                ]);
+
+                return;
+            }
+
+            $mapped = $this->sso->mapProfileToUserFields($myPortalProfile);
+            $profileFields = [
+                'name',
+                'username',
+                'email',
+                'id_number',
+                'office',
+                'position',
+                'designation',
+                'area_of_assignment',
+                'employment_status',
+                'contact_number',
+                'mobile_no',
+                'avatar',
+            ];
+            $profilePayload = collect($mapped)
+                ->only($profileFields)
+                ->filter(fn ($value): bool => filled($value))
+                ->all();
+
+            if ($profilePayload === []) {
+                Log::warning('Automatic MyPortal sync returned no mappable profile fields.', ['user_id' => $user->id]);
+
+                return;
+            }
+
+            $existingPayload = is_array($user->sso_profile_payload) ? $user->sso_profile_payload : [];
+
+            $user->forceFill([
+                ...$profilePayload,
+                'sso_profile_payload' => [
+                    ...$existingPayload,
+                    'myportal' => $myPortalProfile,
+                    'myportal_checked_at' => now()->toISOString(),
+                ],
+            ])->save();
+        } catch (Throwable $exception) {
+            Log::warning('Automatic MyPortal sync after SSO failed.', [
+                'user_id' => $user->id,
+                'message' => $exception->getMessage(),
+            ]);
+        }
+    }
+
+    private function profileHasRichEmployeeData(array $profile): bool
+    {
+        return filled(data_get($profile, 'data.position'))
+            || filled(data_get($profile, 'data.division'))
+            || filled(data_get($profile, 'data.area_of_assignment'))
+            || filled(data_get($profile, 'data.image_path'))
+            || filled(data_get($profile, 'position'))
+            || filled(data_get($profile, 'division'))
+            || filled(data_get($profile, 'area_of_assignment'))
+            || filled(data_get($profile, 'image_path'));
     }
 
     private function shouldBypassMfaAuthentication(): bool

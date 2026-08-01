@@ -5,7 +5,7 @@ import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 
 const iconButton = 'inline-flex items-center justify-center rounded-md border border-slate-200 bg-white p-2 text-slate-700 shadow-sm transition hover:bg-slate-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800';
-const actionButton = 'inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-black text-slate-700 shadow-sm transition hover:bg-slate-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800';
+const actionButton = 'inline-flex items-center justify-center rounded-md border border-slate-200 bg-white p-2 text-slate-700 shadow-sm transition hover:bg-slate-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800';
 
 export default function ExportButtons({ targetRef, filename, onMessage, showOnlyFullscreen = false }) {
     const [fullscreen, setFullscreen] = useState(false);
@@ -225,7 +225,7 @@ export default function ExportButtons({ targetRef, filename, onMessage, showOnly
     if (showOnlyFullscreen) {
         return (
             <div data-html2canvas-ignore="true" data-export-ignore="true" className="flex items-center">
-                <button type="button" onClick={toggleFullscreen} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} className={iconButton}>
+                <button type="button" onClick={toggleFullscreen} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} className={iconButton}>
                     {fullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
                 </button>
             </div>
@@ -234,19 +234,16 @@ export default function ExportButtons({ targetRef, filename, onMessage, showOnly
 
     return (
         <div data-html2canvas-ignore="true" data-export-ignore="true" className="flex flex-wrap items-center gap-2">
-            <button type="button" onClick={copyHtml} title="Copy summary as image" className={actionButton}>
+            <button type="button" onClick={copyHtml} title="Copy summary as image" aria-label="Copy summary as image" className={actionButton}>
                 <ClipboardCheck className="h-4 w-4" />
-                Copy Image
             </button>
-            <button type="button" onClick={exportImage} title="Export summary as image" className={actionButton}>
+            <button type="button" onClick={exportImage} title="Export summary as image" aria-label="Export summary as image" className={actionButton}>
                 <Image className="h-4 w-4" />
-                Image
             </button>
-            <button type="button" onClick={exportPdf} title="Export summary as PDF" className={actionButton}>
+            <button type="button" onClick={exportPdf} title="Export summary as PDF" aria-label="Export summary as PDF" className={actionButton}>
                 <FileText className="h-4 w-4" />
-                PDF
             </button>
-            <button type="button" onClick={toggleFullscreen} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} className={iconButton}>
+            <button type="button" onClick={toggleFullscreen} title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} className={iconButton}>
                 {fullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
             </button>
         </div>

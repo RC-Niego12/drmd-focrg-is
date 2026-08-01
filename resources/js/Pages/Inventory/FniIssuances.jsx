@@ -397,7 +397,7 @@ function renderGrandTotalRow(rows) {
 
     return (
         <tr key="grand-total" className="sticky bottom-0 z-10 bg-slate-50 text-sm font-black dark:bg-zinc-950">
-            <td colSpan={7} className="px-4 py-3">Grand total</td>
+            <td colSpan={7} className="px-4 py-3">Total</td>
             <td className="whitespace-nowrap px-4 py-3 text-right">{formatNumber(totalQuantity)}</td>
             <td />
             <td className="whitespace-nowrap px-4 py-3 text-right">{formatCurrency(totalCost)}</td>

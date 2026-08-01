@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class AssistanceRequest extends Model
@@ -16,6 +17,7 @@ class AssistanceRequest extends Model
     protected $fillable = [
         'reference_number',
         'submission_type',
+        'source_lgu_dromic_request_id',
         'proposal_type',
         'incident_id',
         'assessment_type_id',
@@ -25,6 +27,7 @@ class AssistanceRequest extends Model
         'requesting_agency',
         'lgu',
         'lgu_level',
+        'lgu_psgc_code',
         'province',
         'municipality',
         'barangay',
@@ -38,12 +41,27 @@ class AssistanceRequest extends Model
         'remarks',
         'status',
         'lgu_routing_status',
+        'lgu_report_status', 'lgu_dromic_validation_status', 'lgu_dromic_reviewed_by',
+        'lgu_dromic_reviewed_at', 'lgu_dromic_review_note', 'lgu_dromic_review_screenshots', 'lgu_dromic_review_history',
+        'lgu_dromic_correction_scope', 'lgu_dromic_correction_resolved_at',
+        'lgu_dromic_seen_at', 'lgu_dromic_seen_by',
+        'lgu_relief_validation_status', 'lgu_relief_reviewed_by', 'lgu_relief_reviewed_at', 'lgu_relief_review_note', 'lgu_relief_review_screenshots', 'lgu_relief_review_history',
+        'lgu_relief_correction_scope', 'lgu_relief_correction_resolved_at',
+        'lgu_correction_of_id', 'lgu_correction_target',
+        'lgu_relief_seen_at', 'lgu_relief_seen_by',
+        'lgu_dromic_series_key', 'lgu_dromic_report_number', 'lgu_dromic_revision_number',
+        'lgu_dromic_report_classification', 'lgu_relief_request_reference', 'lgu_dromic_draft_save_count', 'lgu_dromic_terminal_at',
+        'lgu_finalized_at', 'lgu_submitted_to_dswd_at',
+        'lgu_signed_report_path', 'lgu_signed_report_name', 'lgu_signed_report_uploaded_at',
+        'lgu_signed_request_path', 'lgu_signed_request_name', 'lgu_signed_request_uploaded_at',
+        'lgu_signed_copy_reminder_sent_at',
         'submitted_at',
         'completed_at',
         'date_received_by_drmd', 'request_drn', 'office_agency_details', 'endorsed_to_drrs', 'date_endorsed_to_drrs',
-        'incident_details', 'incident_count', 'response_drn', 'assessment_drn', 'source_document_url', 'response_letter_url',
+        'incident_details', 'incident_count', 'response_drn', 'assessment_drn', 'source_document_url', 'drmd_aa_photo_paths', 'response_letter_url',
         'coordinated_with_rros', 'date_coordinated_with_rros', 'requester_position', 'requester_address', 'contact_number',
         'affected_families', 'assigned_social_worker',
+        'assessment_acted_by', 'assessment_on_behalf_of', 'assessment_on_behalf_reason', 'assessment_acted_at',
         'lgu_dromic_payload', 'lgu_dromic_narrative', 'drmd_aa_remarks', 'drmd_aa_routed_by', 'drmd_aa_routed_at',
         'drmd_chief_remarks', 'drmd_chief_routed_by', 'drmd_chief_routed_at', 'drmd_assigned_to', 'drmd_assigned_section',
         'epirma_status', 'epirma_transaction_id', 'epirma_callback_token', 'epirma_signature_reference', 'epirma_signed_at',
@@ -55,12 +73,33 @@ class AssistanceRequest extends Model
             'date_requested' => 'date',
             'submitted_at' => 'datetime',
             'completed_at' => 'datetime',
+            'lgu_finalized_at' => 'datetime',
+            'lgu_dromic_report_number' => 'integer',
+            'lgu_dromic_revision_number' => 'integer',
+            'lgu_dromic_draft_save_count' => 'integer',
+            'lgu_dromic_terminal_at' => 'datetime',
+            'lgu_submitted_to_dswd_at' => 'datetime',
+            'lgu_dromic_reviewed_at' => 'datetime',
+            'lgu_dromic_review_screenshots' => 'array',
+            'lgu_dromic_review_history' => 'array',
+            'lgu_dromic_correction_resolved_at' => 'datetime',
+            'lgu_dromic_seen_at' => 'datetime',
+            'lgu_relief_reviewed_at' => 'datetime',
+            'lgu_relief_review_screenshots' => 'array',
+            'lgu_relief_review_history' => 'array',
+            'lgu_relief_correction_resolved_at' => 'datetime',
+            'lgu_relief_seen_at' => 'datetime',
+            'lgu_signed_report_uploaded_at' => 'datetime',
+            'lgu_signed_request_uploaded_at' => 'datetime',
+            'lgu_signed_copy_reminder_sent_at' => 'datetime',
             'date_received_by_drmd' => 'date', 'date_endorsed_to_drrs' => 'date', 'date_coordinated_with_rros' => 'date',
             'endorsed_to_drrs' => 'boolean', 'coordinated_with_rros' => 'boolean',
             'assessment_form_data' => 'array',
+            'drmd_aa_photo_paths' => 'array',
             'lgu_dromic_payload' => 'array',
             'drmd_aa_routed_at' => 'datetime',
             'drmd_chief_routed_at' => 'datetime',
+            'assessment_acted_at' => 'datetime',
             'epirma_signed_at' => 'datetime',
         ];
     }
@@ -68,6 +107,46 @@ class AssistanceRequest extends Model
     public function items(): HasMany
     {
         return $this->hasMany(RequestItem::class, 'request_id');
+    }
+
+    public function lguDromicRequestedItems(): HasMany
+    {
+        return $this->hasMany(LguDromicRequestedItem::class, 'request_id');
+    }
+
+    public function signedDocumentVersions(): HasMany
+    {
+        return $this->hasMany(LguSignedDocumentVersion::class, 'request_id')->latest();
+    }
+
+    public function lguDromicReviewComments(): HasMany
+    {
+        return $this->hasMany(LguDromicReviewComment::class, 'request_id')->latest();
+    }
+
+    public function lguDromicReviewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_dromic_reviewed_by');
+    }
+
+    public function lguReliefReviewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_relief_reviewed_by');
+    }
+
+    public function lguDromicViewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_dromic_seen_by');
+    }
+
+    public function lguReliefViewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_relief_seen_by');
+    }
+
+    public function reliefAugmentationRequest(): HasOne
+    {
+        return $this->hasOne(self::class, 'source_lgu_dromic_request_id');
     }
 
     public function incident(): BelongsTo
@@ -85,6 +164,16 @@ class AssistanceRequest extends Model
         return $this->belongsTo(User::class, 'encoded_by');
     }
 
+    public function assessmentActor(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'assessment_acted_by');
+    }
+
+    public function assessmentOnBehalfOwner(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'assessment_on_behalf_of');
+    }
+
     public function lguSubmitter(): BelongsTo
     {
         return $this->belongsTo(User::class, 'lgu_submitted_by');
@@ -98,6 +187,31 @@ class AssistanceRequest extends Model
     public function requestParty(): BelongsTo
     {
         return $this->belongsTo(RequestParty::class);
+    }
+
+    public function sourceLguDromicReport(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'source_lgu_dromic_request_id');
+    }
+
+    /**
+     * LGU-linked FNI rows need a validated signed request letter before a new assessment can start.
+     */
+    public function blocksNewAssessmentForUnsignedReliefValidation(): bool
+    {
+        $source = $this->relationLoaded('sourceLguDromicReport')
+            ? $this->sourceLguDromicReport
+            : $this->sourceLguDromicReport()->first([
+                'id',
+                'lgu_signed_request_path',
+                'lgu_relief_validation_status',
+            ]);
+
+        if (! $source || blank($source->lgu_signed_request_path)) {
+            return false;
+        }
+
+        return $source->lgu_relief_validation_status !== 'validated_no_findings';
     }
 
     public function approvals(): HasMany

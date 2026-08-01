@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import SearchableSelect from '@/Components/SearchableSelect';
 import AppLayout, { Card } from '@/Layouts/AppLayout';
 import { formatDateTime } from '@/Utils/dateFormat';
+import { isRealtimeConnected, listenRealtime } from '@/realtime';
 
 export default function Request({ access, roleOptions }) {
     const [liveAccess, setLiveAccess] = useState(access);
@@ -19,7 +20,7 @@ export default function Request({ access, roleOptions }) {
 
     useEffect(() => {
         let redirectTimer;
-        const poll = async () => {
+        const refreshAccess = async () => {
             try {
                 const response = await fetch('/notifications', { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
                 if (!response.ok) return;
@@ -29,12 +30,17 @@ export default function Request({ access, roleOptions }) {
                     redirectTimer = window.setTimeout(() => router.visit(payload.access.home_url), 1400);
                 }
             } catch {
-                // Continue polling after temporary connection failures.
+                // Retain current access state during temporary failures.
             }
         };
-        const interval = window.setInterval(poll, 8000);
-        poll();
+        const stopRealtime = listenRealtime('notification.changed', refreshAccess);
+        const interval = window.setInterval(
+            refreshAccess,
+            isRealtimeConnected() ? 300000 : 60000,
+        );
+        refreshAccess();
         return () => {
+            stopRealtime();
             window.clearInterval(interval);
             if (redirectTimer) window.clearTimeout(redirectTimer);
         };

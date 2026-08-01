@@ -93,8 +93,8 @@ class AiRogerSystemMapService
                 'sections' => ['Proposal Registry', 'Endorse Proposal'],
             ],
             [
-                'path' => '/lgu/dromic-requests',
-                'label' => 'LGU DROMIC',
+                'path' => '/lgu/dromic-sitrep',
+                'label' => 'DROMIC / SitRep',
                 'permissions' => ['submit lgu dromic requests'],
                 'purpose' => 'City/municipal LGUs submit DROMIC reports; relief augmentation request is optional. PLGUs only monitor city/municipal reports in their province.',
                 'sections' => ['PLGU Monitoring View or LGU Disaster Reporting', 'Submitted DROMIC Reports', 'PDF Output', 'AI Generate/Polish Narrative'],
@@ -132,7 +132,7 @@ class AiRogerSystemMapService
                 'label' => 'DROMIC',
                 'permissions' => ['manage dromic reports'],
                 'purpose' => 'DRIMS creates and monitors DROMIC reports for eligible approved/released requests.',
-                'sections' => ['Create DROMIC Report', 'DROMIC Reports'],
+                'sections' => ['Create DROMIC / Situational Report', 'DROMIC / SitRep Reports'],
             ],
             [
                 'path' => '/access-management',
@@ -146,7 +146,7 @@ class AiRogerSystemMapService
                 'label' => 'PSGC Addresses',
                 'permissions' => ['manage users', 'manage psgc addresses'],
                 'purpose' => 'Manage local PSGC references, barangays, districts, and city/municipality assignments.',
-                'sections' => ['Summary Cards', 'Local PSGC Address Reference', 'PSGC Barangay Browser', 'Province District Options', 'Managed Districts'],
+                'sections' => ['Summary Cards', 'Local PSGC Address Reference', 'PSGC Barangay Browser', 'Province District Options', 'Districts'],
             ],
             [
                 'path' => '/population',
@@ -187,7 +187,7 @@ class AiRogerSystemMapService
         $parts = [];
 
         if ($user->can('submit lgu dromic requests')) {
-            $parts[] = 'LGU guide: City/municipal LGUs go to /lgu/dromic-requests to submit DROMIC reports. Use the checkbox "Include a Request for Relief Augmentation" only if requesting relief. PLGU accounts use the same menu only to monitor reports; they do not create separate reports.';
+            $parts[] = 'LGU guide: City/municipal LGUs go to /lgu/dromic-sitrep to submit DROMIC / Situational Reports. Use the checkbox "Include a Request for Relief Augmentation" only if requesting relief. PLGU accounts use the same menu only to monitor reports; they do not create separate reports.';
         }
 
         if ($user->can('route lgu dromic requests')) {

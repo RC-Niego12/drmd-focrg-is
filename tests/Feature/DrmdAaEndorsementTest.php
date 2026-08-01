@@ -50,6 +50,7 @@ it('allows DRMD AA to endorse an FNI request before DRRS location assessment', f
 it('keeps drafts under review and marks them final only after a verified e-PIRMA callback', function (): void {
     $this->seed(DatabaseSeeder::class);
     $user = User::where('email', 'drrs@example.test')->firstOrFail();
+    $user->forceFill(['id_number' => '16-11720'])->save();
     $record = AssistanceRequest::create([
         'reference_number' => 'REQ-ASSESSMENT-STATUS',
         'requesting_agency' => 'Test Proposing Party',
@@ -57,8 +58,11 @@ it('keeps drafts under review and marks them final only after a verified e-PIRMA
         'date_requested' => '2026-07-15',
         'status' => 'under_review',
         'assessment_status' => 'draft',
+        'assessment_acted_by' => $user->id,
+        'endorsed_to_drrs' => true,
     ]);
 
+    config()->set('services.epirma.sign_url', '');
     config()->set('services.epirma.base_url', 'https://epirma.example.test');
     config()->set('services.epirma.client_secret', 'test-secret');
     config()->set('services.epirma.app_name', 'DRIMS');
@@ -66,6 +70,7 @@ it('keeps drafts under review and marks them final only after a verified e-PIRMA
     config()->set('services.epirma.allow_insecure_ssl', false);
     config()->set('services.epirma.public_app_url', null);
     config()->set('services.epirma.force_https_urls', false);
+    config()->set('services.epirma.local_bypass', false);
 
     Illuminate\Support\Facades\Http::fake([
         'https://epirma.example.test/api/microservice/build-authorize' => Illuminate\Support\Facades\Http::response([
@@ -86,7 +91,7 @@ it('keeps drafts under review and marks them final only after a verified e-PIRMA
         ->assertHeader('X-Inertia-Location');
 
     $location = $handoff->headers->get('X-Inertia-Location');
-    expect($location)->toContain('/microservice/documents');
+    expect($location)->toContain('/microservice/document-routing');
     parse_str((string) parse_url($location, PHP_URL_QUERY), $query);
     expect($query)->toHaveKeys(['app_name', 'external_document_uuid', 'redirect_url', 'secret', 'token', 'document_url'])
         ->and($query['token'])->toBe('epirma-auth-token')
@@ -107,6 +112,77 @@ it('keeps drafts under review and marks them final only after a verified e-PIRMA
         ->assertRedirect();
     expect($record->fresh()->status)->toBe('under_review')
         ->and($record->fresh()->assessment_status)->toBe('draft');
+});
+
+it('prefers the develop-compatible EPIRMA_SIGN_URL handoff without build-authorize', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    $user = User::where('email', 'drrs@example.test')->firstOrFail();
+    $record = AssistanceRequest::create([
+        'reference_number' => 'REQ-EPIRMA-SIGN-URL',
+        'requesting_agency' => 'Test Proposing Party',
+        'requester' => 'Test Requester',
+        'date_requested' => '2026-07-15',
+        'status' => 'under_review',
+        'assessment_status' => 'draft',
+        'assessment_acted_by' => $user->id,
+        'endorsed_to_drrs' => true,
+    ]);
+
+    config()->set('services.epirma.sign_url', 'https://epirma.example.test/sign');
+    config()->set('services.epirma.base_url', 'https://epirma.example.test');
+    config()->set('services.epirma.client_secret', 'test-secret');
+    config()->set('services.epirma.local_bypass', false);
+
+    Illuminate\Support\Facades\Http::fake();
+
+    $handoff = $this->actingAs($user)
+        ->withHeader('X-Inertia', 'true')
+        ->post(route('requests.epirma.sign', $record))
+        ->assertStatus(409)
+        ->assertHeader('X-Inertia-Location');
+
+    $location = $handoff->headers->get('X-Inertia-Location');
+    expect($location)->toStartWith('https://epirma.example.test/sign?')
+        ->and($location)->not->toContain('/microservice/documents')
+        ->and($location)->not->toContain('/microservice/document-routing');
+
+    parse_str((string) parse_url($location, PHP_URL_QUERY), $query);
+    expect($query)->toHaveKeys(['transaction_id', 'reference_number', 'document_url', 'callback_url', 'return_url'])
+        ->and($query['reference_number'])->toBe('REQ-EPIRMA-SIGN-URL')
+        ->and(urldecode($query['document_url']))->toContain('/assessment-pdf')
+        ->and(urldecode($query['callback_url']))->toContain('/integrations/epirma/requests/'.$record->id.'/callback');
+
+    Illuminate\Support\Facades\Http::assertNothingSent();
+    expect($record->fresh()->epirma_status)->toBe('pending')
+        ->and($record->fresh()->assessment_status)->toBe('draft');
+});
+
+it('uses local bypass when the configured e-PIRMA host refuses connections', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    $user = User::where('email', 'drrs@example.test')->firstOrFail();
+    $record = AssistanceRequest::create([
+        'reference_number' => 'REQ-EPIRMA-LOCAL-BYPASS',
+        'requesting_agency' => 'Test Proposing Party',
+        'requester' => 'Test Requester',
+        'date_requested' => '2026-07-15',
+        'status' => 'under_review',
+        'assessment_status' => 'draft',
+        'assessment_acted_by' => $user->id,
+        'endorsed_to_drrs' => true,
+    ]);
+
+    config()->set('services.epirma.sign_url', 'http://127.0.0.1:59999/sign');
+    config()->set('services.epirma.local_bypass', true);
+
+    $this->actingAs($user)
+        ->post(route('requests.epirma.sign', $record))
+        ->assertRedirect(url('/requests?default_tab=assessments'));
+
+    $fresh = $record->fresh();
+    expect($fresh->assessment_status)->toBe('final')
+        ->and($fresh->status)->toBe('acted')
+        ->and($fresh->epirma_status)->toBe('signed')
+        ->and($fresh->epirma_signature_reference)->toStartWith('LOCAL-BYPASS-');
 });
 
 it('allows a submitted or disapproved assessment to return to draft for correction', function (): void {

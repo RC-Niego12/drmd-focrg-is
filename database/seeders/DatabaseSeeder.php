@@ -33,6 +33,8 @@ class DatabaseSeeder extends Seeder
             'submit drmd aa requests',
             'submit lgu dromic requests',
             'route lgu dromic requests',
+            'manage regional alerts',
+            'view regional alert acknowledgements',
         ];
 
         foreach ($permissions as $permission) {
@@ -47,16 +49,18 @@ class DatabaseSeeder extends Seeder
         $drmdChief = Role::firstOrCreate(['name' => 'DRMD Chief', 'guard_name' => 'web']);
         $lgu = Role::firstOrCreate(['name' => 'LGU', 'guard_name' => 'web']);
         $financialAnalyst = Role::firstOrCreate(['name' => 'DRMD Financial Analyst', 'guard_name' => 'web']);
+        $ocdCaraga = Role::firstOrCreate(['name' => 'OCD Caraga', 'guard_name' => 'web']);
         Role::firstOrCreate(['name' => 'guest', 'guard_name' => 'web']);
 
         $superAdmin->syncPermissions($permissions);
-        $rros->syncPermissions(['view dashboards', 'manage inventory', 'manage warehouses', 'process requests', 'monitor requests', 'manage dispatches', 'manage near expiry', 'export reports']);
-        $drrs->syncPermissions(['view dashboards', 'encode requests', 'monitor requests', 'manage near expiry', 'export reports']);
-        $drims->syncPermissions(['view dashboards', 'monitor requests', 'manage dromic reports', 'export reports']);
-        $drmdAa->syncPermissions(['submit drmd aa requests', 'route lgu dromic requests']);
-        $drmdChief->syncPermissions(['view dashboards', 'route lgu dromic requests']);
+        $rros->syncPermissions(['view dashboards', 'manage inventory', 'manage warehouses', 'process requests', 'monitor requests', 'manage dispatches', 'manage near expiry', 'export reports', 'view regional alert acknowledgements']);
+        $drrs->syncPermissions(['view dashboards', 'encode requests', 'monitor requests', 'manage near expiry', 'export reports', 'view regional alert acknowledgements']);
+        $drims->syncPermissions(['view dashboards', 'monitor requests', 'manage dromic reports', 'export reports', 'view regional alert acknowledgements']);
+        $drmdAa->syncPermissions(['submit drmd aa requests', 'route lgu dromic requests', 'view regional alert acknowledgements']);
+        $drmdChief->syncPermissions(['view dashboards', 'route lgu dromic requests', 'view regional alert acknowledgements']);
         $lgu->syncPermissions(['submit lgu dromic requests']);
-        $financialAnalyst->syncPermissions(['view dashboards', 'manage standby funds', 'export reports']);
+        $financialAnalyst->syncPermissions(['view dashboards', 'manage standby funds', 'export reports', 'view regional alert acknowledgements']);
+        $ocdCaraga->syncPermissions(['manage regional alerts', 'view regional alert acknowledgements']);
 
         $users = [
             ['name' => 'Super Admin', 'email' => 'superadmin@example.test', 'office' => 'Super Admin', 'role' => $superAdmin],
@@ -66,6 +70,7 @@ class DatabaseSeeder extends Seeder
             ['name' => 'DRMD AA User', 'email' => 'drmd-aa@example.test', 'office' => 'DRMD AA', 'role' => $drmdAa],
             ['name' => 'DRMD Chief', 'email' => 'drmd-chief@example.test', 'office' => 'DRMD', 'role' => $drmdChief],
             ['name' => 'DRMD Financial Analyst', 'email' => 'financial@example.test', 'office' => 'DRMD Financial Analyst', 'role' => $financialAnalyst],
+            ['name' => 'OCD Caraga', 'email' => 'ocd-caraga@dromis.local', 'username' => 'ocd-caraga', 'office' => 'Office of Civil Defense Caraga', 'role' => $ocdCaraga],
         ];
 
         foreach ($users as $data) {
@@ -73,6 +78,7 @@ class DatabaseSeeder extends Seeder
                 ['email' => $data['email']],
                 [
                     'name' => $data['name'],
+                    'username' => $data['username'] ?? null,
                     'office' => $data['office'],
                     'position' => 'System User',
                     'password' => Hash::make('password'),

@@ -135,6 +135,10 @@ class MfaController extends Controller
             return redirect()->route('access.request');
         }
 
+        if ($user && ($user->hasRole('LGU') || filled($user->lgu_psgc_code) || filled($user->lgu_level) || filled($user->lgu_name))) {
+            return redirect()->route('dashboard');
+        }
+
         return redirect()->intended(route('dashboard'));
     }
 }

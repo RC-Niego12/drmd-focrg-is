@@ -24,15 +24,20 @@ class DashboardController extends Controller
     public function __invoke(InventoryBalanceService $inventoryBalanceService): Response
     {
         $user = request()->user();
-        $role = $this->dashboardRole($user);
+        $role = request()->attributes->get('dashboard_role_override') ?: $this->dashboardRole($user);
         $isSuperAdmin = $role === 'Super Admin';
         $isRros = $role === 'RROS';
         $isDrrs = $role === 'DRRS';
         $isDrmdAa = $role === 'DRMD AA';
         $isDrims = $role === 'DRIMS';
         $isFinancialAnalyst = $role === 'DRMD Financial Analyst';
+        $isLgu = $user->hasRole('LGU')
+            || filled($user->lgu_psgc_code)
+            || filled($user->lgu_level)
+            || filled($user->lgu_name);
 
-        if ($isDrmdAa) {
+        if (! request()->attributes->has('dashboard_role_override')
+            && ($isDrmdAa || $isDrims || $isDrrs || $isFinancialAnalyst || $isLgu)) {
             return Inertia::render('Dashboard/Empty', ['dashboardRole' => $role]);
         }
         $canViewInventoryDashboard = $isRros || $isDrrs || $isSuperAdmin || $isFinancialAnalyst;
@@ -46,7 +51,8 @@ class DashboardController extends Controller
         $warehouseBalances = $inventoryBalanceService->warehouseBalances();
         $totalIssuances = $canViewInventoryDashboard ? $this->transactionSummary('release') : ['quantity' => null, 'cost' => null];
         $totalReceipts = $canViewInventoryDashboard ? $this->transactionSummary('receipt') : ['quantity' => null, 'cost' => null];
-        $drrsRequestQuery = AssistanceRequest::query();
+        $drrsRequestQuery = AssistanceRequest::query()
+            ->where('submission_type', '!=', 'lgu_dromic_relief_request');
 
         if ($isDrrs) {
             $drrsRequestQuery->where('encoded_by', $user->id);
@@ -54,6 +60,7 @@ class DashboardController extends Controller
 
         return Inertia::render('Dashboard/Index', [
             'dashboardRole' => $role,
+            'dashboardTitle' => request()->attributes->has('dashboard_role_override') ? 'RROS Dashboard' : 'Dashboard',
             'visibleSections' => [
                 'inventory' => $isRros || $isDrrs || $isSuperAdmin,
                 'warehouses' => $isRros || $isDrrs || $isDrims || $isSuperAdmin,
@@ -127,6 +134,25 @@ class DashboardController extends Controller
             ]) : [],
             'dromicTrend' => $isDrims ? DromicReport::query()->selectRaw('status, count(*) as total')->groupBy('status')->pluck('total', 'status') : [],
         ]);
+    }
+
+    public function rros(InventoryBalanceService $inventoryBalanceService): Response
+    {
+        $user = request()->user();
+        abort_unless($user->hasAnyRole([
+            'Super Admin',
+            'RROS',
+            'DRRS',
+            'DRIMS',
+            'DRMD AA',
+            'DRMD Chief',
+            'DRMD Financial Analyst',
+            'QRT',
+            'Quick Response Team',
+        ]), 403);
+        request()->attributes->set('dashboard_role_override', 'RROS');
+
+        return $this($inventoryBalanceService);
     }
 
     private function dashboardRole(User $user): string

@@ -10,7 +10,10 @@ final class AssessmentNarrative
         $lines = array_values(array_filter($lines, function (string $line): bool {
             $normalized = trim($line);
 
-            return preg_match('/^(Signature|Date)\s*:\s*_+\s*$/iu', $normalized) !== 1;
+            return preg_match(
+                '/^(Approved\s+by|Prepared\s+by|Reviewed\s+by|Signature|Date)\s*:\s*(?:_+.*)?$/iu',
+                $normalized
+            ) !== 1;
         }));
 
         return trim(implode("\n", $lines));

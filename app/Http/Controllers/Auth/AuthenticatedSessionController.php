@@ -23,32 +23,81 @@ class AuthenticatedSessionController extends Controller
 
     public function create(): Response
     {
-        return Inertia::render('Auth/Login');
+        return Inertia::render('Auth/Login', [
+            'loginAudience' => 'employee',
+        ]);
+    }
+
+    public function createLgu(): Response
+    {
+        return Inertia::render('Auth/Login', [
+            'loginAudience' => 'lgu',
+        ]);
     }
 
     public function store(Request $request): RedirectResponse
     {
-        $credentials = $request->validate([
-            'email' => ['required', 'email'],
-            'password' => ['required', 'string'],
-        ]);
+        return $this->authenticate($request, 'employee');
+    }
 
-        if (! Auth::attempt([...$credentials, 'is_active' => true], $request->boolean('remember'))) {
-            $user = User::where('email', $credentials['email'])->first();
+    public function storeLgu(Request $request): RedirectResponse
+    {
+        return $this->authenticate($request, 'lgu');
+    }
+
+    private function authenticate(Request $request, string $audience): RedirectResponse
+    {
+        $credentials = $request->validate($audience === 'lgu'
+            ? [
+                'username' => ['required', 'string'],
+                'password' => ['required', 'string'],
+            ]
+            : [
+                'email' => ['required', 'string'],
+                'password' => ['required', 'string'],
+            ]);
+
+        $identifierField = $audience === 'lgu' ? 'username' : 'email';
+        $identifier = trim((string) ($credentials[$identifierField] ?? ''));
+        $attempted = $this->attemptCredentials($request, $identifier, $credentials['password'], $audience);
+
+        if (! $attempted) {
+            $user = User::where('username', $identifier)
+                ->orWhere('email', $identifier)
+                ->first();
             $this->audit->log('auth.login_failed', $user, [], [
-                'email' => $credentials['email'],
+                'username' => $request->string('username')->toString(),
+                'email' => $request->string('email')->toString(),
                 'reason' => 'invalid_credentials_or_inactive',
             ], $user?->id);
 
             throw ValidationException::withMessages([
-                'email' => 'The provided credentials do not match an active user.',
+                $identifierField => 'The provided credentials do not match an active user.',
+            ]);
+        }
+
+        $user = Auth::user();
+
+        if ($audience === 'lgu' && ! $this->isLguUser($user)) {
+            $this->rejectAudience($request, $user, 'employee_on_lgu_portal');
+
+            throw ValidationException::withMessages([
+                'email' => 'DSWD employee accounts must sign in through the regular DROMIS login or Caraga Connect SSO.',
+            ]);
+        }
+
+        if ($audience !== 'lgu' && $this->isLguUser($user)) {
+            $this->rejectAudience($request, $user, 'lgu_on_employee_portal');
+
+            throw ValidationException::withMessages([
+                'email' => 'LGU accounts must sign in through the LGU portal.',
             ]);
         }
 
         $request->session()->regenerate();
-        $user = Auth::user();
         $this->audit->log('auth.login', $user, [], [
             'method' => 'password',
+            'audience' => $audience,
             'remember' => $request->boolean('remember'),
         ], Auth::id());
 
@@ -58,7 +107,51 @@ class AuthenticatedSessionController extends Controller
             return redirect()->route('mfa.verify');
         }
 
-        return redirect()->intended(route('dashboard'));
+        $home = $audience === 'lgu'
+            ? route('dashboard')
+            : ($user?->hasRole('OCD Caraga') ? route('ocd.alerts.index') : route('dashboard'));
+
+        return $audience === 'lgu'
+            ? redirect()->to($home)
+            : redirect()->intended($home);
+    }
+
+    private function attemptCredentials(Request $request, string $identifier, string $password, string $audience): bool
+    {
+        $attempts = $audience === 'lgu'
+            ? [
+                ['username' => $identifier, 'password' => $password, 'is_active' => true],
+                ['email' => $identifier, 'password' => $password, 'is_active' => true],
+            ]
+            : [
+                ['email' => $identifier, 'password' => $password, 'is_active' => true],
+                ['username' => $identifier, 'password' => $password, 'is_active' => true],
+            ];
+
+        foreach ($attempts as $attemptCredentials) {
+            if (Auth::attempt($attemptCredentials, $request->boolean('remember'))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function isLguUser(?User $user): bool
+    {
+        return (bool) ($user?->hasRole('LGU') || filled($user?->lgu_psgc_code) || filled($user?->lgu_level));
+    }
+
+    private function rejectAudience(Request $request, ?User $user, string $reason): void
+    {
+        $this->audit->log('auth.login_failed', $user, [], [
+            'email' => $request->string('email')->toString(),
+            'username' => $request->string('username')->toString(),
+            'reason' => $reason,
+        ], $user?->id);
+
+        Auth::guard('web')->logout();
+        $request->session()->regenerateToken();
     }
 
     public function destroy(Request $request): RedirectResponse
@@ -84,6 +177,13 @@ class AuthenticatedSessionController extends Controller
         Auth::guard('web')->logout();
         $request->session()->invalidate();
         $request->session()->regenerateToken();
+
+        if ($request->string('reason')->toString() === 'inactivity') {
+            return redirect()->route('login')->with(
+                'error',
+                'You were signed out after a period of inactivity. Sign in again to continue your work.',
+            );
+        }
 
         return redirect()->route('login');
     }

@@ -181,7 +181,7 @@ export default function Index({ activeRegion, metrics, provinceTotals, provinceS
                                     </tr>
                                 ))}
                                 <tr className="border-t border-slate-300 bg-slate-50 font-black dark:border-zinc-700 dark:bg-zinc-800/70">
-                                    <td className="px-4 py-3">Grand total</td>
+                                    <td className="px-4 py-3">Total</td>
                                     <td className="px-4 py-3 text-right">{formatNumber((provinceSummary || []).reduce((sum, row) => sum + Number(row.districts_count || 0), 0))}</td>
                                     <td className="px-4 py-3 text-right">{formatNumber(metrics.cities_municipalities)}</td>
                                     <td className="px-4 py-3 text-right">{formatNumber(metrics.barangays_with_population)}</td>

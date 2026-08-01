@@ -1,18 +1,23 @@
-import { Head, router, useForm, usePage } from '@inertiajs/react';
+import { Head, Link, router, useForm, usePage } from '@inertiajs/react';
 import { useState } from 'react';
 import AuthThemeToggle from '@/Components/AuthThemeToggle';
 import CreativePageLoader from '@/Components/CreativePageLoader';
 import DynamicAuthBackground from '@/Components/DynamicAuthBackground';
 
 export default function Login() {
-    const form = useForm({ email: 'rros@example.test', password: 'password', remember: true });
     const [manualLoading, setManualLoading] = useState(false);
-    const { systemNameLong, systemName, flash } = usePage().props;
+    const { systemNameLong, systemName, flash, loginAudience = 'employee' } = usePage().props;
+    const isLguLogin = loginAudience === 'lgu';
+    const form = useForm({
+        ...(isLguLogin ? { username: '' } : { email: 'rros@example.test' }),
+        password: isLguLogin ? '' : 'password',
+        remember: true,
+    });
     const ssoError = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('sso_error') : null;
     const submit = (e) => {
         e.preventDefault();
         setManualLoading(true);
-        form.post('/login', {
+        form.post(isLguLogin ? '/login-lgu' : '/login', {
             onFinish: () => setManualLoading(false),
         });
     };
@@ -20,7 +25,7 @@ export default function Login() {
     return (
         <div className="relative flex min-h-screen flex-col items-center overflow-hidden px-4 pb-6 pt-6 sm:pt-8">
             <DynamicAuthBackground />
-            <Head title="Login" />
+            <Head title={isLguLogin ? 'LGU Login' : 'Login'} />
             <CreativePageLoader active={form.processing || manualLoading} />
             <div className="absolute right-4 top-4 z-20 sm:right-6 sm:top-6">
                 <AuthThemeToggle />
@@ -56,18 +61,49 @@ export default function Login() {
                                 <img src="/images/Bagong_PilipinasTransparent.png" alt="Bagong Pilipinas" className="h-full w-auto max-w-12 object-contain" />
                             </div>
                         </div>
-                        <div className="text-sm font-semibold uppercase text-brand-700 dark:text-brand-100">DSWD FO Caraga</div>
+                        <div className="text-sm font-semibold uppercase text-brand-700 dark:text-brand-100">
+                            {isLguLogin ? 'LGU DROMIS Portal' : 'DSWD FO Caraga'}
+                        </div>
                         <h1 className="text-[1em] font-bold text-slate-950 dark:text-white">{systemNameLong || systemName}</h1>
-                        <p className="mt-1 text-sm text-slate-500 dark:text-zinc-400">Secure integrated disaster response workflow.</p>
+                        <p className="mt-1 text-sm text-slate-500 dark:text-zinc-400">
+                            {isLguLogin
+                                ? 'For PLGU, CLGU and MLGU DROMIC report accounts.'
+                                : 'Secure integrated disaster response workflow.'}
+                        </p>
                     </div>
-                    <label className="mb-3 block text-sm font-medium text-slate-800 dark:text-zinc-100">Email<input className="mt-1 w-full" value={form.data.email} onChange={(e) => form.setData('email', e.target.value)} /></label>
-                    <label className="mb-4 block text-sm font-medium text-slate-800 dark:text-zinc-100">Password<input type="password" className="mt-1 w-full" value={form.data.password} onChange={(e) => form.setData('password', e.target.value)} /></label>
-                    {form.errors.email && <p className="mb-3 text-sm text-red-600 dark:text-red-400">{form.errors.email}</p>}
+                    {isLguLogin && (
+                        <div className="mb-4 rounded-md border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-100">
+                            Use your assigned LGU username, e.g. plgu-adn, clgu-surigaocity-sdn, or mlgu-loreto-pdi.
+                        </div>
+                    )}
+                    <label className="mb-3 block text-sm font-medium text-slate-800 dark:text-zinc-100">{isLguLogin ? 'LGU Username' : 'Email or Username'}<input className="mt-1 w-full" value={isLguLogin ? form.data.username : form.data.email} onChange={(e) => (isLguLogin ? form.setData('username', e.target.value) : form.setData('email', e.target.value))} /></label>
+                    <label className="mb-2 block text-sm font-medium text-slate-800 dark:text-zinc-100">Password<input type="password" className="mt-1 w-full" value={form.data.password} onChange={(e) => form.setData('password', e.target.value)} /></label>
+                    <div className="mb-4 text-right">
+                        <Link href="/forgot-password" className="text-xs font-bold text-brand-700 hover:underline dark:text-brand-100">Forgot password?</Link>
+                    </div>
+                    {(form.errors.username || form.errors.email) && (
+                        <p className="mb-3 text-sm text-red-600 dark:text-red-400">
+                            {form.errors.username || form.errors.email}
+                        </p>
+                    )}
                     {flash?.error && <p role="alert" className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200">{flash.error}</p>}
                     {ssoError && <p role="alert" className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-200">{ssoError}</p>}
-                    <button disabled={form.processing} className="w-full rounded-md bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 dark:bg-brand-500 dark:hover:bg-brand-600">Sign in</button>
-                    <a href="/sso/login" onClick={() => setManualLoading(true)} className="mt-3 block w-full rounded-md bg-signal-blue px-4 py-2 text-center text-sm font-semibold text-white hover:opacity-95">Sign in with Caraga Connect</a>
-                    <button type="button" onClick={() => { setManualLoading(true); router.visit('/', { onFinish: () => setManualLoading(false) }); }} className="mt-3 w-full rounded-md border border-slate-200 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 dark:border-zinc-700 dark:text-zinc-100 dark:hover:bg-zinc-800">Open dashboard</button>
+                    <button disabled={form.processing} className="w-full rounded-md bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 dark:bg-brand-500 dark:hover:bg-brand-600">
+                        {isLguLogin ? 'Sign in to LGU Portal' : 'Sign in'}
+                    </button>
+                    {isLguLogin ? (
+                        <Link href="/login" className="mt-3 block w-full rounded-md border border-slate-200 px-4 py-2 text-center text-sm text-slate-700 hover:bg-slate-50 dark:border-zinc-700 dark:text-zinc-100 dark:hover:bg-zinc-800">
+                            DSWD employee login
+                        </Link>
+                    ) : (
+                        <>
+                            <a href="/sso/login" onClick={() => setManualLoading(true)} className="mt-3 block w-full rounded-md bg-signal-blue px-4 py-2 text-center text-sm font-semibold text-white hover:opacity-95">Sign in with Caraga Connect</a>
+                            <Link href="/login-lgu" className="mt-3 block w-full rounded-md border border-emerald-200 px-4 py-2 text-center text-sm font-bold text-brand-700 hover:bg-emerald-50 dark:border-emerald-900 dark:text-brand-100 dark:hover:bg-emerald-950/40">
+                                LGU portal login
+                            </Link>
+                            <button type="button" onClick={() => { setManualLoading(true); router.visit('/', { onFinish: () => setManualLoading(false) }); }} className="mt-3 w-full rounded-md border border-slate-200 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 dark:border-zinc-700 dark:text-zinc-100 dark:hover:bg-zinc-800">Open dashboard</button>
+                        </>
+                    )}
                 </form>
             </div>
         </div>

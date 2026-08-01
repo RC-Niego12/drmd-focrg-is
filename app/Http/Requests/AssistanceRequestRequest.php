@@ -5,6 +5,7 @@ namespace App\Http\Requests;
 use App\Support\DocumentReferenceNumber;
 use App\Support\AssessmentNarrative;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class AssistanceRequestRequest extends FormRequest
 {
@@ -43,7 +44,11 @@ class AssistanceRequestRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'request_party_id' => ['required', 'exists:request_parties,id'],
+            'request_party_id' => [
+                'nullable',
+                Rule::requiredIf(fn (): bool => blank($this->route('assistanceRequest')?->source_lgu_dromic_request_id)),
+                'exists:request_parties,id',
+            ],
             'requesting_agency' => ['required', 'string', 'max:255'],
             'lgu' => ['nullable', 'string', 'max:255'],
             'lgu_level' => ['nullable', 'string', 'max:50'],
@@ -98,12 +103,14 @@ class AssistanceRequestRequest extends FormRequest
             'requester_position' => ['nullable', 'string', 'max:255'], 'requester_address' => ['nullable', 'string', 'max:255'],
             'contact_number' => ['nullable', 'string', 'max:100'], 'affected_families' => ['nullable', 'required_if:assessment_form_data.request_type,Disaster', 'integer', 'min:1'],
             'assigned_social_worker' => ['required', 'string', 'max:255'],
+            'act_on_behalf' => ['nullable', 'boolean'],
+            'on_behalf_reason' => ['nullable', 'required_if:act_on_behalf,true', 'string', 'min:8', 'max:1000'],
             'items' => ['required', 'array', 'min:1'],
             'items.*.inventory_item_id' => ['nullable', 'exists:inventory_items,id'],
             'items.*.fni_library_item_id' => ['required', 'exists:fni_library_items,id'],
             'items.*.source_warehouse_id' => ['nullable', 'exists:warehouses,id'],
             'items.*.item_name' => ['required', 'string', 'max:255'],
-            'items.*.requested_quantity' => ['required', 'numeric', 'min:0.01'],
+            'items.*.requested_quantity' => ['required', 'integer', 'min:1'],
             'items.*.available_quantity' => ['nullable', 'numeric', 'min:0'],
             'items.*.unit' => ['required', 'string', 'max:50'],
             'items.*.priority' => ['required', 'in:low,normal,high,urgent'],
@@ -117,11 +124,6 @@ class AssistanceRequestRequest extends FormRequest
             $meta = (array) $this->input('assessment_form_data', []);
             if (! filled($meta['prepared_by_position'] ?? null) && ! filled($meta['prepared_by_designation'] ?? null)) {
                 $validator->errors()->add('assessment_form_data.prepared_by_position', 'Your Position or Designation must be configured in User Access before submission.');
-            }
-            $requestType = $meta['request_type'] ?? null;
-            $lguLevel = strtoupper((string) $this->input('lgu_level'));
-            if ($requestType === 'Disaster' && in_array($lguLevel, ['CLGU', 'MLGU', 'MGLU', 'PLGU', 'PGLU'], true) && empty($meta['affected_areas'] ?? [])) {
-                $validator->errors()->add('assessment_form_data.affected_areas', 'Select at least one affected area for an LGU disaster assessment.');
             }
             if (($meta['has_previous_augmentation'] ?? null) === true || ($meta['has_previous_augmentation'] ?? null) === '1') {
                 $rows = collect($meta['previous_augmentations'] ?? [])->filter(fn ($row) => collect($row)->contains(fn ($value) => filled($value)));
@@ -165,6 +167,8 @@ class AssistanceRequestRequest extends FormRequest
             'assessment_form_data.assessment_drn_month' => 'Assessment DRN Month',
             'assessment_form_data.assessment_drn_specified' => 'Specified Assessment DRN',
             'recommendations' => 'Assessment Narrative',
+            'act_on_behalf' => 'Act on behalf',
+            'on_behalf_reason' => 'Reason for acting on behalf',
             'items.*.fni_library_item_id' => 'FNI Description',
             'items.*.requested_quantity' => 'Requested Quantity',
             'items.*.unit' => 'Unit of Measurement',

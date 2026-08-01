@@ -11,6 +11,15 @@ use Illuminate\Support\Collection;
 
 class InventoryBalanceService
 {
+    public function availableTotalsByItem(): Collection
+    {
+        return $this->balanceRows()
+            ->groupBy(fn (array $row): string => $this->itemKey($row['item'] ?? ''))
+            ->map(fn (Collection $rows): float => $rows->sum(
+                fn (array $row): float => (float) ($row['available_balance'] ?? 0)
+            ));
+    }
+
     public function balanceRows(?int $warehouseId = null, ?int $year = null): Collection
     {
         $sheetImports = WarehouseSheetImport::with(['batch.item', 'warehouse'])
@@ -193,6 +202,11 @@ class InventoryBalanceService
             'non_food' => 'Non Food Items',
             default => (string) $category,
         };
+    }
+
+    private function itemKey(?string $value): string
+    {
+        return preg_replace('/[^a-z0-9]+/', '', strtolower((string) $value)) ?? '';
     }
 
     private function brandDescription(?string $sheetBrandDescription, ?InventoryBatch $batch): string

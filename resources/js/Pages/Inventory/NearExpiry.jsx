@@ -7,6 +7,7 @@ import { AlertTriangle, BarChart3, CalendarClock, CheckCircle2, ClipboardList, E
 import { useMemo, useState } from 'react';
 import AppLayout, { Card, DataTable, ExportableCard, TableActionButton } from '@/Layouts/AppLayout';
 import NearExpiryMonthSummary from '@/Components/NearExpiryMonthSummary';
+import SystemTabs from '@/Components/SystemTabs';
 
 const number = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const peso = (value) => `₱${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -94,17 +95,15 @@ export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptio
 
             <Card id="near-expiry-filters" className="mt-6 scroll-mt-28">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <div className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-1 dark:border-zinc-800 dark:bg-zinc-900">
-                        {[
-                            ['expiry', 'Expiry'],
-                            ['ageing', 'Ageing'],
-                            ['plans', 'Distribution Plan'],
-                        ].map(([nextTab, label]) => (
-                            <button key={nextTab} type="button" onClick={() => setTab(nextTab)} className={`rounded px-4 py-2 text-sm font-black ${tab === nextTab ? 'bg-white text-brand-700 shadow-sm dark:bg-zinc-950 dark:text-brand-100' : 'text-slate-500 hover:text-slate-900 dark:text-zinc-400 dark:hover:text-white'}`}>
-                                {label}
-                            </button>
-                        ))}
-                    </div>
+                    <SystemTabs
+                        active={tab}
+                        ariaLabel="Near-expiry views"
+                        items={[
+                            { key: 'expiry', label: 'Expiry', onClick: () => setTab('expiry') },
+                            { key: 'ageing', label: 'Ageing', onClick: () => setTab('ageing') },
+                            { key: 'plans', label: 'Distribution Plan', onClick: () => setTab('plans') },
+                        ]}
+                    />
                     <div className="flex flex-col gap-2 sm:flex-row">
                         <button type="button" onClick={() => setShowFilters(!showFilters)} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-black shadow-sm hover:bg-slate-50 dark:border-zinc-700 dark:bg-zinc-950 dark:hover:bg-zinc-900">
                             <Filter className="h-4 w-4" />
@@ -366,7 +365,7 @@ function StickySummaryRow({ colSpan, values }) {
         <tr className="border-l-4 border-slate-500">
             <td colSpan={colSpan} className="sticky bottom-0 z-20 border-t border-slate-300 bg-slate-50 px-4 py-3 font-black shadow-[0_-6px_14px_rgba(15,23,42,0.08)] dark:border-zinc-700 dark:bg-zinc-900">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span>Grand Total</span>
+                    <span>Total</span>
                     <span className="inline-flex flex-wrap items-center gap-x-5 gap-y-1 text-right text-sm">
                         {values.map(([label, value]) => <span key={label} title={label}>{value}</span>)}
                     </span>

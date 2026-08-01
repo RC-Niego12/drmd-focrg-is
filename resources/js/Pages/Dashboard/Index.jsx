@@ -12,6 +12,7 @@ const ffpChartColors = ['#F6D88A', '#8FEF6A', '#B8E6C9', '#00BCEB', '#F4A07A'];
 const ffpChartHoverColors = ['#F6D88A', '#8FEF6A', '#B8E6C9', '#00BCEB', '#F4A07A'];
 
 export default function Index({
+    dashboardTitle = 'Dashboard',
     metrics,
     recentTransactions,
     warehouseBreakdown,
@@ -34,8 +35,8 @@ export default function Index({
         : 0;
 
     return (
-        <AppLayout title="Dashboard">
-            <Head title="Dashboard" />
+        <AppLayout title={dashboardTitle}>
+            <Head title={dashboardTitle} />
 
             <div className="max-w-full overflow-x-hidden">
             <div id="dashboard-overview" className="scroll-mt-28 grid gap-4 xl:grid-cols-4">
@@ -321,7 +322,7 @@ function FamilyFoodPackReport({ data }) {
     const provinceRows = data?.province_rows || [];
     const maxProvince = Math.max(...provinceRows.map((row) => Number(row.current || 0)), 1);
     const grandTotal = {
-        province: 'Grand total',
+        province: 'Total',
         capacity: data?.total_capacity || 0,
         current: data?.total_current || 0,
         cost: data?.total_cost || 0,
@@ -399,7 +400,7 @@ function FamilyFoodPackReport({ data }) {
                             </thead>
                             <tbody>
                                 {[...provinceRows, grandTotal].map((row) => (
-                                    <tr key={row.province} className={row.province === 'Grand total' ? 'border-t border-slate-300 font-black dark:border-zinc-700' : 'border-t border-slate-100 dark:border-zinc-800'}>
+                                    <tr key={row.province} className={row.province === 'Total' ? 'border-t border-slate-300 font-black dark:border-zinc-700' : 'border-t border-slate-100 dark:border-zinc-800'}>
                                         <td className="px-1.5 py-2 leading-tight sm:px-2">{row.province}</td>
                                         <td className="px-1.5 py-2 text-right sm:px-2">{formatNumber(row.capacity)}</td>
                                         <td className="px-1.5 py-2 text-right sm:px-2">{formatNumber(row.current)}</td>
@@ -498,7 +499,7 @@ function StandbyStockpileSummaryV2({ summary }) {
                                 </tbody>
                                 <tfoot>
                                     <tr className="border-t border-slate-300 bg-slate-50 font-black dark:border-zinc-700 dark:bg-zinc-950">
-                                        <td className="px-4 py-3">Grand total</td>
+                                        <td className="px-4 py-3">Total</td>
                                         <td className="px-4 py-3 text-right">{formatNumber(summary.ffp_quantity)}</td>
                                         <td className="px-4 py-3 text-right">₱{formatCurrency(summary.ffp_cost)}</td>
                                     </tr>
@@ -521,7 +522,7 @@ function StandbyStockpileSummaryV2({ summary }) {
                                 </tbody>
                                 <tfoot>
                                     <tr className="border-t border-slate-300 bg-slate-50 font-black dark:border-zinc-700 dark:bg-zinc-950">
-                                        <td className="px-4 py-3 text-right">Grand total</td>
+                                        <td className="px-4 py-3 text-right">Total</td>
                                         <td className="px-4 py-3 text-right">₱{formatCurrency(summary.other_food_non_food_cost)}</td>
                                     </tr>
                                 </tfoot>
@@ -686,7 +687,7 @@ function StandbyStockpileSummary({ summary }) {
                                 </tbody>
                                 <tfoot>
                                     <tr className="border-t border-slate-300 bg-slate-50 font-black dark:border-zinc-700 dark:bg-zinc-950">
-                                        <td className="px-4 py-3">Grand total</td>
+                                        <td className="px-4 py-3">Total</td>
                                         <td className="px-4 py-3 text-right">{formatNumber(summary.ffp_quantity)}</td>
                                         <td className="px-4 py-3 text-right">₱{formatCurrency(summary.ffp_cost)}</td>
                                     </tr>
@@ -709,7 +710,7 @@ function StandbyStockpileSummary({ summary }) {
                                 </tbody>
                                 <tfoot>
                                     <tr className="border-t border-slate-300 bg-slate-50 font-black dark:border-zinc-700 dark:bg-zinc-950">
-                                        <td className="px-4 py-3 text-right">Grand total</td>
+                                        <td className="px-4 py-3 text-right">Total</td>
                                         <td className="px-4 py-3 text-right">₱{formatCurrency(summary.other_food_non_food_cost)}</td>
                                     </tr>
                                 </tfoot>
@@ -843,7 +844,7 @@ function FoodItemWarehouseSummary({ title, description, summary, showHeader = tr
                         </tbody>
                         <tfoot>
                             <tr className="border-t border-slate-300 bg-slate-50 font-black dark:border-zinc-700 dark:bg-zinc-950">
-                                <td colSpan={showCategory ? 3 : 2} className="px-4 py-3 text-slate-950 dark:text-white">Grand total</td>
+                                <td colSpan={showCategory ? 3 : 2} className="px-4 py-3 text-slate-950 dark:text-white">Total</td>
                                 <td className="px-4 py-3 text-right text-slate-950 dark:text-white">{formatNumber(summary?.total)}</td>
                                 <td className="px-4 py-3 text-right text-slate-950 dark:text-white">₱{formatCurrency(summary?.cost)}</td>
                             </tr>

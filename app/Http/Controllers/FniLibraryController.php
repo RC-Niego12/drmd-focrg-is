@@ -44,10 +44,17 @@ class FniLibraryController extends Controller
             'operationalLibraries' => $operationalQuery->orderBy('library_type')->orderBy('value')->get(),
             'operationalLibraryTypes' => $inventoryScope ? OperationalLibraryValue::TYPES : collect(OperationalLibraryValue::TYPES)->only(array_filter(['drrs_signatory', 'drn_prefix', 'response_letter_initials', $isSuperAdmin ? 'system_name' : null]))->all(),
             'libraryScope' => $inventoryScope ? 'RROS' : ($isSuperAdmin ? 'Super Admin' : 'DRRS'),
-            'lguDirectoryEntries' => $userAdminScope ? LguDirectoryEntry::with(['officials','contacts'])->orderBy('source_sheet')->orderBy('lgu_name')->get() : [],
+            'lguDirectoryEntries' => $userAdminScope
+                ? LguDirectoryEntry::with(['officials','contacts','ldrrmoOfficers','lswdoAlternates'])
+                    ->where('is_active', true)
+                    ->orderBy('source_sheet')
+                    ->orderBy('lgu_name')
+                    ->get()
+                : [],
             'canManageLguDirectory' => $userAdminScope,
             'initialLibrary' => request()->string('library')->toString(),
             'lguSyncPreview' => session('lgu_sync_preview'),
+            'lguSyncUnmatched' => session('lgu_sync_unmatched', []),
             'lguSyncRuns' => $userAdminScope ? LguDirectorySyncRun::query()->latest('started_at')->limit(5)->get() : [],
             'isSuperAdmin' => $isSuperAdmin,
         ]);

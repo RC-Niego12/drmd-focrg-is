@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import AppLayout, { Card, DataTable, ExportableCard, TableActionButton } from '@/Layouts/AppLayout';
 import SearchableSelect from '@/Components/SearchableSelect';
 import LookerMultiSelect from '@/Components/LookerMultiSelect';
+import SystemTabs from '@/Components/SystemTabs';
 
 const today = new Date().toISOString().slice(0, 10);
 const money = (value) => `₱${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -300,21 +301,15 @@ export default function Index({ warehouses, selectedWarehouse, balanceRows, cate
                         </div>
                     </div>
                 )}>
-                <div className="mb-4 grid rounded-md bg-slate-100 p-1 text-sm font-black text-slate-600 sm:grid-cols-2 dark:bg-zinc-900 dark:text-zinc-300">
-                    {[
-                        ['stockpile', 'Warehouse Stockpile'],
-                        ['category-totals', 'Per Item Grand Totals'],
-                    ].map(([key, label]) => (
-                        <button
-                            key={key}
-                            type="button"
-                            onClick={() => setActiveTableTab(key)}
-                            className={`rounded px-3 py-2 transition ${activeTableTab === key ? 'bg-white text-brand-700 shadow-sm dark:bg-zinc-800 dark:text-brand-100' : 'hover:bg-white/70 dark:hover:bg-zinc-800/70'}`}
-                        >
-                            {label}
-                        </button>
-                    ))}
-                </div>
+                <SystemTabs
+                    active={activeTableTab}
+                    ariaLabel="Inventory table views"
+                    className="mb-4"
+                    items={[
+                        { key: 'stockpile', label: 'Warehouse Stockpile', onClick: () => setActiveTableTab('stockpile') },
+                        { key: 'category-totals', label: 'Per Item Grand Totals', onClick: () => setActiveTableTab('category-totals') },
+                    ]}
+                />
                 <DataTable
                     stickyHeader
                     className="max-h-[calc(100vh-260px)] overflow-auto"
@@ -547,7 +542,7 @@ function StickySummaryRow({ colSpan, values }) {
         <tr className="border-l-4 border-slate-500">
             <td colSpan={colSpan} className="sticky bottom-0 z-20 border-t border-slate-300 bg-slate-50 px-4 py-3 font-black shadow-[0_-6px_14px_rgba(15,23,42,0.08)] dark:border-zinc-700 dark:bg-zinc-900">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span>Grand Total</span>
+                    <span>Total</span>
                     <span className="inline-flex flex-wrap items-center gap-x-5 gap-y-1 text-right text-sm">
                         {values.map(([label, value]) => <span key={label} title={label}>{value}</span>)}
                     </span>
@@ -802,7 +797,7 @@ function FamilyFoodPackWarehouseView({ rows, allRows, totals, filters, setFilter
                     </tbody>
                     <tfoot>
                         <tr className="sticky bottom-0 border-t border-slate-300 bg-slate-50 font-black dark:border-zinc-700 dark:bg-zinc-950">
-                            <td colSpan={5} className="px-3 py-3">Grand total</td>
+                            <td colSpan={5} className="px-3 py-3">Total</td>
                             <td className="px-3 py-3 text-right">{number(totals.stockpile)}</td>
                             <td className="px-3 py-3 text-right">{money(totals.cost)}</td>
                             <td className="px-3 py-3 text-right">{Number(totals.stockpile) > 0 ? money(Number(totals.cost) / Number(totals.stockpile)) : '-'}</td>
@@ -971,51 +966,25 @@ function CategoryWarehouseView({ category, rows, totalStockpile, totalCost, filt
     return (
         <div className="space-y-5">
             {isFoodCategory && (
-                <div className="rounded-md bg-slate-100 p-1 dark:bg-zinc-900">
-                    <div className="grid gap-1 sm:grid-cols-2">
-                        {[
-                            { key: 'rtef', label: 'Ready-to-Eat Food' },
-                            { key: 'water', label: 'Bottled Water' },
-                        ].map((tab) => (
-                            <button
-                                key={tab.key}
-                                type="button"
-                                onClick={() => setFoodTab(tab.key)}
-                                className={`rounded-md px-4 py-3 text-sm font-black transition ${
-                                    foodTab === tab.key
-                                        ? 'bg-white text-brand-700 shadow-sm dark:bg-zinc-800 dark:text-brand-200'
-                                        : 'text-slate-600 hover:bg-white/70 dark:text-zinc-300 dark:hover:bg-zinc-800/70'
-                                }`}
-                            >
-                                {tab.label}
-                            </button>
-                        ))}
-                    </div>
-                </div>
+                <SystemTabs
+                    active={foodTab}
+                    ariaLabel="Food stockpile categories"
+                    items={[
+                        { key: 'rtef', label: 'Ready-to-Eat Food', onClick: () => setFoodTab('rtef') },
+                        { key: 'water', label: 'Bottled Water', onClick: () => setFoodTab('water') },
+                    ]}
+                />
             )}
 
             {isMaterialCategory && (
-                <div className="rounded-md bg-slate-100 p-1 dark:bg-zinc-900">
-                    <div className="grid gap-1 sm:grid-cols-2">
-                        {[
-                            { key: 'indirect', label: 'Indirect Materials' },
-                            { key: 'raw', label: 'Raw Materials' },
-                        ].map((tab) => (
-                            <button
-                                key={tab.key}
-                                type="button"
-                                onClick={() => setMaterialTab(tab.key)}
-                                className={`rounded-md px-4 py-3 text-sm font-black transition ${
-                                    materialTab === tab.key
-                                        ? 'bg-white text-brand-700 shadow-sm dark:bg-zinc-800 dark:text-brand-200'
-                                        : 'text-slate-600 hover:bg-white/70 dark:text-zinc-300 dark:hover:bg-zinc-800/70'
-                                }`}
-                            >
-                                {tab.label}
-                            </button>
-                        ))}
-                    </div>
-                </div>
+                <SystemTabs
+                    active={materialTab}
+                    ariaLabel="Material stockpile categories"
+                    items={[
+                        { key: 'indirect', label: 'Indirect Materials', onClick: () => setMaterialTab('indirect') },
+                        { key: 'raw', label: 'Raw Materials', onClick: () => setMaterialTab('raw') },
+                    ]}
+                />
             )}
 
             <div className={`grid gap-5 ${config.hero ? 'xl:grid-cols-[280px_minmax(0,1fr)]' : ''}`}>
@@ -1105,7 +1074,7 @@ function CategoryWarehouseView({ category, rows, totalStockpile, totalCost, filt
                     </tbody>
                     <tfoot>
                         <tr className="sticky bottom-0 border-t border-slate-300 bg-slate-50 font-black dark:border-zinc-700 dark:bg-zinc-950">
-                            <td colSpan={4} className="px-3 py-3">Grand total</td>
+                            <td colSpan={4} className="px-3 py-3">Total</td>
                             {!useItemColumns ? (
                                 <td className="px-3 py-3 text-right">{number(filteredTotals.stockpile)}</td>
                             ) : displayItems.map((item) => (
@@ -1321,7 +1290,7 @@ function GenericCategoryTable({ rows, totalStockpile, totalCost }) {
                 </tbody>
                 <tfoot>
                     <tr className="sticky bottom-0 border-t border-slate-300 bg-slate-50 font-black dark:border-zinc-700 dark:bg-zinc-950">
-                        <td colSpan={3} className="px-4 py-3">Grand total</td>
+                        <td colSpan={3} className="px-4 py-3">Total</td>
                         <td className="px-4 py-3 text-right">{number(totalStockpile)}</td>
                         <td className="px-4 py-3 text-right">{money(totalCost)}</td>
                     </tr>

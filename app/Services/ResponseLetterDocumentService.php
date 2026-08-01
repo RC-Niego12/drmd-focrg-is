@@ -3,7 +3,9 @@
 namespace App\Services;
 
 use App\Models\AssistanceRequest;
+use App\Models\LguDirectoryEntry;
 use App\Models\OperationalLibraryValue;
+use App\Models\User;
 use DOMDocument;
 use DOMElement;
 use DOMXPath;
@@ -18,7 +20,7 @@ class ResponseLetterDocumentService
     public function generate(AssistanceRequest $request): array
     {
         $template = $this->templatePath();
-        $request->loadMissing(['requestParty.lguDirectoryEntry.officials', 'requestParty.lguDirectoryEntry.contacts']);
+        $request->loadMissing(['requestParty.lguDirectoryEntry.officials', 'requestParty.lguDirectoryEntry.contacts', 'drmdAssignedUser', 'assessmentActor', 'incident']);
 
         $directory = storage_path('app/generated-documents');
         if (! is_dir($directory) && ! mkdir($directory, 0775, true) && ! is_dir($directory)) {
@@ -47,7 +49,33 @@ class ResponseLetterDocumentService
         $xpath->registerNamespace('w', self::WORD_NS);
 
         $meta = $request->assessment_form_data ?? [];
-        $directory = $request->requestParty?->lguDirectoryEntry;
+        $directory = $request->requestParty?->lguDirectoryEntry
+            ?: LguDirectoryEntry::query()
+                ->with(['officials', 'contacts'])
+                ->when(
+                    filled($request->lgu_psgc_code),
+                    fn ($query) => $query->where('psgc_code', $request->lgu_psgc_code),
+                    fn ($query) => $query->whereRaw('1 = 0')
+                )
+                ->first();
+        if (! $directory && filled($request->municipality)) {
+            $sourceSheet = match (strtolower(trim((string) $request->province))) {
+                'agusan del norte' => 'ADN',
+                'agusan del sur' => 'ADS',
+                'surigao del norte' => 'SDN',
+                'surigao del sur' => 'SDS',
+                'province of dinagat islands', 'dinagat islands' => 'PDI',
+                default => null,
+            };
+            $directory = LguDirectoryEntry::query()
+                ->with(['officials', 'contacts'])
+                ->where(function ($query) use ($request): void {
+                    $query->where('lgu_name', 'like', '%'.trim((string) $request->municipality).'%')
+                        ->orWhere('override_lgu_name', 'like', '%'.trim((string) $request->municipality).'%');
+                })
+                ->when($sourceSheet, fn ($query) => $query->where('source_sheet', $sourceSheet))
+                ->first();
+        }
         $lce = $directory?->officials->firstWhere('role', 'lce');
         $lswd = $directory?->officials->firstWhere('role', 'lswd_officer');
         $recipient = $this->capitalizedName($lce?->override_name ?: $lce?->name ?: $request->requester ?: $request->requesting_agency);
@@ -60,10 +88,17 @@ class ResponseLetterDocumentService
             'PDI' => 'Province of Dinagat Islands',
             default => $request->province,
         };
-        $recipientAddress = $this->formattedAddress($directory?->override_office_address
-            ?: $directory?->office_address
-            ?: $request->requester_address
-            ?: collect([$directory?->override_lgu_name ?: $directory?->lgu_name ?: $request->municipality, $provinceName])->filter()->unique()->implode(', '));
+        $lguName = trim((string) ($directory?->override_lgu_name
+            ?: $directory?->lgu_name
+            ?: $request->municipality
+            ?: $request->lgu
+            ?: $request->requesting_agency));
+        $recipientAddress = $this->formattedAddress(collect([
+            $lguName,
+            filled($provinceName) && ! str_contains(mb_strtolower($lguName), mb_strtolower((string) $provinceName))
+                ? $provinceName
+                : null,
+        ])->filter()->implode(', '));
         $attentionName = $this->capitalizedName($lswd?->override_name ?: $lswd?->name ?: $request->requester);
         $attentionPosition = trim((string) ($lswd?->override_position_designation ?: $lswd?->position_designation ?: $request->office_agency_details));
         $salutation = $this->salutation($recipient, $recipientPosition);
@@ -88,12 +123,36 @@ class ResponseLetterDocumentService
             if ((float) $quantity !== 1.0) $unit = match ($unit) { 'box' => 'boxes', 'kit' => 'kits', 'set' => 'sets', 'pack' => 'packs', default => $unit };
             return number_format((float) $quantity).' '.$unit.' of '.$item->item_name;
         })->implode(', ');
+        // Opening paragraph: name the requested items only — never the LGU-requested quantities.
+        $requestedItemNames = $items->map(fn ($item): string => trim((string) $item->item_name))
+            ->filter()
+            ->unique(fn (string $name): string => mb_strtolower($name))
+            ->values()
+            ->implode(', ');
+        $locality = $this->localityReference($request, $lguName, $provinceName, $directory?->lgu_level);
+        $socialWorker = $this->responseSocialWorker($request, $meta);
+        $workerReference = filled($socialWorker['full_name'])
+            ? 'our Social Worker '.$socialWorker['full_name']
+            : 'our assigned social worker';
+        $workerContactSentence = filled($socialWorker['short_name']) && filled($socialWorker['contact'])
+            ? sprintf(
+                ' For further queries, %s will be coordinating with you through this mobile number %s.',
+                $socialWorker['short_name'],
+                $socialWorker['contact']
+            )
+            : (filled($socialWorker['short_name'])
+                ? sprintf(' For further queries, %s will be coordinating with you.', $socialWorker['short_name'])
+                : '');
+        $occurrenceClause = $incidentDate
+            ? ' which occurred in Caraga Region on '.$incidentDate
+            : ' which occurred in Caraga Region';
         $responseLetterInitials = OperationalLibraryValue::query()
             ->where('library_type', 'response_letter_initials')
             ->where('context', 'response_letter')
             ->where('is_active', true)
             ->orderBy('id')
             ->value('value') ?: 'JSP/AAA/JLM/1628';
+        $responseLetterInitials = preg_replace('/\s*\/\s*/', ' / ', trim((string) $responseLetterInitials));
 
         $dateOccurrence = 0;
         foreach ($xpath->query('//w:body//w:p') as $paragraph) {
@@ -119,9 +178,8 @@ class ResponseLetterDocumentService
             if (trim($text) === 'CSWDO') {
                 $this->replaceParagraphSegments($document, $xpath, $paragraph, [[
                     'text' => $attentionPosition ?: 'LSWDO',
-                    'tab_before' => true,
                 ]]);
-                $this->formatAttentionTabParagraph($document, $xpath, $paragraph);
+                $this->formatAttentionDesignationParagraph($document, $xpath, $paragraph);
                 continue;
             }
             if (str_starts_with(trim($text), 'Dear Mayor Dumlao:')) {
@@ -138,17 +196,17 @@ class ResponseLetterDocumentService
                 continue;
             }
             if (trim($text) === 'Respectfully yours,') {
-                $this->prependLineBreaks($document, $paragraph, 2);
+                $this->prependLineBreaks($document, $paragraph, 1);
                 continue;
             }
             if (str_starts_with(trim($text), 'MARI- FLOR A. DOLLAGA- LIBANG')) {
-                $this->prependLineBreaks($document, $paragraph, 2);
+                $this->prependLineBreaks($document, $paragraph, 3);
                 continue;
             }
             if (preg_match('/^[A-Z]{2,5}\/[A-Z]{2,5}\/[A-Z]{2,5}\/[0-9]+$/', trim($text)) === 1) {
                 $this->replaceParagraphSegments($document, $xpath, $paragraph, [[
                     'text' => $responseLetterInitials,
-                    'breaks_before' => 2,
+                    'breaks_before' => 3,
                     'font' => 'Arial',
                     'font_size' => 8,
                     'italic' => true,
@@ -173,18 +231,29 @@ class ResponseLetterDocumentService
             $replacement = match (true) {
                 str_starts_with(trim($text), 'This is in reference to your letter requesting') => $isReliefAugmentation
                     ? sprintf(
-                        'This is in reference to your request for Food and Non-Food Items intended for %s disaster-affected families due to %s%s%s.',
+                        'This is in reference to your letter requesting %s intended for the %s disaster-affected %s in %s due to %s%s%s.',
+                        $requestedItemNames ?: 'Food and Non-Food Items',
                         number_format((int) ($request->affected_families ?? 0)),
+                        (int) ($request->affected_families ?? 0) === 1 ? 'family' : 'families',
+                        $locality,
                         $incident,
-                        $incidentDate ? ', which occurred on '.$incidentDate : '',
+                        $occurrenceClause,
                         $areaSummary
                     )
-                    : 'This is in reference to your request for Food and Non-Food Items for preparedness and response readiness.',
+                    : 'This is in reference to your letter requesting Food and Non-Food Items for preparedness and response readiness.',
                 str_starts_with(trim($text), 'After a thorough assessment') => $provideAugmentation
-                    ? sprintf('After assessment and validation of the submitted information, the requesting party is eligible to receive augmentation assistance from this Office. Accordingly, the Office will extend %s for the affected families.', $itemSummary ?: 'the approved Food and Non-Food Items')
-                    : 'After assessment and validation of the submitted information, the requested augmentation is not recommended at this time. The requesting party will be advised of any additional documentation or coordination required.',
+                    ? sprintf(
+                        'After a thorough assessment conducted by %s, %s is eligible to be provided with the requested goods as augmentation assistance from our office. Hence, we will extend %s to the above-mentioned number of affected families.',
+                        $workerReference,
+                        $locality,
+                        $itemSummary ?: 'the approved Food and Non-Food Items'
+                    )
+                    : sprintf(
+                        'After a thorough assessment conducted by %s, the requested augmentation is not recommended at this time. The requesting party will be advised of any additional documentation or coordination required.',
+                        $workerReference
+                    ),
                 str_starts_with(trim($text), 'With this, the Regional Resource Operations Section') => $provideAugmentation
-                    ? 'With this, the Regional Resource Operations Section (RROS) personnel will prepare the Requisition and Issuance Slip (RIS) for the approved items and coordinate with the focal person once the documents are complete and the goods are ready for delivery and/or pick-up.'
+                    ? 'With this, the Regional Resource Operations Section (RROS) personnel will prepare the Requisition and Issuance Slip (RIS) of the said items. The assigned social worker will immediately coordinate with the Focal Person once the documents are prepared and the goods are ready for delivery and/or pick-up from your Local Government Unit Warehouse.'.$workerContactSentence
                     : 'The Disaster Response Management Division will coordinate with the requesting party regarding the assessment result and any succeeding action required.',
                 default => null,
             };
@@ -271,6 +340,112 @@ class ResponseLetterDocumentService
         ]);
     }
 
+    private function localityReference(AssistanceRequest $request, ?string $lguName, ?string $province, ?string $directoryLevel = null): string
+    {
+        $name = trim((string) ($request->municipality ?: $lguName ?: $request->requesting_agency));
+        $name = preg_replace('/^(Municipality|City|Province)\s+of\s+/i', '', $name);
+        $name = $this->formattedAddress($name);
+        $level = strtoupper(trim((string) ($request->lgu_level ?: $directoryLevel)));
+
+        return match (true) {
+            in_array($level, ['CLGU'], true) => 'the city of '.($name ?: 'the requesting LGU'),
+            in_array($level, ['PLGU', 'PGLU'], true) => 'the province of '.($this->formattedAddress($province ?: $name) ?: 'the requesting LGU'),
+            default => 'the municipality of '.($name ?: 'the requesting LGU'),
+        };
+    }
+
+    /** @return array{full_name: string, short_name: string, contact: string} */
+    private function responseSocialWorker(AssistanceRequest $request, array $meta): array
+    {
+        $authenticated = auth()->user();
+        $actor = $request->assessmentActor;
+        $assigned = $request->drmdAssignedUser;
+        $recordedName = trim((string) (
+            $actor?->name
+            ?? $meta['prepared_by']
+            ?? $request->assigned_social_worker
+            ?? $assigned?->name
+            ?? $authenticated?->name
+            ?? ''
+        ));
+
+        $resolved = $actor
+            ?: (filled($assigned?->name) && mb_strtolower(trim($assigned->name)) === mb_strtolower($recordedName) ? $assigned : null)
+            ?: (filled($authenticated?->name) && mb_strtolower(trim((string) $authenticated->name)) === mb_strtolower($recordedName) ? $authenticated : null)
+            ?: (filled($recordedName)
+                ? User::query()->whereRaw('lower(name) = ?', [mb_strtolower($recordedName)])->first()
+                : null);
+
+        $displayName = $this->personName($resolved?->name ?: $recordedName);
+        $honorific = $this->personHonorific($displayName);
+        $surname = $this->surname($displayName);
+
+        return [
+            'full_name' => filled($displayName)
+                ? trim($honorific.' '.$this->stripLeadingHonorific($displayName))
+                : '',
+            'short_name' => filled($surname)
+                ? trim($honorific.' '.$surname)
+                : (filled($displayName) ? trim($honorific.' '.$this->stripLeadingHonorific($displayName)) : ''),
+            'contact' => trim((string) ($resolved?->mobile_no ?: $resolved?->contact_number ?: '')),
+        ];
+    }
+
+    private function personHonorific(?string $name): string
+    {
+        if (preg_match('/^(Mrs|Ms|Mr|Dr|Atty)\.?[\s,]/i', trim((string) $name), $matches) === 1) {
+            $token = strtolower(rtrim($matches[1], '.'));
+
+            return match ($token) {
+                'mrs' => 'Mrs.',
+                'ms' => 'Ms.',
+                'dr' => 'Dr.',
+                'atty' => 'Atty.',
+                default => 'Mr.',
+            };
+        }
+
+        return 'Mr.';
+    }
+
+    private function stripLeadingHonorific(?string $name): string
+    {
+        return trim((string) preg_replace('/^(MR\.?|MS\.?|MRS\.?|DR\.?|ATTY\.?)\s+/i', '', trim((string) $name)));
+    }
+
+    private function personName(?string $value): string
+    {
+        $value = $this->stripLeadingHonorific($value);
+        if ($value === '') {
+            return '';
+        }
+
+        // Keep ALL-CAPS source names readable in letter body (Roger L. Ongue).
+        if ($value === mb_strtoupper($value, 'UTF-8')) {
+            return $this->formattedAddress($value);
+        }
+
+        return $value;
+    }
+
+    private function surname(?string $name): string
+    {
+        $clean = $this->stripLeadingHonorific($name);
+        $parts = preg_split('/\s+/', trim((string) $clean)) ?: [];
+        while ($parts && preg_match('/^(JR\.?|SR\.?|II|III|IV)$/i', (string) end($parts))) {
+            array_pop($parts);
+        }
+
+        $surname = $parts ? (string) end($parts) : '';
+        if ($surname === '') {
+            return '';
+        }
+
+        return $surname === mb_strtoupper($surname, 'UTF-8')
+            ? $this->formattedAddress($surname)
+            : $surname;
+    }
+
     private function formatDrnParagraph(DOMDocument $document, DOMXPath $xpath, DOMElement $paragraph): void
     {
         $properties = $xpath->query('./w:pPr', $paragraph)->item(0);
@@ -303,6 +478,24 @@ class ResponseLetterDocumentService
         $tab->setAttributeNS(self::WORD_NS, 'w:pos', '1380');
         $tabs->appendChild($tab);
         $properties->appendChild($tabs);
+        if (! $xpath->query('./w:keepLines', $properties)->item(0)) {
+            $properties->appendChild($document->createElementNS(self::WORD_NS, 'w:keepLines'));
+        }
+    }
+
+    private function formatAttentionDesignationParagraph(DOMDocument $document, DOMXPath $xpath, DOMElement $paragraph): void
+    {
+        $properties = $xpath->query('./w:pPr', $paragraph)->item(0);
+        if (! $properties instanceof DOMElement) {
+            $properties = $document->createElementNS(self::WORD_NS, 'w:pPr');
+            $paragraph->insertBefore($properties, $paragraph->firstChild);
+        }
+        foreach (['ind', 'tabs'] as $element) {
+            foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) $properties->removeChild($node);
+        }
+        $indent = $document->createElementNS(self::WORD_NS, 'w:ind');
+        $indent->setAttributeNS(self::WORD_NS, 'w:left', '1380');
+        $properties->appendChild($indent);
         if (! $xpath->query('./w:keepLines', $properties)->item(0)) {
             $properties->appendChild($document->createElementNS(self::WORD_NS, 'w:keepLines'));
         }

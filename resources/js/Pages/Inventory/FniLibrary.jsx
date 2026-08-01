@@ -108,6 +108,7 @@ export default function FniLibrary({
   canManageLguDirectory = false,
   initialLibrary = "",
   lguSyncPreview = null,
+  lguSyncUnmatched = [],
   lguSyncRuns = [],
   isSuperAdmin = false,
 }) {
@@ -150,7 +151,7 @@ export default function FniLibrary({
       ? [
           {
             key: "lgu_directory",
-            label: "LGU Officials and LSWD Directory",
+            label: "LGU Directory",
             icon: MapPin,
             group: "DRIMS References",
             subgroup: "Directories",
@@ -450,7 +451,9 @@ export default function FniLibrary({
         <LguDirectoryPanel
           entries={lguDirectoryEntries}
           preview={lguSyncPreview}
+          unmatched={lguSyncUnmatched}
           syncRuns={lguSyncRuns}
+          isSuperAdmin={isSuperAdmin}
         />
       ) : (
         <Card

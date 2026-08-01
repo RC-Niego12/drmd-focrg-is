@@ -34,6 +34,14 @@ class EpirmaService
             return ['success' => false, 'message' => 'E-Pirma is not configured.'];
         }
 
+        $idNumber = trim($idNumber);
+        if ($idNumber === '') {
+            return [
+                'success' => false,
+                'message' => 'Your profile has no employee ID number. Update your DROMIS profile id_number, then try again.',
+            ];
+        }
+
         try {
             $response = $this->http()
                 ->acceptJson()
@@ -43,23 +51,52 @@ class EpirmaService
                     'secret' => $this->clientSecret,
                 ]);
 
-            if ($response->successful()) {
-                $data = $response->json();
+            $data = $response->json();
+            if (is_array($data)) {
+                if ($response->successful()) {
+                    return $data;
+                }
 
-                return is_array($data) ? $data : ['success' => false];
+                $apiMessage = trim((string) ($data['message'] ?? $data['error'] ?? ''));
+                if ($apiMessage !== '') {
+                    Log::warning('E-Pirma build authorize failed.', [
+                        'status' => $response->status(),
+                        'body' => $response->body(),
+                        'id_number' => $idNumber,
+                    ]);
+
+                    return [
+                        'success' => false,
+                        'message' => $apiMessage,
+                        'status' => $response->status(),
+                        'details' => $data,
+                    ];
+                }
             }
 
             Log::warning('E-Pirma build authorize failed.', [
                 'status' => $response->status(),
                 'body' => $response->body(),
+                'id_number' => $idNumber,
             ]);
+
+            return [
+                'success' => false,
+                'message' => 'e-PIRMA rejected authorization for employee ID '.$idNumber.' (HTTP '.$response->status().').',
+                'status' => $response->status(),
+            ];
         } catch (Throwable $e) {
             Log::warning('E-Pirma build authorize exception.', [
                 'message' => $e->getMessage(),
+                'base_url' => $this->baseUrl,
+                'id_number' => $idNumber,
             ]);
-        }
 
-        return ['success' => false];
+            return [
+                'success' => false,
+                'message' => 'Could not reach e-PIRMA at '.$this->baseUrl.'. Start the e-PIRMA service, then try signing again.',
+            ];
+        }
     }
 
     public function generateDocumentRoutingUrl(
@@ -235,9 +272,12 @@ class EpirmaService
             $verifySsl = false;
         }
 
+        $secret = trim((string) config('services.epirma.client_secret', ''));
+        $secret = trim($secret, "\"'");
+
         return [
             'base_url' => rtrim($baseUrl, '/'),
-            'client_secret' => trim((string) config('services.epirma.client_secret', '')),
+            'client_secret' => $secret,
             'verify_ssl' => $verifySsl,
         ];
     }

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
@@ -46,6 +47,9 @@ class User extends Authenticatable
         'lgu_psgc_code',
         'lgu_level',
         'lgu_name',
+        'aor_provinces',
+        'aor_districts',
+        'aor_cities_municipalities',
     ];
 
     protected $hidden = [
@@ -66,6 +70,9 @@ class User extends Authenticatable
             'access_approved_at' => 'datetime',
             'access_decided_at' => 'datetime',
             'sso_profile_payload' => 'array',
+            'aor_provinces' => 'array',
+            'aor_districts' => 'array',
+            'aor_cities_municipalities' => 'array',
         ];
     }
 
@@ -77,5 +84,17 @@ class User extends Authenticatable
     public function receivedSystemMessages(): HasMany
     {
         return $this->hasMany(SystemMessage::class, 'recipient_id');
+    }
+
+    public function agencyProfile(): HasOne
+    {
+        return $this->hasOne(AgencyProfile::class);
+    }
+
+    public function aorEntries(): HasMany
+    {
+        return $this->hasMany(EmployeeAreaOfResponsibility::class)
+            ->orderByRaw("CASE level WHEN 'province' THEN 1 WHEN 'district' THEN 2 WHEN 'city_municipality' THEN 3 ELSE 4 END")
+            ->orderBy('psgc_code');
     }
 }

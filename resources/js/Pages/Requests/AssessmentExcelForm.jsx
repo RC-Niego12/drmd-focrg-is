@@ -1,13 +1,12 @@
 import SearchableSelect from "@/Components/SearchableSelect";
-import LookerMultiSelect from "@/Components/LookerMultiSelect";
 import { composeDocumentDrn, currentDrnParts, DocumentDrnFields } from "@/Components/DocumentDrnFields";
 import axios from "axios";
 import { Sparkles, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const stripNarrativeSignoff = (value = "") => String(value)
   .split(/\r?\n/)
-  .filter((line) => !/^(Signature|Date)\s*:\s*_+\s*$/i.test(line.trim()))
+  .filter((line) => !/^(Approved\s+by|Prepared\s+by|Reviewed\s+by|Signature|Date)\s*:\s*(?:_+.*)?$/i.test(line.trim()))
   .join("\n")
   .trim();
 
@@ -31,6 +30,12 @@ const Header = ({ children }) => (
     {children}
   </div>
 );
+const countNoun = (value, singular, plural) =>
+  Math.max(0, Math.round(Number(value) || 0)) === 1 ? singular : plural;
+const formattedCount = (value, singular, plural) => {
+  const count = Math.max(0, Math.round(Number(value) || 0));
+  return `${count.toLocaleString()} ${countNoun(count, singular, plural)}`;
+};
 
 export default function AssessmentExcelForm({
   form,
@@ -49,11 +54,21 @@ export default function AssessmentExcelForm({
   submitLabel = "Save Assessment",
   warehouseStock = [],
   drnPrefixes = [],
+  requestId = null,
 }) {
   const [aiAction, setAiAction] = useState(null);
   const [aiError, setAiError] = useState("");
   const [reliefSuggestionsActive, setReliefSuggestionsActive] = useState(false);
+  const [previousAugmentationHint, setPreviousAugmentationHint] = useState("");
   const meta = form.data.assessment_form_data ?? {};
+  const hasFieldError = (...fields) => {
+    const errorKeys = Object.keys(form.errors);
+    return fields.some((field) =>
+      errorKeys.some((key) => key === field || key.startsWith(`${field}.`)),
+    );
+  };
+  const errorCell = (...fields) =>
+    hasFieldError(...fields) ? "bg-rose-50 ring-1 ring-inset ring-rose-300" : "";
   const isDisaster = meta.request_type === "Disaster" && form.data.purpose === "Relief Augmentation";
   const setMeta = (key, value) =>
     form.setData("assessment_form_data", { ...meta, [key]: value });
@@ -140,47 +155,60 @@ export default function AssessmentExcelForm({
     if (!current || (rowHasNoBrand && currentHasBrand)) items[key] = row;
     return items;
   }, {}));
-  const locationKey = (value) => normalized(String(value ?? "").replace(/\b(?:PLGU|PGLU|CLGU|MLGU|LGU|province of|city of|city|municipality of|municipality|ADN|ADS|SDN|SDS|PDI)\b/gi, ""));
   const totalAvailability = (itemName) => warehouseStock.filter((row) => normalized(row.item) === normalized(itemName)).reduce((total, row) => total + Number(row.available || 0), 0);
-  const selectedParty = requestParties.find((row) => String(row.id) === String(form.data.request_party_id));
-  const selectedPartyCode = selectedParty?.lgu_directory_entry?.psgc_code ?? "";
-  const selectedPartyLevel = String(form.data.lgu_level || selectedParty?.lgu_level || "").toUpperCase();
-  const partyLocationKey = locationKey(`${selectedParty?.requesting_party ?? ""} ${selectedParty?.office_agency_details ?? ""}`);
-  const provinceAliases = { ADN: "Agusan del Norte", ADS: "Agusan del Sur", SDN: "Surigao del Norte", SDS: "Surigao del Sur", PDI: "Province of Dinagat Islands" };
-  const partyProvinceAbbreviation = String(selectedParty?.office_agency_details ?? selectedParty?.requesting_party ?? "").match(/,\s*(ADN|ADS|SDN|SDS|PDI)\s*$/i)?.[1]?.toUpperCase();
-  const expectedProvince = (psgc.provinces ?? []).find((row) => locationKey(row.name) === locationKey(provinceAliases[partyProvinceAbbreviation]));
-  const partyMunicipalityKey = locationKey(String(selectedParty?.office_agency_details ?? "").split(",")[0]);
-  const municipalityCandidates = (psgc.municipalities ?? []).filter((row) =>
-    !expectedProvince || String(row.parent_code) === String(expectedProvince.code) || String(row.code) === String(selectedPartyCode),
-  );
-  const matchedMunicipality = municipalityCandidates.find((row) => partyMunicipalityKey && locationKey(row.name) === partyMunicipalityKey && expectedProvince && String(row.parent_code) === String(expectedProvince.code))
-    ?? municipalityCandidates.find((row) => partyMunicipalityKey && locationKey(row.name) === partyMunicipalityKey && String(row.code) === String(selectedPartyCode))
-    ?? municipalityCandidates.find((row) => String(row.code) === String(selectedPartyCode))
-    ?? municipalityCandidates.find((row) => partyLocationKey && partyLocationKey.includes(locationKey(row.name)));
-  const matchedProvince = (psgc.provinces ?? []).find((row) => String(row.code) === String(selectedPartyCode))
-    ?? (psgc.provinces ?? []).find((row) => partyLocationKey && partyLocationKey.includes(locationKey(row.name)));
-  const affectedAreaMode = ["CLGU", "MLGU", "MGLU"].includes(selectedPartyLevel)
-    ? "barangay"
-    : ["PLGU", "PGLU"].includes(selectedPartyLevel)
-      ? "municipality"
-      : null;
-  const affectedAreaOptions = affectedAreaMode === "barangay" && matchedMunicipality
-    ? (psgc.barangays ?? []).filter((row) => String(row.parent_code) === String(matchedMunicipality.code)).map((row) => ({ value: row.name, label: row.name }))
-    : affectedAreaMode === "municipality" && matchedProvince
-      ? (psgc.municipalities ?? []).filter((row) => String(row.parent_code) === String(matchedProvince.code)).map((row) => ({ value: row.name, label: row.name }))
-      : [];
-  const selectedAffectedAreas = Array.isArray(meta.affected_areas)
-    ? meta.affected_areas
-    : [affectedAreaMode === "barangay" ? form.data.barangay : form.data.municipality].filter(Boolean);
-  const selectAffectedAreas = (values) => {
-    const selected = Array.isArray(values) ? values : [];
-    const first = selected[0] ?? "";
-    if (affectedAreaMode === "barangay") {
-      const province = (psgc.provinces ?? []).find((row) => String(row.code) === String(matchedMunicipality?.parent_code));
-      form.setData((current) => ({ ...current, province: province?.name ?? current.province, municipality: matchedMunicipality?.name ?? current.municipality, barangay: first, assessment_form_data: { ...(current.assessment_form_data ?? {}), affected_areas: selected } }));
+
+  useEffect(() => {
+    if (!requestId || !isDisaster) {
+      return undefined;
     }
-    if (affectedAreaMode === "municipality") form.setData((current) => ({ ...current, province: matchedProvince?.name ?? current.province, municipality: first, barangay: "", assessment_form_data: { ...(current.assessment_form_data ?? {}), affected_areas: selected } }));
-  };
+
+    const existingRows = Array.isArray(meta.previous_augmentations) ? meta.previous_augmentations : [];
+    const alreadyEncoded = existingRows.some((row) =>
+      ["unit", "description", "quantity", "remarks"].some((field) => String(row?.[field] ?? "").trim() !== ""),
+    );
+    if (alreadyEncoded || meta.previous_augmentations_resolved) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await axios.get(`/requests/${requestId}/previous-augmentations`, {
+          headers: { Accept: "application/json" },
+        });
+        if (cancelled || !data) {
+          return;
+        }
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        form.setData((current) => ({
+          ...current,
+          assessment_form_data: {
+            ...(current.assessment_form_data ?? {}),
+            has_previous_augmentation: Boolean(data.has_previous),
+            previous_augmentations: rows.length
+              ? rows
+              : Array.from({ length: 3 }, () => ({ unit: "", description: "", quantity: "", remarks: "" })),
+            previous_augmentations_resolved: true,
+          },
+        }));
+        setPreviousAugmentationHint(
+          data.has_previous
+            ? `Loaded ${rows.filter((row) => String(row.description || "").trim()).length} prior augmentation line(s) for this same incident and LGU.`
+            : "No prior augmentation found for this same incident type, date, and LGU.",
+        );
+      } catch {
+        if (!cancelled) {
+          setPreviousAugmentationHint("Could not look up previous augmentations automatically.");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- resolve once per assessment open
+  }, [requestId, isDisaster, form.data.incident_name, form.data.incident_date]);
+
   const suggestedReliefItems = (families) => {
     const templates = [
       ["Family Food Pack", families * 5],
@@ -237,7 +265,7 @@ export default function AssessmentExcelForm({
     }
     setAiAction(mode); setAiError("");
     try {
-      const { data: payload } = await axios.post("/requests/polish-assessment", { mode, text: form.data.recommendations, requesting_agency: form.data.requesting_agency, incident_name: form.data.incident_name, incident_details: form.data.incident_details, purpose: form.data.purpose, affected_families: form.data.affected_families, items: form.data.items.map((item) => ({ item_name: item.item_name, requested_quantity: item.requested_quantity, unit: item.unit, available_quantity: item.available_quantity })), form_context: { date_received_by_drmd: form.data.date_received_by_drmd, assessment_drn: form.data.assessment_drn, office_agency_details: form.data.office_agency_details, lgu_level: form.data.lgu_level, province: form.data.province, municipality: form.data.municipality, barangay: form.data.barangay, affected_areas: meta.affected_areas, date_requested: form.data.date_requested, incident_date: form.data.incident_date, assessment_summary: form.data.assessment_summary, requester: form.data.requester, requester_position: form.data.requester_position, contact_number: form.data.contact_number, information_source: meta.information_source, information_date: meta.information_date, families_served: meta.families_served, has_previous_augmentation: meta.has_previous_augmentation, previous_augmentations: meta.previous_augmentations, delivery_batches: meta.delivery_batches, provide_augmentation: meta.provide_augmentation, response_purpose: meta.response_purpose } }, { headers: { Accept: "application/json" }, withXSRFToken: true });
+      const { data: payload } = await axios.post("/requests/polish-assessment", { mode, text: form.data.recommendations, requesting_agency: form.data.requesting_agency, incident_name: form.data.incident_name, incident_details: form.data.incident_details, purpose: form.data.purpose, affected_families: form.data.affected_families, items: form.data.items.map((item) => ({ item_name: item.item_name, requested_quantity: item.requested_quantity, unit: item.unit, available_quantity: item.available_quantity })), form_context: { date_received_by_drmd: form.data.date_received_by_drmd, assessment_date: meta.assessment_date, assessment_drn: form.data.assessment_drn, office_agency_details: form.data.office_agency_details, lgu_level: form.data.lgu_level, province: form.data.province, municipality: form.data.municipality, barangay: form.data.barangay, affected_areas: meta.affected_areas, affected_persons: meta.affected_persons, date_requested: form.data.date_requested, incident_date: form.data.incident_date, incident_status: meta.incident_status, incident_ended_at: meta.incident_ended_at, source_report_classification: meta.source_report_classification, assessment_summary: form.data.assessment_summary, source_dromic_narrative: meta.source_dromic_narrative, source_official_advisories: meta.source_official_advisories, source_lgu_response_actions: meta.source_lgu_response_actions, source_displacement: meta.source_displacement, identified_needs: meta.identified_needs, lgu_report_remarks: meta.lgu_report_remarks, requester: form.data.requester, requester_position: form.data.requester_position, contact_number: form.data.contact_number, information_source: meta.information_source, information_date: meta.information_date, families_served: meta.families_served, has_previous_augmentation: meta.has_previous_augmentation, previous_augmentations: meta.previous_augmentations, delivery_batches: meta.delivery_batches, provide_augmentation: meta.provide_augmentation, response_purpose: meta.response_purpose } }, { headers: { Accept: "application/json" }, withXSRFToken: true });
       form.setData("recommendations", stripNarrativeSignoff(payload.polished));
     } catch (error) { setAiError(error.response?.data?.message || error.message || "Unable to process the assessment."); } finally { setAiAction(null); }
   };
@@ -308,6 +336,25 @@ export default function AssessmentExcelForm({
         </button>
       </div>
       <div className="max-h-[calc(100vh-14rem)] overflow-auto p-3">
+        {meta.source_data_prefilled && (
+          <div className="mx-auto mb-3 max-w-[1280px] rounded-md border border-blue-300 bg-blue-50 p-4 font-sans text-sm text-blue-950 print:hidden">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="font-black">Prefilled from the validated LGU DROMIC submission</p>
+                <p className="mt-1 text-xs text-blue-800">
+                  Report {meta.source_lgu_dromic_reference || "linked report"}
+                  {meta.source_lgu_request_reference ? ` · Request ${meta.source_lgu_request_reference}` : ""}
+                </p>
+              </div>
+              <span className="rounded-full bg-blue-100 px-3 py-1 text-xs font-black text-blue-800">Editable DRRS assessment</span>
+            </div>
+            <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+              <p><span className="font-black">Affected:</span> {formattedCount(form.data.affected_families, "family", "families")} / {formattedCount(meta.affected_persons, "person", "persons")}</p>
+              <p><span className="font-black">Requested FNIs:</span> {form.data.items?.filter((item) => item.item_name || item.fni_library_item_id).length || 0} line item(s)</p>
+            </div>
+            <p className="mt-2 text-xs text-blue-800">Verify the LGU-supplied facts and requested quantities against the attached documents, then complete DRRS availability, assessment, and recommendation fields.</p>
+          </div>
+        )}
         {Object.keys(form.errors).length > 0 && (
           <div
             id="assessment-validation"
@@ -351,7 +398,13 @@ export default function AssessmentExcelForm({
                   DSWD-DRMG-GF-001 | REV 00 | 21 MAR 2022
                 </p>
               </div>
-              <div className="border-t border-black px-3 py-2 font-bold">
+              <div className={`border-t border-black px-3 py-2 font-bold ${errorCell(
+                "assessment_drn",
+                "assessment_form_data.assessment_drn_prefix",
+                "assessment_form_data.assessment_drn_year",
+                "assessment_form_data.assessment_drn_month",
+                "assessment_form_data.assessment_drn_specified",
+              )}`}>
                 <span className="mb-1 block font-serif text-xs">DRN:</span>
                 <DocumentDrnFields compact parts={assessmentDrnParts} onChange={setAssessmentDrn} prefixOptions={assessmentPrefixOptions} />
               </div>
@@ -371,18 +424,18 @@ export default function AssessmentExcelForm({
                 className="cursor-not-allowed bg-slate-50 focus:bg-slate-50 focus:ring-0"
               />
             </label>
-            <label className="col-span-4 flex items-center border-b border-black p-2 font-bold">
-              Date:
+            <label className={`col-span-4 flex items-center border-b border-black p-2 font-bold ${errorCell("assessment_form_data.assessment_date")}`}>
+              Assessment Date:
               <CellInput
                 type="date"
-                value={form.data.date_received_by_drmd}
-                onChange={(v) => form.setData("date_received_by_drmd", v)}
+                value={meta.assessment_date ?? ""}
+                onChange={(v) => setMeta("assessment_date", v)}
               />
             </label>
             <div className="col-span-2 border-b border-r border-black p-2 font-bold">
               Requesting Party
             </div>
-            <div className={`${affectedAreaMode && affectedAreaOptions.length > 0 ? "col-span-4" : "col-span-10"} border-b border-black p-1 print:col-span-10`}>
+            <div className={`col-span-10 border-b border-black p-1 ${errorCell("request_party_id", "requesting_agency")}`}>
               <CellInput
                 value={form.data.requesting_agency}
                 onChange={() => {}}
@@ -391,28 +444,21 @@ export default function AssessmentExcelForm({
                 className="cursor-not-allowed bg-slate-50 focus:bg-slate-50 focus:ring-0"
               />
             </div>
-            {affectedAreaMode && affectedAreaOptions.length > 0 && (
-              <>
-                <div className="col-span-2 border-b border-l border-r border-black p-2 font-bold print:hidden">Affected Areas</div>
-                <div className="col-span-4 border-b border-black p-1 print:hidden">
-                  <LookerMultiSelect label="" options={affectedAreaOptions} value={selectedAffectedAreas} onApply={selectAffectedAreas} allLabel={affectedAreaMode === "barangay" ? "Select affected barangays" : "Select affected cities / municipalities"} placeholder={affectedAreaMode === "barangay" ? "Search affected barangay..." : "Search affected city or municipality..."} className="[&>span:first-child]:hidden [&>button]:mt-0" />
-                </div>
-              </>
-            )}
             <div className="col-span-2 border-b border-r border-black p-2 font-bold">
               Purpose
             </div>
-            <div className="col-span-2 border-b border-r border-black p-2">
-              <label>
+            <div className={`col-span-1 flex items-center border-b border-r border-black px-2 py-1 ${errorCell("purpose", "assessment_form_data.response_purpose")}`}>
+              <label className="flex items-center gap-1.5 whitespace-nowrap text-[11px] font-bold">
                 <input
                   type="radio"
+                  className="h-3.5 w-3.5 shrink-0"
                   checked={meta.request_type === "Disaster"}
                   onChange={() => setPurpose("Relief Augmentation")}
-                />{" "}
-                Disaster
+                />
+                <span>Disaster</span>
               </label>
             </div>
-            <div className="col-span-3 grid grid-cols-[minmax(0,1.6fr)_minmax(112px,1fr)] border-b border-r border-black p-1">
+            <div className={`col-span-4 grid grid-cols-[minmax(0,2fr)_minmax(118px,0.9fr)] border-b border-r border-black p-1 ${errorCell("incident_name", "incident_date")}`}>
               <SearchableSelect disabled={!isDisaster} options={incidentOptions} value={isDisaster ? form.data.incident_name : ""} onChange={(v) => form.setData("incident_name", v)} placeholder={isDisaster ? "Type of disaster" : ""} />
               <CellInput disabled={!isDisaster} type="date" value={isDisaster ? form.data.incident_date : ""} onChange={(v) => form.setData("incident_date", v)} aria-label="Date of disaster" className="ml-1 border-l border-slate-300 print:hidden disabled:cursor-not-allowed disabled:bg-slate-100" />
             </div>
@@ -424,7 +470,7 @@ export default function AssessmentExcelForm({
                 placeholder="Specify incident, if necessary"
               />
             </div>
-            <div className="col-span-2 border-b border-black p-1">
+            <div className={`col-span-2 border-b border-black p-1 ${errorCell("purpose", "assessment_form_data.response_purpose")}`}>
               <select className="h-full w-full border-0 bg-transparent text-xs font-bold" value={meta.response_purpose ?? form.data.purpose ?? "Relief Augmentation"} onChange={(event) => setPurpose(event.target.value)}>
                 <option value="Relief Augmentation">Relief Augmentation</option>
                 <option value="Preparedness for Response">Preparedness for Response</option>
@@ -433,7 +479,7 @@ export default function AssessmentExcelForm({
             <div className="col-span-2 border-b border-r border-black p-2 font-bold">
               Date of Request
             </div>
-            <div className="col-span-10 border-b border-black">
+            <div className={`col-span-10 border-b border-black ${errorCell("date_requested")}`}>
               <CellInput
                 type="date"
                 value={form.data.date_requested}
@@ -461,7 +507,7 @@ export default function AssessmentExcelForm({
               key={index}
               className="grid grid-cols-[3fr_1fr_.7fr_.7fr_2.3fr_52px] border-b border-black text-xs"
             >
-              <div className="border-r border-black p-1">
+              <div className={`border-r border-black p-1 ${errorCell(`items.${index}.fni_library_item_id`, `items.${index}.item_name`, `items.${index}.unit`)}`}>
                 <SearchableSelect
                   options={combinedFniLibraryItems.map((row) => ({
                     value: String(row.id),
@@ -488,13 +534,13 @@ export default function AssessmentExcelForm({
                   ))}
                 </select>
               </div>
-              <div className="border-r border-black">
+              <div className={`border-r border-black ${errorCell(`items.${index}.requested_quantity`)}`}>
                 <CellInput
                   type="number"
-                  min="0.01"
-                  step="0.01"
+                  min="1"
+                  step="1"
                   value={item.requested_quantity}
-                  onChange={(v) => setItem(index, "requested_quantity", v)}
+                  onChange={(v) => setItem(index, "requested_quantity", v === "" ? "" : Math.max(1, Math.round(Number(v))))}
                 />
               </div>
               <div className="border-r border-black bg-slate-50 p-2 text-center">
@@ -534,8 +580,8 @@ export default function AssessmentExcelForm({
                 onChange={(v) => form.setData("incident_date", v)}
               />
             </label>
-            <label className="flex border-b border-r border-black px-2 font-bold">
-              Actual Affected Families:
+            <label className={`grid grid-cols-[11rem_minmax(5rem,1fr)_auto] items-center border-b border-r border-black px-2 font-bold ${errorCell("affected_families")}`}>
+              <span>Actual Affected Families:</span>
               <CellInput
                 type="number"
                 min="1"
@@ -543,6 +589,12 @@ export default function AssessmentExcelForm({
                 value={form.data.affected_families}
                 onChange={setAffectedFamilies}
               />
+              <span className="whitespace-nowrap pr-2 font-semibold text-slate-600">
+                {countNoun(form.data.affected_families, "family", "families")}
+                {String(meta.affected_persons ?? "").trim() !== ""
+                  ? ` (${formattedCount(meta.affected_persons, "person", "persons")})`
+                  : ""}
+              </span>
             </label>
             <label className="flex border-b border-black px-2 font-bold">
               No. of Families Served:
@@ -554,7 +606,7 @@ export default function AssessmentExcelForm({
                 onChange={(v) => setMeta("families_served", v)}
               />
             </label>
-            <label className="flex border-b border-r border-black px-2 font-bold">
+            <label className={`flex border-b border-r border-black px-2 font-bold ${errorCell("assessment_form_data.information_source")}`}>
               Source of Information:
               <CellInput
                 value={meta.information_source}
@@ -562,7 +614,7 @@ export default function AssessmentExcelForm({
                 placeholder="e.g. CSWDO / DROMIC"
               />
             </label>
-            <label className="flex border-b border-black px-2 font-bold">
+            <label className={`flex border-b border-black px-2 font-bold ${errorCell("assessment_form_data.information_date")}`}>
               Date of Information:
               <CellInput
                 type="date"
@@ -599,8 +651,11 @@ export default function AssessmentExcelForm({
           </div>
           <div className="border-b border-black px-2 py-1 text-xs">
             Details of previous augmentation (Indicate Month and Year), If any:
+            {previousAugmentationHint && (
+              <span className="ml-2 font-semibold text-emerald-800 print:hidden">{previousAugmentationHint}</span>
+            )}
           </div>
-          <div className="grid grid-cols-[1.2fr_2.2fr_.9fr_3.6fr] border-b border-black bg-slate-50 text-center text-xs font-black">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.75fr)_minmax(0,.65fr)_minmax(0,5.6fr)] border-b border-black bg-slate-50 text-center text-xs font-black">
             <div className="border-r border-black py-1">UNIT</div>
             <div className="border-r border-black py-1">DESCRIPTION</div>
             <div className="border-r border-black py-1">QUANTITY</div>
@@ -609,7 +664,7 @@ export default function AssessmentExcelForm({
           {previousAugmentations.map((row, index) => (
             <div
               key={index}
-              className="grid grid-cols-[1.2fr_2.2fr_.9fr_3.6fr] border-b border-black text-xs"
+              className={`grid grid-cols-[minmax(0,1.1fr)_minmax(0,1.9fr)_minmax(0,.8fr)_minmax(0,5.2fr)] border-b border-black text-xs ${errorCell(`assessment_form_data.previous_augmentations.${index}`)}`}
             >
               <div className="border-r border-black">
                 <CellInput
@@ -650,6 +705,9 @@ export default function AssessmentExcelForm({
               (use separate sheet if necessary)
             </span>
           </Header>
+          <div className="border-b border-black bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-950 print:hidden">
+            Leave blank for now. RROS completes delivery / hauling details before or after delivery.
+          </div>
           <div className="grid grid-cols-[.65fr_.9fr_1.6fr_.5fr_.5fr_4.5fr] grid-rows-[auto_auto] border-b border-black bg-slate-50 text-center text-xs font-black">
             <div className="row-span-2 flex items-center justify-center border-r border-black p-2"></div>
             <div className="row-span-2 flex items-center justify-center border-r border-black p-2">Quantity</div>
@@ -666,7 +724,7 @@ export default function AssessmentExcelForm({
           {batches.map((row, index) => (
             <div
               key={index}
-              className="grid grid-cols-[.65fr_.9fr_1.6fr_.5fr_.5fr_4.5fr] border-b border-black text-xs"
+              className={`grid grid-cols-[.65fr_.9fr_1.6fr_.5fr_.5fr_4.5fr] border-b border-black text-xs ${errorCell(`assessment_form_data.delivery_batches.${index}`)}`}
             >
               <div className="border-r border-black p-2 font-bold">
                 Batch {index + 1}
@@ -735,18 +793,18 @@ export default function AssessmentExcelForm({
               />
             </label>
           </div>
-          <div className="grid grid-cols-[1.2fr_2.2fr_.9fr_3.6fr] border-b border-black bg-slate-50 text-center text-xs font-black">
+          <div className="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1.9fr)_minmax(0,.8fr)_minmax(0,5.2fr)] border-b border-black bg-slate-50 text-center text-xs font-black">
             <div className="border-r border-black py-1">UNIT</div>
             <div className="border-r border-black py-1">DESCRIPTION</div>
             <div className="border-r border-black py-1">QUANTITY</div>
             <div className="py-1">REMARKS</div>
           </div>
-          <div className="grid min-h-64 grid-cols-[4.3fr_3.6fr] border-b border-black text-xs">
+          <div className="grid min-h-64 grid-cols-[minmax(0,3.4fr)_minmax(0,5.6fr)] border-b border-black text-xs">
             <div className="border-r border-black">
               {form.data.items.map((item, index) => (
                 <div
                   key={index}
-                  className="grid grid-cols-[1.2fr_2.2fr_.9fr] border-b border-black"
+                  className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.75fr)_minmax(0,.65fr)] border-b border-black"
                 >
                   <div className="border-r border-black px-2 py-1 text-center font-bold uppercase">
                     {item.unit || "-"}
@@ -755,32 +813,65 @@ export default function AssessmentExcelForm({
                     {item.item_name || "Select an FNI above"}
                   </div>
                   <div className="px-2 py-1 text-center font-bold">
-                    {item.requested_quantity}
+                    {Math.round(Number(item.requested_quantity || 0)).toLocaleString()}
                   </div>
                 </div>
               ))}
             </div>
-            <div className="flex min-h-[34rem] max-h-[48rem] flex-col bg-white print:min-h-0 print:max-h-none">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 p-2 print:hidden">
-                <span className="font-sans text-[10px] font-bold uppercase text-slate-500">Assessment narrative</span>
+            <div className={`flex min-h-[34rem] max-h-[48rem] flex-col print:min-h-0 print:max-h-none ${
+              hasFieldError("recommendations")
+                ? "bg-rose-50 ring-2 ring-inset ring-rose-400"
+                : "bg-white"
+            }`}>
+              <div className={`flex flex-wrap items-center justify-between gap-2 border-b p-2 print:hidden ${
+                hasFieldError("recommendations")
+                  ? "border-rose-300 bg-rose-100"
+                  : "border-slate-200"
+              }`}>
+                <span className={`inline-flex items-center gap-2 font-sans text-[10px] font-bold uppercase ${
+                  hasFieldError("recommendations") ? "text-rose-800" : "text-slate-500"
+                }`}>
+                  Assessment narrative
+                  {hasFieldError("recommendations") && (
+                    <span className="rounded-full bg-rose-700 px-2 py-0.5 text-[9px] font-black text-white">
+                      Required
+                    </span>
+                  )}
+                </span>
                 <div className="flex flex-wrap gap-2">
-                  <button type="button" onClick={() => runAssessmentAi("generate")} disabled={Boolean(aiAction)} className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 font-sans text-[11px] font-black text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"><Sparkles className="h-3 w-3" />{aiAction === "generate" ? "Generating..." : "Auto-generate Assessment"}</button>
-                  <button type="button" onClick={() => runAssessmentAi("polish")} disabled={Boolean(aiAction) || !form.data.recommendations?.trim()} className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 font-sans text-[11px] font-black text-violet-700 hover:bg-violet-100 disabled:opacity-50"><Sparkles className="h-3 w-3" />{aiAction === "polish" ? "Polishing..." : "Polish Assessment"}</button>
+                  <button type="button" title="Create a new structured assessment from the linked DROMIC and request data. This replaces the current editor text." onClick={() => runAssessmentAi("generate")} disabled={Boolean(aiAction)} className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 font-sans text-[11px] font-black text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"><Sparkles className="h-3 w-3" />{aiAction === "generate" ? "Generating..." : "Auto-generate Assessment"}</button>
+                  <button type="button" title="Refine your current assessment with minimal grammar and clarity edits while preserving your facts, meaning, structure, and manual additions." onClick={() => runAssessmentAi("polish")} disabled={Boolean(aiAction) || !form.data.recommendations?.trim()} className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 font-sans text-[11px] font-black text-violet-700 hover:bg-violet-100 disabled:opacity-50"><Sparkles className="h-3 w-3" />{aiAction === "polish" ? "Polishing..." : "Polish Assessment"}</button>
                 </div>
               </div>
+              <div className="border-b border-sky-200 bg-sky-50 px-3 py-2 font-sans text-[10px] leading-relaxed text-sky-900 print:hidden">
+                <b>Auto-generate</b> creates a new structured assessment from the linked records and replaces this text. <b>Polish</b> is for your manually written or edited assessment; it keeps your facts, meaning, paragraph order, and added details while correcting grammar and clarity. Always review the result before saving.
+              </div>
               {aiError && <p className="px-2 pt-1 font-sans text-[10px] font-bold text-rose-600 print:hidden">{aiError}</p>}
-              <textarea className="h-[34rem] min-h-[30rem] max-h-[44rem] w-full flex-1 resize-y overflow-y-auto border-0 p-3 leading-relaxed outline-none focus:bg-amber-50 print:hidden" value={form.data.recommendations} onChange={(e) => form.setData("recommendations", stripNarrativeSignoff(e.target.value))} onInput={(event) => { const editor = event.currentTarget; editor.style.height = "auto"; editor.style.height = `${Math.min(editor.scrollHeight, 704)}px`; }} placeholder="Assessment findings, validation, justification and recommendation narrative" />
+              <textarea className={`h-[34rem] min-h-[30rem] max-h-[44rem] w-full flex-1 resize-y overflow-y-auto border-0 p-3 leading-relaxed outline-none focus:bg-amber-50 print:hidden ${
+                hasFieldError("recommendations")
+                  ? "bg-rose-50 text-rose-950 placeholder:text-rose-500"
+                  : "bg-white"
+              }`} value={form.data.recommendations} onChange={(e) => {
+                const value = stripNarrativeSignoff(e.target.value);
+                form.setData("recommendations", value);
+                if (value.trim()) form.clearErrors("recommendations");
+              }} onInput={(event) => { const editor = event.currentTarget; editor.style.height = "auto"; editor.style.height = `${Math.min(editor.scrollHeight, 704)}px`; }} placeholder={hasFieldError("recommendations") ? "Required: enter the assessment findings, validation, justification, and recommendation." : "Assessment findings, validation, justification and recommendation narrative"} />
               <div className="hidden whitespace-pre-wrap break-words p-3 text-[9px] leading-tight print:block">
                 {stripNarrativeSignoff(form.data.recommendations)}
               </div>
             </div>
           </div>
           <div className="grid grid-cols-2 text-xs">
-            <div className="flex min-h-40 flex-col border-r border-black p-3">
+            <div className={`flex min-h-40 flex-col border-r border-black p-3 ${errorCell(
+              "assessment_form_data.prepared_by",
+              "assessment_form_data.prepared_by_position",
+              "assessment_form_data.prepared_at",
+              "assigned_social_worker",
+            )}`}>
               <b>Prepared by:</b>
               <div className="mt-3 border-b border-black px-2 py-2 text-center">
                 <p className="font-black uppercase">
-                  {currentUser?.name || "User name not configured"}
+                  {(meta.prepared_by || currentUser?.name || "User name not configured").toUpperCase()}
                 </p>
               </div>
               <p className="min-h-6 text-center font-semibold">
@@ -799,7 +890,7 @@ export default function AssessmentExcelForm({
             <div className="flex min-h-40 flex-col p-3">
               <b>Reviewed by:</b>
               <select
-                className="mt-3 w-full border-0 border-b border-black bg-transparent p-2 text-center font-black"
+                className={`mt-3 w-full border-0 border-b border-black bg-transparent p-2 text-center font-black ${errorCell("assessment_form_data.reviewed_by")}`}
                 value={meta.reviewed_by ?? ""}
                 onChange={(e) => setMeta("reviewed_by", e.target.value)}
               >
@@ -834,7 +925,7 @@ export default function AssessmentExcelForm({
               <b>Approved by:</b>
             </p>
             <select
-              className="mx-auto mt-3 block w-2/3 border-0 border-b border-black bg-transparent p-2 text-center font-black"
+              className={`mx-auto mt-3 block w-2/3 border-0 border-b border-black bg-transparent p-2 text-center font-black ${errorCell("assessment_form_data.approved_by")}`}
               value={meta.approved_by ?? ""}
               onChange={(e) => setMeta("approved_by", e.target.value)}
             >

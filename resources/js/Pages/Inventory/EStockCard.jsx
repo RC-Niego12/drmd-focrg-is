@@ -3,6 +3,7 @@ import { ArrowDownToLine, ArrowUpFromLine, Boxes, Coins, Eye, Filter, Search, X 
 import { useMemo, useState } from 'react';
 import AppLayout, { Card, DataTable, ExportableCard, TableActionButton } from '@/Layouts/AppLayout';
 import LookerMultiSelect from '@/Components/LookerMultiSelect';
+import SystemTabs from '@/Components/SystemTabs';
 
 const formatNumber = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const formatDate = (value) => value ? new Date(`${value}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '-';
@@ -225,22 +226,16 @@ export default function EStockCard({ filters, warehouses, items, filterOptions =
                         </div>
                     </div>
                 )}>
-                <div className="mt-4 grid gap-2 rounded-md border border-slate-200 bg-slate-100 p-1 text-sm font-black dark:border-zinc-700 dark:bg-zinc-800 sm:grid-cols-3">
-                    {[
-                        { key: 'all', label: 'Complete E-Stock Card' },
-                        { key: 'receipts', label: 'Receipts' },
-                        { key: 'issuances', label: 'Issuances / Releases' },
-                    ].map((tab) => (
-                        <button
-                            key={tab.key}
-                            type="button"
-                            onClick={() => changeTab(tab.key)}
-                            className={`rounded px-3 py-2 transition ${activeTab === tab.key ? 'bg-white text-brand-700 shadow-sm dark:bg-zinc-950 dark:text-brand-100' : 'text-slate-600 hover:bg-white/70 dark:text-zinc-300 dark:hover:bg-zinc-900'}`}
-                        >
-                            {tab.label}
-                        </button>
-                    ))}
-                </div>
+                <SystemTabs
+                    active={activeTab}
+                    ariaLabel="E-Stock Card views"
+                    className="mt-4"
+                    items={[
+                        { key: 'all', label: 'Complete E-Stock Card', onClick: () => changeTab('all') },
+                        { key: 'receipts', label: 'Receipts', onClick: () => changeTab('receipts') },
+                        { key: 'issuances', label: 'Issuances / Releases', onClick: () => changeTab('issuances') },
+                    ]}
+                />
                 {hasRequiredLedgerFilters ? (
                     <DataTable
                         stickyHeader
@@ -407,7 +402,7 @@ function renderGrandTotalRow(rows, tab) {
         <tr key="grand-total" className="border-l-4 border-slate-500">
             <td colSpan={colSpan} className="sticky bottom-0 z-20 border-t border-slate-300 bg-slate-50 px-4 py-3 font-black shadow-[0_-6px_14px_rgba(15,23,42,0.08)] dark:border-zinc-700 dark:bg-zinc-900">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                    <span>Grand Total</span>
+                    <span>Total</span>
                     <span className="inline-flex flex-wrap items-center gap-x-5 gap-y-1 text-right text-sm">
                         {tab !== 'issuances' && <span title="Incoming Quantity">{formatNumber(receiptQuantity)}</span>}
                         {tab !== 'receipts' && <span title="Outgoing Quantity">{formatNumber(issuanceQuantity)}</span>}

@@ -171,7 +171,7 @@ class AiRogerContextService
         $query = AssistanceRequest::query()
             ->where('submission_type', 'lgu_dromic_relief_request');
 
-        if ($user->lgu_level === 'province') {
+        if (in_array(strtoupper((string) $user->lgu_level), ['PROVINCE', 'PLGU'], true)) {
             $query->where('province', $user->lgu_name);
         } else {
             $query->where('lgu_submitted_by', $user->id);

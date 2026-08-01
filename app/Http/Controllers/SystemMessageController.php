@@ -4,8 +4,10 @@ namespace App\Http\Controllers;
 
 use App\Models\SystemMessage;
 use App\Models\User;
+use App\Services\RealtimePublisher;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class SystemMessageController extends Controller
@@ -53,7 +55,7 @@ class SystemMessageController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(Request $request, RealtimePublisher $realtime): JsonResponse
     {
         $user = $request->user();
 
@@ -80,6 +82,19 @@ class SystemMessageController extends Controller
             'sender:id,name,email,office,avatar',
             'recipient:id,name,email,office,avatar',
         ]);
+        $realtime->usersChanged(
+            [$message->sender_id, $message->recipient_id],
+            'message.changed',
+            [
+                'reason' => 'created',
+                'message_id' => $message->id,
+                'sender_id' => $message->sender_id,
+                'recipient_id' => $message->recipient_id,
+                'sender_name' => $message->sender?->name ?? 'DROMIS User',
+                'subject' => $message->subject ?: 'DROMIS message',
+                'body_preview' => Str::limit($message->body, 120),
+            ],
+        );
 
         return response()->json([
             'message' => 'Message sent.',
@@ -87,12 +102,17 @@ class SystemMessageController extends Controller
         ], 201);
     }
 
-    public function read(Request $request, SystemMessage $message): JsonResponse
+    public function read(Request $request, SystemMessage $message, RealtimePublisher $realtime): JsonResponse
     {
         abort_unless((int) $message->recipient_id === (int) $request->user()->id, 403);
 
         if (! $message->read_at) {
             $message->update(['read_at' => now()]);
+            $realtime->usersChanged(
+                [$message->sender_id, $message->recipient_id],
+                'message.changed',
+                ['reason' => 'read', 'message_id' => $message->id],
+            );
         }
 
         return response()->json(['message' => 'Message marked as read.']);

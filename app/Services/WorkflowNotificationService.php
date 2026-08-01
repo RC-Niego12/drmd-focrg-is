@@ -112,6 +112,233 @@ class WorkflowNotificationService
         ], $request->lgu_submitted_by);
     }
 
+    public function notifyLguReportSubmitted(AssistanceRequest $request, bool $signedComplete): void
+    {
+        $hasReliefRequest = (bool) data_get($request->lgu_dromic_payload, 'has_relief_request');
+        $copyLabel = $signedComplete ? 'with complete signed copies' : 'as an advance copy';
+
+        $this->notifyRoles(['DRRS', 'DRIMS', 'OCD Caraga', 'Super Admin'], [
+            'workflow' => 'LGU DROMIC reporting',
+            'action_key' => $signedComplete ? 'lgu_dromic_submitted_complete' : 'lgu_dromic_signed_copy_pending',
+            'action_required' => ! $signedComplete,
+            'title' => $signedComplete ? 'LGU DROMIC report submitted with signed copies' : 'LGU DROMIC advance copy received',
+            'message' => "{$request->requesting_agency} sent {$request->reference_number} {$copyLabel} to DSWD and OCD Caraga.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('dromic.lgu-reports'),
+            'meta' => [
+                'has_relief_request' => $hasReliefRequest,
+                'signed_copy_complete' => $signedComplete,
+            ],
+        ], $request->lgu_submitted_by);
+
+    }
+
+    public function notifyLguDromicReviewComment(AssistanceRequest $request, string $reviewer): void
+    {
+        $this->notifyUsers($this->originators($request), [
+            'workflow' => 'LGU DROMIC signed-report review',
+            'action_key' => 'lgu_dromic_review_comment',
+            'action_required' => true,
+            'title' => 'Comment received on your DROMIC report',
+            'message' => "{$reviewer} posted a review comment on {$request->reference_number}. Review the signed report and correct or re-upload it when needed.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('lgu.dromic-requests.index'),
+        ]);
+    }
+
+    public function notifyLguDromicValidationOutcome(AssistanceRequest $request): void
+    {
+        $status = $request->lgu_dromic_validation_status;
+        $reviewer = $request->lguDromicReviewer?->name ?: 'DSWD reviewer';
+        $correctionInstruction = match ($request->lgu_dromic_correction_scope) {
+            'encoding' => 'Open the returned report and create an editable correction draft for the encoded entries.',
+            'both' => 'Create an editable correction draft, correct the encoded entries, regenerate the report, and upload the corrected PDF.',
+            default => 'Review the finding and replace the identified PDF document.',
+        };
+        [$title, $message, $actionRequired] = match ($status) {
+            'validated_no_findings' => [
+                filled($request->lgu_signed_report_path)
+                    ? 'DROMIC signed PDF validated — no findings'
+                    : 'DROMIC advance copy validated — no findings',
+                filled($request->lgu_signed_report_path)
+                    ? "{$request->reference_number} passed DSWD signed-report validation. This result is separate from any relief augmentation decision."
+                    : "{$request->reference_number} passed DSWD advance-copy validation. Upload the signed PDF when ready so DSWD can validate the signed report separately.",
+                false,
+            ],
+            'needs_lgu_action' => [
+                'Action needed on your DROMIC report',
+                "{$reviewer} marked {$request->reference_number} as needing LGU action. {$correctionInstruction}",
+                true,
+            ],
+            default => [
+                'DROMIC report is under DSWD review',
+                "{$request->reference_number} is now being reviewed by DSWD personnel.",
+                false,
+            ],
+        };
+
+        $this->notifyUsers($this->originators($request), [
+            'workflow' => 'LGU DROMIC report validation',
+            'action_key' => 'lgu_dromic_validation_status',
+            'action_required' => $actionRequired,
+            'title' => $title,
+            'message' => $message,
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('lgu.dromic-requests.index'),
+            'meta' => ['validation_status' => $status],
+        ]);
+    }
+
+    public function notifyLguReliefValidationOutcome(AssistanceRequest $request): void
+    {
+        $status = $request->lgu_relief_validation_status;
+        $reviewer = $request->lguReliefReviewer?->name ?: 'DRRS reviewer';
+        $correctionInstruction = match ($request->lgu_relief_correction_scope) {
+            'encoding' => 'Create a correction draft and update the encoded requested FNI entries.',
+            'both' => 'Create a correction draft, update the encoded requested FNI entries, and upload the corrected request-letter PDF.',
+            default => 'Review the remark and upload the corrected request-letter PDF.',
+        };
+        [$title, $message, $actionRequired] = match ($status) {
+            'validated_no_findings' => [
+                'Relief request validated — no findings',
+                "The signed relief augmentation request attached to {$request->reference_number} passed DRRS document validation and is now locked.",
+                false,
+            ],
+            'needs_lgu_action' => [
+                'Action needed on your relief request',
+                "{$reviewer} found an issue in the relief augmentation request attached to {$request->reference_number}. {$correctionInstruction}",
+                true,
+            ],
+            default => [
+                'Relief request is under DRRS review',
+                "The signed relief augmentation request attached to {$request->reference_number} is now under DRRS document review.",
+                false,
+            ],
+        };
+
+        $this->notifyUsers($this->originators($request), [
+            'workflow' => 'LGU relief augmentation request validation',
+            'action_key' => 'lgu_relief_validation_status',
+            'action_required' => $actionRequired,
+            'title' => $title,
+            'message' => $message,
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('lgu.dromic-requests.index'),
+            'meta' => ['validation_status' => $status],
+        ]);
+    }
+
+    public function notifyValidatedLguRequestReadyForAssessment(AssistanceRequest $request): void
+    {
+        $this->notifyRoles(['DRRS', 'Super Admin'], [
+            'workflow' => 'Validated LGU relief request to DRRS',
+            'action_key' => 'drrs_assessment_required',
+            'action_required' => true,
+            'title' => 'Validated LGU request ready for assessment',
+            'message' => "{$request->reference_number} is now available in FNI Requests. DRMD AA routing is not required for this LGU-origin request.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('requests.index', ['status' => 'actionable', 'search' => $request->reference_number]),
+            'meta' => ['source' => 'lgu_dromic'],
+        ]);
+
+        $source = $request->sourceLguDromicReport;
+        if ($source
+            && $source->lgu_dromic_validation_status === 'validated_no_findings'
+            && $source->lgu_relief_validation_status === 'validated_no_findings') {
+            $this->notifyValidatedLguDocumentsReceived($source, $request);
+        }
+    }
+
+    public function notifyValidatedLguDocumentsReceived(AssistanceRequest $source, ?AssistanceRequest $operational = null): void
+    {
+        $hasRequest = filled($source->lgu_relief_request_reference);
+        $documents = $hasRequest
+            ? "{$source->reference_number} and {$source->lgu_relief_request_reference}"
+            : $source->reference_number;
+        $nextStep = $hasRequest
+            ? 'DRMD AA may now record the DRN; the Chief may view the validated copies.'
+            : 'DRMD AA and the Chief may now view the validated signed report.';
+        $this->notifyRoles(['DRMD AA', 'DRMD Chief', 'Super Admin'], [
+            'workflow' => 'Validated LGU signed-copy registry',
+            'action_key' => 'validated_lgu_documents_received',
+            'action_required' => false,
+            'title' => 'Validated LGU signed documents received',
+            'message' => "{$documents} passed document validation. {$nextStep}",
+            'request_id' => $source->id,
+            'reference_number' => $source->reference_number,
+            'url' => route('drmd-aa.lgu-intake.index'),
+            'meta' => ['fni_request_reference' => $operational?->reference_number],
+        ]);
+    }
+
+    public function notifyLguSignedCopiesRequired(AssistanceRequest $request): void
+    {
+        $hasReliefRequest = (bool) data_get($request->lgu_dromic_payload, 'has_relief_request');
+        $requirement = $hasReliefRequest
+            ? 'the signed report and signed relief augmentation request letter'
+            : 'the signed report';
+
+        $this->notifyUsers($this->originators($request), [
+            'workflow' => 'LGU signed-copy compliance',
+            'action_key' => 'lgu_dromic_upload_signed_copies',
+            'action_required' => true,
+            'title' => 'Signed copy submission required',
+            'message' => "{$request->reference_number} was accepted as an advance copy. Upload {$requirement} to complete the submission.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('lgu.dromic-requests.index'),
+            'meta' => ['has_relief_request' => $hasReliefRequest],
+        ]);
+    }
+
+    public function notifyDromicSignedCopiesStillPending(AssistanceRequest $request): void
+    {
+        $hasReliefRequest = (bool) data_get($request->lgu_dromic_payload, 'has_relief_request');
+        $this->notifyRoles(['DRMD AA', 'DRRS', 'DRIMS', 'Super Admin'], [
+            'workflow' => 'LGU signed-copy compliance',
+            'action_key' => 'lgu_dromic_signed_copy_pending',
+            'action_required' => true,
+            'title' => 'LGU signed copies remain pending',
+            'message' => "{$request->reference_number} from {$request->requesting_agency} remains an advance copy pending the required signed document(s).",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('dromic.lgu-reports'),
+            'meta' => ['has_relief_request' => $hasReliefRequest],
+        ], $request->lgu_submitted_by);
+
+        if ($hasReliefRequest) {
+            $this->notifyRoles(['DRMD AA'], [
+                'workflow' => 'LGU signed-copy compliance',
+                'action_key' => 'lgu_dromic_signed_copy_pending',
+                'action_required' => true,
+                'title' => 'LGU signed copies remain pending',
+                'message' => "{$request->reference_number} from {$request->requesting_agency} remains an advance copy pending the required signed documents.",
+                'request_id' => $request->id,
+                'reference_number' => $request->reference_number,
+                'url' => route('drmd-aa.lgu-intake.index'),
+            ], $request->lgu_submitted_by);
+        }
+    }
+
+    public function notifyLguSignedCopiesCompleted(AssistanceRequest $request): void
+    {
+        $this->notifyRoles(['DRRS', 'DRIMS', 'Super Admin'], [
+            'workflow' => 'LGU signed-copy compliance',
+            'action_key' => 'lgu_dromic_signed_copies_completed',
+            'action_required' => false,
+            'title' => 'LGU signed-copy requirement completed',
+            'message' => "{$request->requesting_agency} completed the signed-copy requirements for {$request->reference_number}. DRIMS and DRRS must validate the applicable documents before they appear in the DRMD AA and Chief registries.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('dromic.lgu-reports'),
+        ], $request->lgu_submitted_by);
+    }
+
     public function notifyLguDromicRoutedToChief(AssistanceRequest $request): void
     {
         $this->notifyRoles(['DRMD Chief', 'Super Admin'], [
@@ -164,6 +391,20 @@ class WorkflowNotificationService
             'url' => route('requests.index', ['status' => 'actionable']),
             'meta' => ['assigned_section' => $request->drmd_assigned_section],
         ]);
+
+        if ($request->drmdAssignedUser) {
+            $this->notifyUsers(collect([$request->drmdAssignedUser]), [
+                'workflow' => 'DRMD AA to concerned DRRS/PDRC personnel',
+                'action_key' => 'assigned_lgu_relief_request',
+                'action_required' => true,
+                'title' => 'Relief augmentation request formally assigned to you',
+                'message' => "{$request->reference_number} was formally routed to you under the DRMD Chief’s directive. Open the request even if you previously received its documents as an advance copy.",
+                'request_id' => $request->id,
+                'reference_number' => $request->reference_number,
+                'url' => route('requests.index', ['status' => 'actionable', 'search' => $request->reference_number]),
+                'meta' => ['assigned_section' => $request->drmd_assigned_section],
+            ]);
+        }
 
         $this->notifyUsers($this->originators($request), [
             'workflow' => 'DRMD processing update',

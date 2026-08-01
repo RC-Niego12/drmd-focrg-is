@@ -383,8 +383,8 @@ export default function Index({ metrics, regions, selectedRegion, provinces, dis
                 </div>
             </ExportableCard>
 
-            <ExportableCard id="psgc-managed-districts" title="Managed Districts" className="mt-6">
-                <h2 className="mb-4 text-lg font-black">Managed Districts</h2>
+            <ExportableCard id="psgc-managed-districts" title="Districts" className="mt-6">
+                <h2 className="mb-4 text-lg font-black">Districts</h2>
                 <DataTable
                     columns={['Province', 'District', 'Code', 'Synced At']}
                     rows={(districts || []).map((district) => (

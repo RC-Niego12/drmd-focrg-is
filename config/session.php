@@ -5,6 +5,12 @@ use Illuminate\Support\Str;
 return [
     'driver' => env('SESSION_DRIVER', 'database'),
     'lifetime' => (int) env('SESSION_LIFETIME', 120),
+    /*
+    | Idle auto-logout (browser UI). Users drafting long reports often step away
+    | briefly to verify data, so this should stay generous and below lifetime.
+    */
+    'inactivity_timeout' => (int) env('SESSION_INACTIVITY_TIMEOUT', 90),
+    'inactivity_warning' => (int) env('SESSION_INACTIVITY_WARNING', 5),
     'expire_on_close' => env('SESSION_EXPIRE_ON_CLOSE', false),
     'encrypt' => env('SESSION_ENCRYPT', false),
     'files' => storage_path('framework/sessions'),

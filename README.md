@@ -19,9 +19,14 @@ composer install
 npm install
 php artisan key:generate
 php artisan migrate --seed
-npm run dev
-php artisan serve
+composer run dev
 ```
+
+`composer run dev` starts the Laravel LAN server, queue worker, Vite, and the
+secured Socket.IO gateway together. If Laravel is already served by Herd,
+`npm run dev` starts both Vite and Socket.IO; `npm run dev:vite` is available
+only for exceptional cases where the gateway is intentionally managed as a
+separate service.
 
 Seeded users all use the password `password`:
 

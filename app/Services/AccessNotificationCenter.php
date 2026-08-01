@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AssistanceRequest;
 use App\Models\DromicReport;
+use App\Models\RegionalAlertRecipient;
 use App\Models\User;
 use Illuminate\Notifications\DatabaseNotification;
 use Spatie\Permission\Models\Role;
@@ -25,22 +26,50 @@ class AccessNotificationCenter
                 ->map(fn (User $pendingUser): array => $this->serializeAccessUser($pendingUser))
                 ->values()
             : collect();
-        $notifications = $user->notifications()
+        $unreadCount = $user->unreadNotifications()->count();
+        $unreadNotifications = $user->unreadNotifications()
             ->latest()
-            ->limit(15)
-            ->get()
+            ->limit(100)
+            ->get();
+        $recentReadNotifications = $user->readNotifications()
+            ->latest()
+            ->limit(max(0, 30 - $unreadNotifications->count()))
+            ->get();
+        $notifications = $unreadNotifications
+            ->concat($recentReadNotifications)
+            ->sortByDesc('created_at')
             ->map(fn (DatabaseNotification $notification): array => $this->serializeNotification($notification))
             ->values();
         $workflowActions = $notifications
             ->filter(fn (array $notification): bool => ($notification['action_required'] ?? false) && ! ($notification['acted'] ?? false))
             ->count();
+        $pendingRegionalAlert = RegionalAlertRecipient::query()
+            ->where('user_id', $user->id)
+            ->whereNull('acknowledged_at')
+            ->whereNull('superseded_at')
+            ->latest('regional_alert_id')
+            ->first();
+        $regionalAlertPrompt = null;
+
+        if ($pendingRegionalAlert) {
+            $notification = $user->notifications()
+                ->where('data->action_key', 'ocd_alert_changed')
+                ->where('data->meta->alert_id', $pendingRegionalAlert->regional_alert_id)
+                ->latest()
+                ->first();
+            $regionalAlertPrompt = $notification
+                ? $this->serializeNotification($notification)
+                : null;
+        }
 
         return [
-            'unread_count' => $user->unreadNotifications()->count(),
+            'unread_count' => $unreadCount,
+            'unread_overflow' => max(0, $unreadCount - $unreadNotifications->count()),
             'action_required_count' => $pendingRequests->count() + $workflowActions,
             'notifications' => $notifications,
             'pending_requests' => $pendingRequests,
             'role_options' => $isSuperAdmin ? $this->roleOptions() : [],
+            'regional_alert_prompt' => $regionalAlertPrompt,
             'access' => [
                 'status' => $user->access_status,
                 'assigned_role' => $user->getRoleNames()->first(),
@@ -86,15 +115,51 @@ class AccessNotificationCenter
     {
         $data = $notification->data;
         $acted = $this->notificationHasBeenActed($data);
+        $regionalAlertAcknowledgedAt = null;
+        if (data_get($data, 'action_key') === 'ocd_alert_changed') {
+            $regionalAlertAcknowledgedAt = RegionalAlertRecipient::query()
+                ->where('regional_alert_id', (int) data_get($data, 'meta.alert_id'))
+                ->where('user_id', $notification->notifiable_id)
+                ->value('acknowledged_at');
+        }
 
         return [
             'id' => $notification->id,
             ...$data,
+            'url' => $this->internalPath(data_get($data, 'url')),
             'acted' => $acted,
             'action_required' => (bool) data_get($data, 'action_required', false),
             'read_at' => $notification->read_at?->toDateTimeString(),
             'created_at' => $notification->created_at?->toDateTimeString(),
+            'regional_alert_acknowledged_at' => $regionalAlertAcknowledgedAt
+                ? \Illuminate\Support\Carbon::parse($regionalAlertAcknowledgedAt)->toDateTimeString()
+                : null,
         ];
+    }
+
+    private function internalPath(mixed $value): ?string
+    {
+        if (! is_string($value) || blank($value)) {
+            return null;
+        }
+
+        if (str_starts_with($value, '/')) {
+            return $value;
+        }
+
+        $parts = parse_url($value);
+        $appParts = parse_url((string) config('app.url'));
+        if (! is_array($parts)
+            || ! is_array($appParts)
+            || strcasecmp((string) ($parts['host'] ?? ''), (string) ($appParts['host'] ?? '')) !== 0) {
+            return null;
+        }
+
+        $path = '/'.ltrim((string) ($parts['path'] ?? ''), '/');
+        $query = filled($parts['query'] ?? null) ? '?'.$parts['query'] : '';
+        $fragment = filled($parts['fragment'] ?? null) ? '#'.$parts['fragment'] : '';
+
+        return $path.$query.$fragment;
     }
 
     private function notificationHasBeenActed(array $data): bool

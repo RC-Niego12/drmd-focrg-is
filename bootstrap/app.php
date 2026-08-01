@@ -1,6 +1,8 @@
 <?php
 
 use App\Console\Commands\ImportWarehouseSheet;
+use App\Console\Commands\RemindLguDromicSignedCopies;
+use App\Console\Commands\RemindLguRegionalAlertDeadlines;
 use App\Console\Commands\ReconcileInventoryBalances;
 use App\Console\Commands\TestMyPortalConnection;
 use App\Http\Middleware\HandleInertiaRequests;
@@ -20,6 +22,8 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withCommands([
         ImportWarehouseSheet::class,
         ReconcileInventoryBalances::class,
+        RemindLguDromicSignedCopies::class,
+        RemindLguRegionalAlertDeadlines::class,
         TestMyPortalConnection::class,
     ])
     ->withMiddleware(function (Middleware $middleware): void {

@@ -28,12 +28,12 @@ class PsgcController extends Controller
 
     public function districts(string $provinceCode): JsonResponse
     {
-        return response()->json($this->localOrRemote('district', $provinceCode, ''));
+        return response()->json($this->localOrRemote('district', $provinceCode, "provinces/{$provinceCode}/districts"));
     }
 
     public function districtCitiesMunicipalities(string $districtCode): JsonResponse
     {
-        return response()->json($this->localOrRemote('city_municipality', null, '', $districtCode));
+        return response()->json($this->localOrRemote('city_municipality', null, "districts/{$districtCode}/cities-municipalities", $districtCode));
     }
 
     public function barangays(string $cityMunicipalityCode): JsonResponse

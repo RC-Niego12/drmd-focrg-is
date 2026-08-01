@@ -12,7 +12,7 @@ use Spatie\Permission\Models\Role;
 
 class SeedLguAccounts extends Command
 {
-    protected $signature = 'lgu:seed-accounts {--password=DromisLGU2026! : Initial password for generated LGU accounts}';
+    protected $signature = 'lgu:seed-accounts {--password=password : Password to set for all generated LGU accounts}';
 
     protected $description = 'Create simple LGU user accounts for each active province, city, and municipality in the PSGC table.';
 
@@ -66,7 +66,7 @@ class SeedLguAccounts extends Command
                         'name' => "{$displayPrefix} {$displayName}",
                         'email' => $email,
                         'username' => $username,
-                        'password' => $exists ? $user->password : Hash::make($password),
+                        'password' => Hash::make($password),
                         'office' => 'LGU',
                         'position' => 'LGU DROMIC Encoder',
                         'designation' => 'LGU Focal Person',
@@ -76,7 +76,7 @@ class SeedLguAccounts extends Command
                         'access_status' => 'approved',
                         'access_approved_at' => $user->access_approved_at ?: now(),
                         'lgu_psgc_code' => $address->code,
-                        'lgu_level' => $address->level,
+                        'lgu_level' => $displayPrefix,
                         'lgu_name' => $displayName,
                     ])->save();
 
@@ -85,7 +85,7 @@ class SeedLguAccounts extends Command
                 }
             });
 
-        $this->info("LGU accounts ready. Created: {$created}; updated/restored: {$updated}; initial password for new accounts: {$password}");
+        $this->info("LGU accounts ready. Created: {$created}; updated/restored: {$updated}; password set for all LGU accounts.");
 
         return self::SUCCESS;
     }

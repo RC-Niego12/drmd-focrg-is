@@ -13,15 +13,18 @@ use App\Models\PsgcAddress;
 use App\Models\RequestParty;
 use App\Models\SystemSetting;
 use App\Models\User;
+use App\Services\AorCoverageService;
 use App\Services\AuditLogger;
 use App\Services\InventoryService;
 use App\Services\InventoryBalanceService;
+use App\Services\PreviousAugmentationResolver;
 use App\Services\RequestPartySheetService;
 use App\Services\ResponseLetterDocumentService;
 use App\Services\WorkflowNotificationService;
 use App\Services\WordToPdfService;
 use App\Support\DocumentReferenceNumber;
 use App\Support\AssessmentNarrative;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -33,7 +36,6 @@ use Symfony\Component\HttpFoundation\Response as HttpResponse;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Http;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
-use Illuminate\Http\JsonResponse;
 
 class RequestController extends Controller
 {
@@ -44,7 +46,7 @@ class RequestController extends Controller
         return $this->index($request);
     }
 
-    public function index(Request $request, InventoryBalanceService $inventoryBalanceService): Response|RedirectResponse
+    public function index(Request $request, InventoryBalanceService $inventoryBalanceService, AorCoverageService $aorCoverage): Response|RedirectResponse
     {
         if ($request->filled(['epirma_request', 'token', 'status'])) {
             $assistanceRequest = AssistanceRequest::query()->findOrFail($request->integer('epirma_request'));
@@ -82,29 +84,126 @@ class RequestController extends Controller
                 'available' => max(0, (float) ($row['available_balance'] ?? 0)),
             ])->filter(fn (array $row): bool => filled($row['warehouse_id']) && filled($row['item']))->values();
 
-        return Inertia::render('Requests/Index', [
-            'requests' => AssistanceRequest::query()
-                ->with(['items', 'assessmentType', 'incident', 'encoder'])
-                ->when($request->status === 'actionable', fn ($q) => $q->whereIn('status', ['endorsed', 'submitted', 'under_review', 'acted']))
-                ->when($request->status && $request->status !== 'actionable', fn ($q, $status) => $q->where('status', $status))
-                ->when($request->search, function ($q, $search): void {
-                    $q->where(function ($query) use ($search): void {
-                        $query->where('reference_number', 'like', "%{$search}%")
-                            ->orWhere('requesting_agency', 'like', "%{$search}%")
-                            ->orWhere('requester', 'like', "%{$search}%")
-                            ->orWhere('province', 'like', "%{$search}%")
-                            ->orWhere('municipality', 'like', "%{$search}%");
-                    });
+        $user = $request->user();
+        $withAssessmentAccess = function ($paginator) use ($user, $aorCoverage) {
+            $paginator->getCollection()->transform(function (AssistanceRequest $record) use ($user, $aorCoverage) {
+                $record->setAttribute('assessment_access', $user
+                    ? $aorCoverage->assessmentAccessFor($user, $record)
+                    : [
+                        'can_create' => false,
+                        'can_act_on_behalf' => false,
+                        'can_access_documents' => false,
+                        'is_owner' => false,
+                        'acted_by' => null,
+                        'primary_owner' => null,
+                        'reason' => 'unauthenticated',
+                    ]);
+
+                return $record;
+            });
+
+            return $paginator;
+        };
+
+        $workspaceBase = AssistanceRequest::query()
+            ->where('submission_type', '!=', 'lgu_dromic_relief_request')
+            ->where('endorsed_to_drrs', true);
+
+        $workspaceSummary = [
+            'requests' => (clone $workspaceBase)->count(),
+            'acted' => (clone $workspaceBase)->where(function ($query): void {
+                $query->whereIn('assessment_status', ['final', 'submitted'])
+                    ->orWhereIn('status', ['acted', 'approved', 'partially_approved', 'rejected']);
+            })->count(),
+            'still_for_action' => (clone $workspaceBase)->where(function ($query): void {
+                $query->whereNull('assessment_status')
+                    ->orWhere('assessment_status', 'draft');
+            })->whereNotIn('status', ['approved', 'partially_approved', 'rejected'])->count(),
+            'lgu_linked' => (clone $workspaceBase)->whereNotNull('source_lgu_dromic_request_id')->count(),
+            'breakdown' => [
+                'awaiting_assessment' => (clone $workspaceBase)->whereNull('assessment_status')->whereNotIn('status', ['approved', 'partially_approved', 'rejected'])->count(),
+                'draft_under_review' => (clone $workspaceBase)->where('assessment_status', 'draft')->count(),
+                'final' => (clone $workspaceBase)->where('assessment_status', 'final')->count(),
+                'submitted' => (clone $workspaceBase)->where('assessment_status', 'submitted')->count(),
+                'approved' => (clone $workspaceBase)->whereIn('status', ['approved', 'partially_approved'])->count(),
+            ],
+        ];
+
+        $reliefRequestBase = AssistanceRequest::query()
+            ->where('submission_type', 'lgu_dromic_relief_request')
+            ->whereNotNull('lgu_submitted_to_dswd_at')
+            ->whereNotNull('lgu_signed_request_path');
+
+        $reliefAssessmentGate = [
+            'awaiting_validation' => (clone $reliefRequestBase)
+                ->where(function ($query): void {
+                    $query->whereNull('lgu_relief_validation_status')
+                        ->orWhereIn('lgu_relief_validation_status', ['pending_review', 'under_review']);
                 })
-                ->latest()
-                ->paginate(15)
-                ->withQueryString(),
-            'assessments' => AssistanceRequest::query()
-                ->with(['items.sourceWarehouse:id,name,province', 'incident', 'encoder:id,name'])
-                ->whereNotNull('assessment_status')
-                ->latest('updated_at')
-                ->paginate(15, ['*'], 'assessments_page')
-                ->withQueryString(),
+                ->count(),
+            'needs_lgu_action' => (clone $reliefRequestBase)
+                ->where('lgu_relief_validation_status', 'needs_lgu_action')
+                ->count(),
+        ];
+
+        $highlightRequestId = $request->integer('highlight') ?: null;
+
+        return Inertia::render('Requests/Index', [
+            'workspaceSummary' => $workspaceSummary,
+            'reliefAssessmentGate' => $reliefAssessmentGate,
+            'highlightRequestId' => $highlightRequestId,
+            'requests' => $withAssessmentAccess(
+                AssistanceRequest::query()
+                    ->with([
+                        'items',
+                        'assessmentType',
+                        'incident',
+                        'encoder:id,name,office',
+                        'assessmentActor:id,name,office',
+                        'assessmentOnBehalfOwner:id,name,office',
+                        'sourceLguDromicReport:id,incident_id,reference_number,lgu_relief_request_reference,lgu_signed_request_path,lgu_signed_report_path,lgu_relief_validation_status,lgu_dromic_payload,lgu_dromic_narrative,affected_families,province,municipality,barangay,requesting_agency,requester,requester_position,requester_address,contact_number',
+                        'sourceLguDromicReport.incident',
+                    ])
+                    ->where('submission_type', '!=', 'lgu_dromic_relief_request')
+                    ->when(! $highlightRequestId && $request->status === 'actionable', fn ($q) => $q->whereIn('status', ['endorsed', 'submitted', 'under_review', 'acted']))
+                    ->when(! $highlightRequestId && $request->status && $request->status !== 'actionable', fn ($q, $status) => $q->where('status', $status))
+                    ->when(! $highlightRequestId && $request->search, function ($q, $search): void {
+                        $q->where(function ($query) use ($search): void {
+                            $query->where('reference_number', 'like', "%{$search}%")
+                                ->orWhere('requesting_agency', 'like', "%{$search}%")
+                                ->orWhere('requester', 'like', "%{$search}%")
+                                ->orWhere('province', 'like', "%{$search}%")
+                                ->orWhere('municipality', 'like', "%{$search}%")
+                                ->orWhereHas('sourceLguDromicReport', function ($source) use ($search): void {
+                                    $source->where('reference_number', 'like', "%{$search}%")
+                                        ->orWhere('lgu_relief_request_reference', 'like', "%{$search}%");
+                                });
+                        });
+                    })
+                    ->when(
+                        $highlightRequestId,
+                        fn ($q) => $q->orderByRaw('CASE WHEN id = ? THEN 0 ELSE 1 END', [$highlightRequestId])->latest(),
+                        fn ($q) => $q->latest(),
+                    )
+                    ->paginate(15)
+                    ->withQueryString()
+            ),
+            'assessments' => $withAssessmentAccess(
+                AssistanceRequest::query()
+                    ->with([
+                        'items.sourceWarehouse:id,name,province',
+                        'incident',
+                        'encoder:id,name,office',
+                        'assessmentActor:id,name,office',
+                        'assessmentOnBehalfOwner:id,name,office',
+                        'sourceLguDromicReport:id,reference_number,lgu_relief_request_reference',
+                    ])
+                    ->where('submission_type', '!=', 'lgu_dromic_relief_request')
+                    ->whereNotNull('assessment_status')
+                    ->latest('updated_at')
+                    ->paginate(15, ['*'], 'assessments_page')
+                    ->withQueryString()
+            ),
             'filters' => $request->only(['search', 'status']),
             'assessmentTypes' => AssessmentType::where('is_active', true)->orderBy('name')->get(),
             'inventoryItems' => InventoryItem::where('status', 'active')->orderBy('name')->get(),
@@ -156,6 +255,9 @@ class RequestController extends Controller
     public function approve(Request $request, AssistanceRequest $assistanceRequest, InventoryService $inventory, AuditLogger $audit, WorkflowNotificationService $workflowNotifications): RedirectResponse
     {
         abort_unless($request->user()?->can('process requests'), 403);
+        if (filled($assistanceRequest->drmd_assigned_to) && (int) $assistanceRequest->drmd_assigned_to !== (int) $request->user()->id) {
+            abort(403, 'Only the assigned DRRS PDRC user can action this LGU request.');
+        }
         abort_unless($assistanceRequest->assessment_status === 'submitted', 422, 'Submit the finalized assessment before recording a decision.');
         abort_if(in_array($assistanceRequest->status, ['approved', 'partially_approved', 'rejected'], true), 422, 'A decision has already been recorded for this assessment.');
 
@@ -194,11 +296,35 @@ class RequestController extends Controller
         return back()->with('success', 'Request decision recorded.');
     }
 
-    public function assessmentForm(AssistanceRequest $assistanceRequest): Response
+    public function previousAugmentations(
+        AssistanceRequest $assistanceRequest,
+        PreviousAugmentationResolver $resolver,
+    ): JsonResponse {
+        abort_unless(
+            request()->user()?->can('encode requests')
+                || request()->user()?->can('monitor requests')
+                || request()->user()?->can('process requests'),
+            403,
+        );
+
+        $resolved = $resolver->resolve($assistanceRequest);
+
+        return response()->json($resolved);
+    }
+
+    public function assessmentForm(Request $request, AssistanceRequest $assistanceRequest, AorCoverageService $aorCoverage): Response
     {
+        $user = $request->user();
+        abort_unless($user, 403);
+        abort_unless(filled($assistanceRequest->assessment_status), 404, 'No assessment documents are available for this request yet.');
+
+        $access = $aorCoverage->assessmentAccessFor($user, $assistanceRequest);
+        abort_unless($access['can_access_documents'], 403, 'Only the DRRS PDRC who created this assessment can open its documents.');
+
         return Inertia::render('Requests/AssessmentForm', [
-            'request' => $assistanceRequest->load(['items', 'assessmentType', 'incident', 'encoder']),
+            'request' => $assistanceRequest->load(['items', 'assessmentType', 'incident', 'encoder', 'assessmentActor', 'assessmentOnBehalfOwner', 'sourceLguDromicReport']),
             'drnPrefixes' => OperationalLibraryValue::query()->where('library_type', 'drn_prefix')->where('is_active', true)->orderBy('context')->orderBy('value')->get(['id', 'value', 'context']),
+            'assessmentAccess' => $access,
         ]);
     }
 
@@ -238,7 +364,7 @@ class RequestController extends Controller
             'assessment_drn' => ['nullable', 'string', 'max:255'], 'assessment_summary' => ['nullable', 'string'],
             'recommendations' => ['nullable', 'string'], 'remarks' => ['nullable', 'string'],
             'items' => ['required', 'array', 'min:1'], 'items.*.id' => ['required', 'exists:request_items,id'],
-            'items.*.requested_quantity' => ['required', 'numeric', 'min:0.01'], 'items.*.priority' => ['required', 'in:low,normal,high,urgent'],
+            'items.*.requested_quantity' => ['required', 'integer', 'min:1'], 'items.*.priority' => ['required', 'in:low,normal,high,urgent'],
             'items.*.remarks' => ['nullable', 'string'],
         ]);
         $old = $assistanceRequest->load('items')->toArray();
@@ -265,15 +391,56 @@ class RequestController extends Controller
         return back()->with('success', 'Assessment saved and ready for printing.');
     }
 
-    public function completeAssessment(AssistanceRequestRequest $request, AssistanceRequest $assistanceRequest, AuditLogger $audit): RedirectResponse
+    public function completeAssessment(
+        AssistanceRequestRequest $request,
+        AssistanceRequest $assistanceRequest,
+        AuditLogger $audit,
+        InventoryBalanceService $inventoryBalanceService,
+        AorCoverageService $aorCoverage
+    ): RedirectResponse
     {
         abort_unless($assistanceRequest->endorsed_to_drrs, 422, 'Only records endorsed to DRRS can be assessed through this workflow.');
 
+        $user = $request->user();
+        abort_unless($user, 403);
+
+        $access = $aorCoverage->assessmentAccessFor($user, $assistanceRequest);
+        if (filled($assistanceRequest->assessment_status)) {
+            abort_unless(
+                $access['can_access_documents'],
+                403,
+                'Only the DRRS PDRC who created this assessment can update its draft.'
+            );
+        } else {
+            abort_unless(
+                $user->hasRole('Super Admin') || ($user->hasRole('DRRS') && $user->can('encode requests')),
+                403,
+                'Only DRRS encoders can create assessments.'
+            );
+
+            $assistanceRequest->loadMissing('sourceLguDromicReport:id,lgu_signed_request_path,lgu_relief_validation_status');
+            if ($assistanceRequest->blocksNewAssessmentForUnsignedReliefValidation()) {
+                return back()->withErrors([
+                    'assessment' => 'Validate the signed LGU request letter first (Validated — No Findings) before creating an assessment for this request.',
+                ]);
+            }
+        }
+
         $data = $request->validated();
         $data['recommendations'] = AssessmentNarrative::sanitize($data['recommendations'] ?? null);
+        $availableTotals = $inventoryBalanceService->availableTotalsByItem();
+        $data['items'] = collect($data['items'])->map(function (array $item) use ($availableTotals): array {
+            $key = preg_replace('/[^a-z0-9]+/', '', strtolower((string) ($item['item_name'] ?? ''))) ?? '';
+
+            if ($key !== '' && $availableTotals->has($key)) {
+                $item['available_quantity'] = max(0, (float) $availableTotals->get($key));
+            }
+
+            return $item;
+        })->all();
         $old = $assistanceRequest->load(['items', 'incident'])->toArray();
 
-        DB::transaction(function () use ($assistanceRequest, $data): void {
+        DB::transaction(function () use ($assistanceRequest, $data, $user): void {
             $oldIncident = $assistanceRequest->incident;
             $incident = null;
             if (($data['purpose'] ?? null) === 'Relief Augmentation') {
@@ -287,11 +454,21 @@ class RequestController extends Controller
                 ]);
             }
 
+            $actorFields = [];
+            if (blank($assistanceRequest->assessment_status) || blank($assistanceRequest->assessment_acted_by)) {
+                $actorFields = [
+                    'assessment_acted_by' => $user->id,
+                    'assessment_acted_at' => now(),
+                    'assigned_social_worker' => $user->name,
+                ];
+            }
+
             $assistanceRequest->update([
-                ...collect($data)->except(['incident_name', 'incident_date', 'items'])->all(),
+                ...collect($data)->except(['incident_name', 'incident_date', 'items', 'act_on_behalf', 'on_behalf_reason'])->all(),
                 'incident_id' => $incident?->id,
                 'status' => 'under_review',
                 'assessment_status' => 'draft',
+                ...$actorFields,
             ]);
 
             $assistanceRequest->items()->delete();
@@ -304,11 +481,18 @@ class RequestController extends Controller
         $fresh = $assistanceRequest->fresh(['items', 'incident', 'requestParty']);
         $audit->log('request.assessment_completed', $fresh, $old, $fresh->toArray());
 
-        return back()->with('success', "Assessment for {$fresh->reference_number} saved. Assessment and response-letter downloads are ready.");
+        return redirect()
+            ->route('requests.assessment', $fresh)
+            ->with('success', "Assessment for {$fresh->reference_number} saved. Assessment and response-letter previews, printing, and downloads are ready.");
     }
 
-    public function assessmentStatus(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit, WorkflowNotificationService $workflowNotifications): RedirectResponse
+    public function assessmentStatus(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit, WorkflowNotificationService $workflowNotifications, AorCoverageService $aorCoverage): RedirectResponse
     {
+        $user = $request->user();
+        abort_unless($user, 403);
+        $access = $aorCoverage->assessmentAccessFor($user, $assistanceRequest);
+        abort_unless($access['can_access_documents'], 403, 'Only the DRRS PDRC who created this assessment can change its status.');
+
         $data = $request->validate(['assessment_status' => ['required', 'in:draft,final,submitted']]);
         abort_if(blank($assistanceRequest->assessment_status), 422, 'Create the assessment before changing its status.');
         $old = $assistanceRequest->assessment_status;
@@ -347,7 +531,7 @@ class RequestController extends Controller
             'items' => ['nullable', 'array', 'max:50'], 'items.*.item_name' => ['nullable', 'string', 'max:255'],
             'items.*.requested_quantity' => ['nullable', 'numeric', 'min:0'], 'items.*.unit' => ['nullable', 'string', 'max:50'],
             'items.*.available_quantity' => ['nullable', 'numeric', 'min:0'],
-            'form_context' => ['nullable', 'array', 'max:30'],
+            'form_context' => ['nullable', 'array', 'max:50'],
         ]);
 
         if ($data['mode'] === 'polish' && blank($data['text'] ?? null)) {
@@ -357,26 +541,97 @@ class RequestController extends Controller
         $apiKey = (string) config('services.groq.api_key');
         if ($apiKey === '') return response()->json(['message' => 'Groq AI is not configured. Add GROQ_API_KEY to the server environment, then clear the configuration cache.'], 503);
 
-        $items = collect($data['items'] ?? [])->filter(fn ($item) => filled($item['item_name'] ?? null))->map(fn ($item) => sprintf('%s: requested %s %s; total current stockpile %s %s; %s', $item['item_name'], $item['requested_quantity'] ?? 0, $item['unit'] ?? '', $item['available_quantity'] ?? 0, $item['unit'] ?? '', (float) ($item['requested_quantity'] ?? 0) > (float) ($item['available_quantity'] ?? 0) ? 'DEFICIT' : 'SUFFICIENT'))->implode('; ');
+        $context = (array) ($data['form_context'] ?? []);
+        $incidentStatus = trim((string) ($context['incident_status'] ?? ''));
+        $reportClassification = trim((string) ($context['source_report_classification'] ?? ''));
+        $incidentEndedAt = trim((string) ($context['incident_ended_at'] ?? ''));
+        $endedIncident = $incidentEndedAt !== ''
+            || preg_match('/\b(ended|closed|resolved|terminated|concluded)\b/i', $incidentStatus) === 1
+            || preg_match('/\b(terminal|first\s*(?:and|&)\s*final)\b/i', $reportClassification) === 1;
+        $temporalFraming = $endedIncident
+            ? 'ENDED. Describe the incident, hazard experience, effects, displacement, and LGU response in past tense. Use forms such as "experienced", "affected", "was/were", and "undertook". Never say "is experiencing", "has/have been experiencing", or imply that the hazard itself is still occurring. Ongoing DRMD monitoring, coordination, assistance, and unmet needs may remain in present tense.'
+            : 'ONGOING OR NOT YET REPORTED AS ENDED. Describe the continuing experience/effects with present-perfect or continuing forms such as "has/have been experiencing", "has/have affected", "continues", or "remains". Do not falsely state that the incident has ended.';
+        $affectedAreas = collect($context['affected_areas'] ?? [])
+            ->map(fn ($area) => trim((string) $area))
+            ->filter()
+            ->unique()
+            ->values();
+        $affectedAreaSummary = match (true) {
+            $affectedAreas->isEmpty() => 'Not supplied',
+            $affectedAreas->count() <= 5 => $affectedAreas->implode(', '),
+            default => $affectedAreas->count().' affected areas; summarize by count and do not enumerate their names',
+        };
+        $lguLevel = strtoupper(trim((string) ($context['lgu_level'] ?? '')));
+        $requestingAgency = trim((string) ($data['requesting_agency'] ?? ''));
+        if ($lguLevel === '') {
+            $lguLevel = match (true) {
+                preg_match('/\b(?:PLGU|PGLU)\b/i', $requestingAgency) === 1 => 'PLGU',
+                preg_match('/\bCLGU\b/i', $requestingAgency) === 1 => 'CLGU',
+                preg_match('/\bMLGU\b/i', $requestingAgency) === 1 => 'MLGU',
+                default => 'LGU',
+            };
+        }
+        $lguLevel = $lguLevel === 'PGLU' ? 'PLGU' : $lguLevel;
+        $municipality = trim((string) ($context['municipality'] ?? ''));
+        $province = trim((string) ($context['province'] ?? ''));
+        $displayMunicipality = Str::title(Str::lower($municipality));
+        $displayProvince = (string) Str::of($province)->lower()->title()
+            ->replace([' Del ', ' De ', ' La '], [' del ', ' de ', ' la ']);
+        $affectedLocality = match ($lguLevel) {
+            'MLGU' => 'municipality'.($displayMunicipality !== '' ? ' of '.$displayMunicipality : '').($displayProvince !== '' ? ', '.$displayProvince : ''),
+            'CLGU' => 'city'.($displayMunicipality !== '' ? ' of '.$displayMunicipality : '').($displayProvince !== '' ? ', '.$displayProvince : ''),
+            'PLGU' => 'province'.($displayProvince !== '' ? ' of '.$displayProvince : ''),
+            default => collect([$displayMunicipality, $displayProvince])->filter()->implode(', ') ?: 'reported area',
+        };
+        $formalLguName = match ($lguLevel) {
+            'MLGU' => 'Municipal Local Government Unit (MLGU)'.($displayMunicipality !== '' ? ' of '.$displayMunicipality : '').($displayProvince !== '' ? ', '.$displayProvince : ''),
+            'CLGU' => 'City Local Government Unit (CLGU)'.($displayMunicipality !== '' ? ' of '.$displayMunicipality : '').($displayProvince !== '' ? ', '.$displayProvince : ''),
+            'PLGU' => 'Provincial Local Government Unit (PLGU)'.($displayProvince !== '' ? ' of '.$displayProvince : ''),
+            default => $requestingAgency !== '' ? $requestingAgency : 'Local Government Unit (LGU)',
+        };
+        $items = collect($data['items'] ?? [])
+            ->filter(fn ($item) => filled($item['item_name'] ?? null))
+            ->map(fn ($item) => sprintf(
+                '%s: requested %s %s; current available stock %s %s; assessment: %s',
+                $item['item_name'],
+                number_format((float) ($item['requested_quantity'] ?? 0), 0),
+                $item['unit'] ?? '',
+                number_format((float) ($item['available_quantity'] ?? 0), 0),
+                $item['unit'] ?? '',
+                (float) ($item['requested_quantity'] ?? 0) > (float) ($item['available_quantity'] ?? 0) ? 'DEFICIT' : 'SUFFICIENT'
+            ))
+            ->implode('; ');
+        $curatedContext = collect($context)->except(['date_requested', 'affected_areas'])->all();
         $facts = collect([
-            'Proposing party: '.($data['requesting_agency'] ?? 'Not specified'),
+            'Canonical requesting-party identity: '.$formalLguName,
+            'Affected geographic area: '.$affectedLocality,
+            'Stored requesting-party label (abbreviated form of the governing body; do not state it separately from the canonical identity): '.($requestingAgency !== '' ? $requestingAgency : 'Not specified'),
             'Incident: '.collect([$data['incident_name'] ?? null, $data['incident_details'] ?? null])->filter()->implode(' - '),
             'Purpose: '.($data['purpose'] ?? 'Not specified'),
-            'Affected families: '.($data['affected_families'] ?? 'Not specified'),
+            'Affected families (preserve this exact number): '.(array_key_exists('affected_families', $data) ? number_format((int) $data['affected_families']) : 'Not supplied'),
+            'Affected persons (preserve this exact number): '.(array_key_exists('affected_persons', $context) ? number_format((int) $context['affected_persons']) : 'Not supplied'),
+            'Affected-area presentation: '.$affectedAreaSummary,
+            'Mandatory temporal framing: '.$temporalFraming,
+            'Chronology controls (use to select tense; do not automatically narrate every date): incident occurrence '.($context['incident_date'] ?? 'not supplied').'; request date '.($context['date_requested'] ?? 'not supplied').'; assessment date '.($context['assessment_date'] ?? now()->toDateString()).'; DROMIC incident status '.($incidentStatus ?: 'not supplied').'; incident ended '.($incidentEndedAt ?: 'not supplied').'; report classification '.($reportClassification ?: 'not supplied').'.',
             'FNI stock validation: '.($items ?: 'No FNI rows supplied'),
             ($data['mode'] === 'polish' ? 'Current draft to polish: ' : 'Existing draft (reference only; independently generate from encoded facts): ').($data['text'] ?? 'No draft supplied.'),
-            'Additional encoded assessment fields (JSON; null or blank means not supplied): '.json_encode($data['form_context'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'Other encoded assessment facts (JSON; null or blank means not supplied): '.json_encode($curatedContext, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
         ])->implode("\n");
 
         try {
             $modeInstruction = $data['mode'] === 'generate'
-                ? 'Create a new narrative from the encoded facts. Follow this three-paragraph structure: (1) incident context, impact, and documented preparedness or response actions; (2) reported affected families, displacement, source of information, and resulting humanitarian needs; (3) the proposing party request, relevant stock sufficiency or deficit, and a clear augmentation recommendation tied to the selected purpose. If facts for a part are absent, omit them rather than inventing them.'
-                : 'Polish the current draft only. Preserve its facts, quantities, meaning, and recommendation while improving grammar, organization, transitions, concision, and formal DSWD tone. Do not introduce any fact that is absent from the draft or encoded fields.';
+                ? 'Create a new narrative from the encoded facts in exactly this operational sequence. Paragraph 1: describe what happened, when and where it happened, and how the hazard developed or could affect the area. When official PAGASA, PHIVOLCS, or another authoritative advisory is supplied, attribute and concisely paraphrase only its relevant verified hazard information; never reproduce the advisory or invent an agency finding. Paragraph 2: describe documented effects, current incident or affected-area status, exact affected families and persons, displacement inside or outside evacuation centers, other material impacts, identified needs, and the LGU response actions. Omit any category without supplied data. Paragraph 3: state what the requesting party requested, each item and exact quantity, and why augmentation is warranted based only on the documented effects, population, displacement, needs, and stock assessment. State exact available stock and whether it is sufficient or deficient, then give a clear recommendation. Paragraph 4: state that the DRMD continues monitoring the situation and identifying the needs of the affected area and population, and assure continued active coordination with the LGU to validate and help provide immediate needs and determine whether additional support may be required. This final paragraph is an institutional ongoing-action statement, not a claim of an approval or completed delivery.'
+                : 'Perform a conservative polish of the user-written draft. Preserve the user’s paragraph order, substantive wording, facts, quantities, emphasis, qualifications, recommendation, and manually added details. Do not force it into the auto-generation four-paragraph structure. Do not add a DRMD assurance, incident detail, justification, finding, or conclusion unless it already appears in the draft. Make only the minimum edits needed to correct grammar, spelling, punctuation, awkward phrasing, terminology, clarity, formal tone, and tense conflicts with the authoritative DROMIC status. Prefer rephrasing a flawed sentence over replacing the user’s idea. Never remove a meaningful manually written statement merely to make the draft shorter.';
+            $structureInstruction = $data['mode'] === 'generate'
+                ? 'Use four concise cohesive paragraphs in the required sequence.'
+                : 'Retain the draft’s existing paragraph structure and sequence; do not expand it into a new assessment.';
+            $lguIdentityInstruction = 'MLGU means Municipal Local Government Unit, CLGU means City Local Government Unit, and PLGU means Provincial Local Government Unit. The LGU is the governing body; the municipality, city, or province is the geographic area under its jurisdiction. Keep their grammatical roles distinct. Only the geographic area may experience, be affected by, or recover from a disaster. Only the LGU may report, request assistance, monitor, coordinate, validate, or undertake response actions. Never say that an MLGU, CLGU, or PLGU is experiencing or is affected by the hazard. Introduce the canonical requesting-party identity only when describing an LGU action; use the affected geographic area when describing the hazard and its effects. The stored requesting-party label is merely an abbreviated form of the canonical governing-body identity and must not be stated separately.';
+            $modeInstruction = $lguIdentityInstruction.' '.$modeInstruction;
 
             $response = Http::timeout(45)->retry(1, 500)->withToken($apiKey)->acceptJson()->post(rtrim((string) config('services.groq.base_url'), '/').'/chat/completions', [
                 'model' => config('services.groq.model'), 'temperature' => $data['mode'] === 'generate' ? 0.3 : 0.15, 'max_completion_tokens' => 650,
                 'messages' => [
-                    ['role' => 'system', 'content' => 'You are assisting the social worker who is personally preparing this assessment. In this system, FNI always means Food and Non-Food Items. Never expand FNI as Family Needs Identification or assign it any other meaning. Produce an official FNI Assessment and Delivery Form narrative in plain professional English. Treat populated encoded fields as verified facts, ignore blank fields, and never invent dates, quantities, affected populations, preparedness actions, findings, coordination, signatories, or approvals. Never mention the assigned social worker, current user, case handler, assessor, or who is preparing or handling the case. Use all other materially relevant facts without exposing JSON or field labels. Clearly state stock sufficiency or deficit where stock figures are supplied. Keep the complete output within 270 words so the full narrative, delivery header, and signature spaces fit one A4 assessment page. Return only 2 to 3 cohesive paragraphs, without headings, bullets, markdown, greetings, or commentary. '.$modeInstruction],
+                    ['role' => 'system', 'content' => 'You are assisting the social worker who is personally preparing this assessment. In this system, FNI always means Food and Non-Food Items. Never expand FNI as Family Needs Identification or assign it any other meaning. Produce an official FNI Assessment and Delivery Form narrative in plain professional English. Treat populated encoded fields as verified facts and ignore blank fields. Structured encoded totals, incident status, ended date, report classification, and chronology controls are authoritative and override any older or inconsistent wording, number, or status quoted inside the source DROMIC narrative or advisory text. Apply the mandatory temporal framing exactly: an ENDED incident must use past tense for what happened, its effects, and LGU actions; an ONGOING incident must use present-perfect or continuing tense for experiences and effects that continue. Never confuse the incident tense with ongoing DRMD monitoring and coordination, which may correctly remain in present tense after the hazard has ended. Never invent or change dates, quantities, affected populations, displacement, damage, preparedness or response actions, findings, needs, coordination, signatories, approvals, deliveries, or LGU resource shortages. A positive affected count must never become zero. Always call the organization making the request the "requesting party"; never call it the proposing party. Do not mention when the request was made or restate the Date of Request. Mention occurrence and information dates only when they materially clarify the assessment. When more than five affected areas are supplied, state only their count and never enumerate their names. Attribute PAGASA, PHIVOLCS, or another agency only when an official-advisory fact from that agency is supplied, and paraphrase only what is relevant to what happened and how the hazard affected or threatened the reported location. Avoid repetitive statements, vague recovery claims, and generic humanitarian language unsupported by encoded facts. Never include "Approved by", "Prepared by", "Reviewed by", signature lines, date lines, names of signatories, or any sign-off placeholder; those belong in separate form fields. Never mention the assigned social worker, current user, case handler, assessor, or who is preparing or handling the case. Use materially relevant facts without exposing JSON or field labels. Clearly state exact requested stock, exact available stock, and whether it is sufficient or deficient. '.$structureInstruction.' Keep the complete output within 260 words so the full narrative and signature spaces fit one A4 assessment page. Return paragraphs only, without headings, bullets, markdown, greetings, or commentary. '.$modeInstruction],
                     ['role' => 'user', 'content' => $facts],
                 ],
             ]);
@@ -391,6 +646,39 @@ class RequestController extends Controller
         }
         $polished = AssessmentNarrative::sanitize((string) data_get($response->json(), 'choices.0.message.content'));
         if ($polished === '') return response()->json(['message' => 'Groq AI returned an empty result. Your current assessment was not changed.'], 502);
+        $endedTenseViolation = $endedIncident && preg_match(
+            '/\b(is|are)\s+(?:currently\s+)?experiencing\b|\b(has|have)\s+been\s+experiencing\b|\b(is|are)\s+(?:currently\s+)?affecting\b|\bcontinues?\s+to\s+affect\b|\b(is|are)\s+expected\s+to\s+affect\b/i',
+            (string) (preg_split('/\R\s*\R/u', $polished, 2)[0] ?? $polished)
+        ) === 1;
+
+        if ($endedTenseViolation) {
+            try {
+                $correction = Http::timeout(45)->retry(1, 500)->withToken($apiKey)->acceptJson()->post(rtrim((string) config('services.groq.base_url'), '/').'/chat/completions', [
+                    'model' => config('services.groq.model'),
+                    'temperature' => 0.05,
+                    'max_completion_tokens' => 650,
+                    'messages' => [
+                        ['role' => 'system', 'content' => 'You are a strict temporal-grammar editor. The DROMIC incident is ENDED. Correct only the temporal grammar of the supplied assessment without changing its paragraph structure, facts, date, count, requested item, stock figure, recommendation, manually written details, or ongoing DRMD assurance. Use past tense for the incident, hazard experience, effects, displacement, and LGU actions. Do not use "is/are experiencing", "has/have been experiencing", "is/are affecting", "continues to affect", or "is/are expected to affect" for the ended hazard. Ongoing DRMD monitoring and coordination may remain in present tense. Return only the corrected assessment with no heading, sign-off, or commentary.'],
+                        ['role' => 'user', 'content' => $polished],
+                    ],
+                ]);
+
+                if ($correction->successful()) {
+                    $polished = AssessmentNarrative::sanitize((string) data_get($correction->json(), 'choices.0.message.content'));
+                }
+            } catch (\Throwable $exception) {
+                report($exception);
+            }
+
+            $stillInvalid = preg_match(
+                '/\b(is|are)\s+(?:currently\s+)?experiencing\b|\b(has|have)\s+been\s+experiencing\b|\b(is|are)\s+(?:currently\s+)?affecting\b|\bcontinues?\s+to\s+affect\b|\b(is|are)\s+expected\s+to\s+affect\b/i',
+                (string) (preg_split('/\R\s*\R/u', $polished, 2)[0] ?? $polished)
+            ) === 1;
+
+            if ($polished === '' || $stillInvalid) {
+                return response()->json(['message' => 'Groq could not produce a temporally consistent assessment for an incident marked as ended. Your current narrative was not changed.'], 502);
+            }
+        }
 
         return response()->json(['polished' => $polished, 'provider' => 'Groq', 'model' => config('services.groq.model')]);
     }
