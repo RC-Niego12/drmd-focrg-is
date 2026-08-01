@@ -1,4 +1,4 @@
-# Disaster Response Information Management System (DRIMS)
+# Disaster Response Operations Management Integrated System (DROMIS)
 
 Laravel 12, React, Inertia.js, MySQL, Tailwind CSS, and RBAC foundation for DRMD Food and Non-Food Item inventory, request processing, dispatch monitoring, near-expiry distribution, and DROMIC reporting.
 
