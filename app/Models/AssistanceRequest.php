@@ -45,10 +45,12 @@ class AssistanceRequest extends Model
         'lgu_dromic_reviewed_at', 'lgu_dromic_review_note', 'lgu_dromic_review_screenshots', 'lgu_dromic_review_history',
         'lgu_dromic_correction_scope', 'lgu_dromic_correction_resolved_at',
         'lgu_dromic_seen_at', 'lgu_dromic_seen_by',
+        'lgu_dromic_acked_at', 'lgu_dromic_acked_by',
         'lgu_relief_validation_status', 'lgu_relief_reviewed_by', 'lgu_relief_reviewed_at', 'lgu_relief_review_note', 'lgu_relief_review_screenshots', 'lgu_relief_review_history',
         'lgu_relief_correction_scope', 'lgu_relief_correction_resolved_at',
         'lgu_correction_of_id', 'lgu_correction_target',
         'lgu_relief_seen_at', 'lgu_relief_seen_by',
+        'lgu_relief_acked_at', 'lgu_relief_acked_by',
         'lgu_dromic_series_key', 'lgu_dromic_report_number', 'lgu_dromic_revision_number',
         'lgu_dromic_report_classification', 'lgu_relief_request_reference', 'lgu_dromic_draft_save_count', 'lgu_dromic_terminal_at',
         'lgu_finalized_at', 'lgu_submitted_to_dswd_at',
@@ -65,6 +67,11 @@ class AssistanceRequest extends Model
         'lgu_dromic_payload', 'lgu_dromic_narrative', 'drmd_aa_remarks', 'drmd_aa_routed_by', 'drmd_aa_routed_at',
         'drmd_chief_remarks', 'drmd_chief_routed_by', 'drmd_chief_routed_at', 'drmd_assigned_to', 'drmd_assigned_section',
         'epirma_status', 'epirma_transaction_id', 'epirma_callback_token', 'epirma_signature_reference', 'epirma_signed_at',
+        'epirma_forwarded_to_drrs_aa_at', 'epirma_forwarded_by', 'epirma_aa_status',
+        'epirma_assessment_signed_at', 'epirma_response_letter_signed_at',
+        'lgu_response_letter_sent_at', 'lgu_response_letter_acked_at', 'lgu_response_letter_acked_by',
+        'lgu_response_letter_advance_path', 'lgu_response_letter_advance_name', 'lgu_response_letter_advance_sent_at',
+        'lgu_response_letter_advance_acked_at', 'lgu_response_letter_advance_acked_by',
     ];
 
     protected function casts(): array
@@ -84,11 +91,13 @@ class AssistanceRequest extends Model
             'lgu_dromic_review_history' => 'array',
             'lgu_dromic_correction_resolved_at' => 'datetime',
             'lgu_dromic_seen_at' => 'datetime',
+            'lgu_dromic_acked_at' => 'datetime',
             'lgu_relief_reviewed_at' => 'datetime',
             'lgu_relief_review_screenshots' => 'array',
             'lgu_relief_review_history' => 'array',
             'lgu_relief_correction_resolved_at' => 'datetime',
             'lgu_relief_seen_at' => 'datetime',
+            'lgu_relief_acked_at' => 'datetime',
             'lgu_signed_report_uploaded_at' => 'datetime',
             'lgu_signed_request_uploaded_at' => 'datetime',
             'lgu_signed_copy_reminder_sent_at' => 'datetime',
@@ -101,12 +110,24 @@ class AssistanceRequest extends Model
             'drmd_chief_routed_at' => 'datetime',
             'assessment_acted_at' => 'datetime',
             'epirma_signed_at' => 'datetime',
+            'epirma_forwarded_to_drrs_aa_at' => 'datetime',
+            'epirma_assessment_signed_at' => 'datetime',
+            'epirma_response_letter_signed_at' => 'datetime',
+            'lgu_response_letter_sent_at' => 'datetime',
+            'lgu_response_letter_acked_at' => 'datetime',
+            'lgu_response_letter_advance_sent_at' => 'datetime',
+            'lgu_response_letter_advance_acked_at' => 'datetime',
         ];
     }
 
     public function items(): HasMany
     {
         return $this->hasMany(RequestItem::class, 'request_id');
+    }
+
+    public function requisitionIssuanceSlip(): HasOne
+    {
+        return $this->hasOne(RequisitionIssuanceSlip::class, 'request_id');
     }
 
     public function lguDromicRequestedItems(): HasMany
@@ -117,6 +138,36 @@ class AssistanceRequest extends Model
     public function signedDocumentVersions(): HasMany
     {
         return $this->hasMany(LguSignedDocumentVersion::class, 'request_id')->latest();
+    }
+
+    public function epirmaSignedDocuments(): HasMany
+    {
+        return $this->hasMany(EpirmaSignedDocument::class, 'assistance_request_id')->latest('id');
+    }
+
+    public function epirmaForwarder(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'epirma_forwarded_by');
+    }
+
+    public function lguResponseLetterAcker(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_response_letter_acked_by');
+    }
+
+    public function lguResponseLetterAdvanceAcker(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_response_letter_advance_acked_by');
+    }
+
+    public function lguDromicAcker(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_dromic_acked_by');
+    }
+
+    public function lguReliefAcker(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_relief_acked_by');
     }
 
     public function lguDromicReviewComments(): HasMany
@@ -192,6 +243,45 @@ class AssistanceRequest extends Model
     public function sourceLguDromicReport(): BelongsTo
     {
         return $this->belongsTo(self::class, 'source_lgu_dromic_request_id');
+    }
+
+    /**
+     * Resolve affected persons for assessment PDF / worksheet display.
+     * Prefers worksheet meta, then DROMIC payload / area-row totals (never invents from families).
+     */
+    public function resolvedAffectedPersons(): int
+    {
+        $meta = (array) ($this->assessment_form_data ?? []);
+
+        $payload = [];
+        if (is_array($this->lgu_dromic_payload) && $this->lgu_dromic_payload !== []) {
+            $payload = $this->lgu_dromic_payload;
+        } else {
+            $source = $this->relationLoaded('sourceLguDromicReport')
+                ? $this->sourceLguDromicReport
+                : $this->sourceLguDromicReport()->first(['id', 'lgu_dromic_payload']);
+            $payload = (array) ($source?->lgu_dromic_payload ?? []);
+        }
+
+        $areaTotal = collect((array) data_get($payload, 'area_rows', []))
+            ->sum(fn ($row): int => (int) data_get($row, 'affected_persons', 0));
+
+        foreach ([
+            data_get($meta, 'affected_persons'),
+            data_get($meta, 'source_lgu_snapshot.affected_persons'),
+            data_get($payload, 'affected_persons'),
+            $areaTotal > 0 ? $areaTotal : null,
+        ] as $candidate) {
+            if ($candidate === null || $candidate === '') {
+                continue;
+            }
+            $value = (int) $candidate;
+            if ($value > 0) {
+                return $value;
+            }
+        }
+
+        return 0;
     }
 
     /**

@@ -17,7 +17,7 @@ class StandbyFundController extends Controller
         return Inertia::render('StandbyFunds/Index', [
             'standbyFund' => StandbyFund::current()->fresh('updater:id,name'),
             'defaultSheetUrl' => config('services.google_sheets.standby_fund_url'),
-            'defaultCell' => config('services.google_sheets.standby_fund_cell', 'L2'),
+            'defaultCell' => config('services.google_sheets.standby_fund_cell', 'M2'),
         ]);
     }
 
@@ -37,7 +37,7 @@ class StandbyFundController extends Controller
             'amount' => $validated['amount'],
             'source' => $validated['source'] ?: 'Manual update',
             'google_sheet_url' => $validated['google_sheet_url'] ?? $standbyFund->google_sheet_url,
-            'cell_reference' => strtoupper($validated['cell_reference'] ?: $standbyFund->cell_reference ?: 'L2'),
+            'cell_reference' => strtoupper($validated['cell_reference'] ?: $standbyFund->cell_reference ?: 'M2'),
             'updated_by' => $request->user()->id,
         ]);
 
@@ -50,7 +50,7 @@ class StandbyFundController extends Controller
     {
         $standbyFund = StandbyFund::current();
         $url = $request->input('google_sheet_url') ?: config('services.google_sheets.standby_fund_url') ?: $standbyFund->google_sheet_url;
-        $cell = strtoupper($request->input('cell_reference') ?: config('services.google_sheets.standby_fund_cell', 'L2'));
+        $cell = strtoupper($request->input('cell_reference') ?: config('services.google_sheets.standby_fund_cell', 'M2'));
 
         if (! $url) {
             return back()->with('error', 'Standby fund Google Sheet URL is not configured.');

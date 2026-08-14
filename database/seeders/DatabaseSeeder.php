@@ -9,6 +9,7 @@ use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Hash;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\Models\Role;
+use Spatie\Permission\PermissionRegistrar;
 
 class DatabaseSeeder extends Seeder
 {
@@ -33,6 +34,8 @@ class DatabaseSeeder extends Seeder
             'submit drmd aa requests',
             'submit lgu dromic requests',
             'route lgu dromic requests',
+            'route epirma documents',
+            'assign ris drn',
             'manage regional alerts',
             'view regional alert acknowledgements',
         ];
@@ -43,7 +46,9 @@ class DatabaseSeeder extends Seeder
 
         $superAdmin = Role::firstOrCreate(['name' => 'Super Admin', 'guard_name' => 'web']);
         $rros = Role::firstOrCreate(['name' => 'RROS', 'guard_name' => 'web']);
+        $rrosAa = Role::firstOrCreate(['name' => 'RROS AA', 'guard_name' => 'web']);
         $drrs = Role::firstOrCreate(['name' => 'DRRS', 'guard_name' => 'web']);
+        $drrsAa = Role::firstOrCreate(['name' => 'DRRS AA', 'guard_name' => 'web']);
         $drims = Role::firstOrCreate(['name' => 'DRIMS', 'guard_name' => 'web']);
         $drmdAa = Role::firstOrCreate(['name' => 'DRMD AA', 'guard_name' => 'web']);
         $drmdChief = Role::firstOrCreate(['name' => 'DRMD Chief', 'guard_name' => 'web']);
@@ -53,8 +58,10 @@ class DatabaseSeeder extends Seeder
         Role::firstOrCreate(['name' => 'guest', 'guard_name' => 'web']);
 
         $superAdmin->syncPermissions($permissions);
-        $rros->syncPermissions(['view dashboards', 'manage inventory', 'manage warehouses', 'process requests', 'monitor requests', 'manage dispatches', 'manage near expiry', 'export reports', 'view regional alert acknowledgements']);
+        $rros->syncPermissions(['view dashboards', 'manage inventory', 'manage warehouses', 'process requests', 'monitor requests', 'manage dispatches', 'manage near expiry', 'export reports', 'view regional alert acknowledgements', 'assign ris drn']);
+        $rrosAa->syncPermissions(['view dashboards', 'manage inventory', 'manage warehouses', 'process requests', 'monitor requests', 'manage dispatches', 'manage near expiry', 'export reports', 'view regional alert acknowledgements', 'assign ris drn']);
         $drrs->syncPermissions(['view dashboards', 'encode requests', 'monitor requests', 'manage near expiry', 'export reports', 'view regional alert acknowledgements']);
+        $drrsAa->syncPermissions(['view dashboards', 'route epirma documents', 'view regional alert acknowledgements']);
         $drims->syncPermissions(['view dashboards', 'monitor requests', 'manage dromic reports', 'export reports', 'view regional alert acknowledgements']);
         $drmdAa->syncPermissions(['submit drmd aa requests', 'route lgu dromic requests', 'view regional alert acknowledgements']);
         $drmdChief->syncPermissions(['view dashboards', 'route lgu dromic requests', 'view regional alert acknowledgements']);
@@ -62,10 +69,14 @@ class DatabaseSeeder extends Seeder
         $financialAnalyst->syncPermissions(['view dashboards', 'manage standby funds', 'export reports', 'view regional alert acknowledgements']);
         $ocdCaraga->syncPermissions(['manage regional alerts', 'view regional alert acknowledgements']);
 
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
         $users = [
             ['name' => 'Super Admin', 'email' => 'superadmin@example.test', 'office' => 'Super Admin', 'role' => $superAdmin],
             ['name' => 'RROS Inventory Admin', 'email' => 'rros@example.test', 'office' => 'RROS', 'role' => $rros],
+            ['name' => 'RROS Administrative Assistant', 'email' => 'rros-aa@example.test', 'office' => 'RROS AA', 'role' => $rrosAa],
             ['name' => 'DRRS Request Encoder', 'email' => 'drrs@example.test', 'office' => 'DRRS', 'role' => $drrs],
+            ['name' => 'DRRS AA Officer', 'email' => 'drrs-aa@example.test', 'office' => 'DRRS AA', 'role' => $drrsAa],
             ['name' => 'DRIMS Monitoring Officer', 'email' => 'drims@example.test', 'office' => 'DRIMS', 'role' => $drims],
             ['name' => 'DRMD AA User', 'email' => 'drmd-aa@example.test', 'office' => 'DRMD AA', 'role' => $drmdAa],
             ['name' => 'DRMD Chief', 'email' => 'drmd-chief@example.test', 'office' => 'DRMD', 'role' => $drmdChief],

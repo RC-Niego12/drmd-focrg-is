@@ -25,9 +25,9 @@ class RequestItem extends Model
     protected function casts(): array
     {
         return [
-            'requested_quantity' => 'decimal:2',
-            'approved_quantity' => 'decimal:2',
-            'available_quantity' => 'decimal:2',
+            'requested_quantity' => 'integer',
+            'approved_quantity' => 'integer',
+            'available_quantity' => 'integer',
         ];
     }
 
@@ -41,8 +41,13 @@ class RequestItem extends Model
         return $this->belongsTo(InventoryItem::class);
     }
 
+    public function fniLibraryItem(): BelongsTo
+    {
+        return $this->belongsTo(FniLibraryItem::class);
+    }
+
     public function sourceWarehouse(): BelongsTo
     {
-        return $this->belongsTo(\App\Models\Warehouse::class, 'source_warehouse_id');
+        return $this->belongsTo(Warehouse::class, 'source_warehouse_id');
     }
 }

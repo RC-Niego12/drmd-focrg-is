@@ -30,7 +30,14 @@ class InventoryBalanceService
                 fn (WarehouseSheetImport $import): bool => $this->payloadYear($import) === $year
             )->values());
 
-        $sheetTransactionIds = $sheetImports->pluck('inventory_transaction_id')->filter()->unique();
+        // Every transaction created by a sheet import remains sheet-derived even
+        // after that import version is superseded. Excluding only current imports
+        // caused superseded transactions to reappear as "manual" activity and
+        // double-count receipts/issuances.
+        $sheetTransactionIds = WarehouseSheetImport::query()
+            ->whereNotNull('inventory_transaction_id')
+            ->pluck('inventory_transaction_id')
+            ->unique();
 
         $sheetBalanceRows = $sheetImports
             ->groupBy(fn (WarehouseSheetImport $import): string => implode('|', [
@@ -70,12 +77,6 @@ class InventoryBalanceService
                     'cost' => max(0, $cost),
                 ];
             });
-
-        if ($sheetImports->isNotEmpty()) {
-            return $sheetBalanceRows
-                ->filter(fn (array $row): bool => (float) $row['current_balance'] !== 0.0 || (float) $row['cost'] !== 0.0)
-                ->values();
-        }
 
         $transactions = InventoryTransaction::with(['batch.item', 'batch.warehouse'])
             ->when($warehouseId, fn ($query) => $query->whereHas('batch', fn ($batchQuery) => $batchQuery->where('warehouse_id', $warehouseId)))
@@ -122,8 +123,32 @@ class InventoryBalanceService
                 ];
             });
 
+        // Combine synchronized WIT activity with system-only transactions (such as
+        // a Dispatch release pending manual WIT reconciliation). Once reconciled,
+        // the transaction ID is linked to its sheet import and automatically drops
+        // out of the system-only side, preventing a double deduction.
         return $sheetBalanceRows
             ->concat($manualBalanceRows)
+            ->groupBy(fn (array $row): string => implode('|', [
+                $row['warehouse_id'] ?? null,
+                $row['category'] ?? null,
+                $row['item'] ?? null,
+                $row['brand_description'] ?? null,
+                $row['expiry'] ?? null,
+            ]))
+            ->map(function (Collection $rows): array {
+                $first = $rows->first();
+                $current = $rows->sum(fn (array $row): float => (float) ($row['current_balance'] ?? 0));
+                $reserved = $rows->max(fn (array $row): float => (float) ($row['reserved_quantity'] ?? 0));
+
+                return [
+                    ...$first,
+                    'current_balance' => $current,
+                    'reserved_quantity' => $reserved,
+                    'available_balance' => max(0, $current - $reserved),
+                    'cost' => max(0, $rows->sum(fn (array $row): float => (float) ($row['cost'] ?? 0))),
+                ];
+            })
             ->filter(fn (array $row): bool => (float) $row['current_balance'] !== 0.0 || (float) $row['cost'] !== 0.0)
             ->values();
     }
@@ -160,7 +185,6 @@ class InventoryBalanceService
             'non_food_current_balance' => $currentBalance - $foodCurrentBalance,
 
             'cost' => $currentCost,
-
 
             /*
             |--------------------------------------------------------------------------

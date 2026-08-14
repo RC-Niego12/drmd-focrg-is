@@ -2,9 +2,10 @@
     "private": true,
     "type": "module",
     "scripts": {
-        "dev": "concurrently -c \"#86efac,#93c5fd\" \"npm run dev:vite\" \"npm run realtime\" --names=\"vite,realtime\"",
+        "dev": "concurrently -c \"#86efac,#93c5fd,#fbbf24\" \"npm run dev:vite\" \"npm run realtime\" \"npm run scheduler\" --names=\"vite,realtime,scheduler\"",
         "dev:vite": "vite",
         "realtime": "node realtime/start.mjs",
+        "scheduler": "php artisan schedule:work",
         "build": "vite build",
         "lint": "eslint resources/js --ext .js,.jsx"
     },

@@ -1,14 +1,14 @@
 <?php
 
-use App\Models\User;
 use App\Http\Middleware\HandleInertiaRequests;
+use App\Models\User;
 use App\Services\RealtimePublisher;
 use Illuminate\Support\Facades\Http;
 
 beforeEach(function (): void {
     config([
         'realtime.enabled' => true,
-        'realtime.public_url' => 'http://localhost:6002',
+        'realtime.public_url' => 'http://localhost:6001',
         'realtime.internal_url' => 'http://127.0.0.1:6002',
         'realtime.secret' => 'test-realtime-secret',
         'realtime.token_ttl_seconds' => 90,
@@ -24,7 +24,7 @@ it('creates a browser connection configuration without exposing a secret', funct
 
     $connection = app(RealtimePublisher::class)->connectionFor($user);
     expect($connection['enabled'])->toBeTrue()
-        ->and($connection['url'])->toBe('http://localhost:6002')
+        ->and($connection['url'])->toBe('http://localhost:6001')
         ->and($connection['auth_url'])->toBe(route('realtime.auth'))
         ->and($connection)->not->toHaveKeys(['token', 'secret', 'channel']);
 });

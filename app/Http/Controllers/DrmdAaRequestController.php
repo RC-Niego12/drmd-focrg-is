@@ -4,18 +4,17 @@ namespace App\Http\Controllers;
 
 use App\Models\AssistanceRequest;
 use App\Models\RequestParty;
-use App\Models\SystemSetting;
 use App\Services\AuditLogger;
 use App\Services\WorkflowNotificationService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class DrmdAaRequestController extends Controller
 {
@@ -135,7 +134,12 @@ class DrmdAaRequestController extends Controller
         });
 
         $this->audit->log($submissionType === 'proposal' ? 'proposal.drmd_aa_submitted' : 'request.drmd_aa_submitted', $requestRecord, [], $requestRecord->toArray());
-        $this->workflowNotifications->notifyDrmdAaEndorsed($requestRecord->fresh(['encoder']));
+        $fresh = $requestRecord->fresh(['encoder']);
+        $this->workflowNotifications->notifyDrmdAaEndorsed($fresh);
+        $this->workflowNotifications->broadcastRequestUpdated($fresh, [
+            'changed' => ['request_drn', 'status', 'endorsed_to_drrs'],
+            'source' => $submissionType === 'proposal' ? 'drmd_aa_proposal' : 'drmd_aa_request',
+        ]);
 
         $route = $submissionType === 'proposal' ? 'drmd-aa.proposals.index' : 'drmd-aa.requests.index';
         $label = $submissionType === 'proposal' ? 'Proposal' : 'FNI Request';

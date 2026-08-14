@@ -2,30 +2,24 @@
 
 namespace App\Services;
 
-use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
 class StandbyFundSheetSyncService
 {
+    public function __construct(private GoogleSheetCsvService $sheetCsv) {}
+
     public function fetchAmount(string $sheetUrl, string $cell = 'L2'): float
     {
         [$sheetId, $gid] = $this->extractSheetParts($sheetUrl);
-        $csvUrl = "https://docs.google.com/spreadsheets/d/{$sheetId}/export?format=csv&gid={$gid}";
-
         try {
-            $response = Http::timeout(60)->get($csvUrl);
-        } catch (ConnectionException $exception) {
+            $csv = $this->sheetCsv->fetch($sheetId, $gid);
+        } catch (RuntimeException $exception) {
             throw new RuntimeException('Could not connect to the standby fund Google Sheet. Please check the internet connection or DNS settings, then try syncing again.', previous: $exception);
-        }
-
-        if (! $response->successful()) {
-            throw new RuntimeException("Standby fund sheet export failed with HTTP {$response->status()}.");
         }
 
         $coordinates = $this->cellCoordinates($cell);
         $handle = fopen('php://temp', 'r+');
-        fwrite($handle, $response->body());
+        fwrite($handle, $csv);
         rewind($handle);
 
         $rowNumber = 0;

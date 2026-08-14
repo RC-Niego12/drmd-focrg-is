@@ -4,6 +4,7 @@ import {
   Boxes,
   Building2,
   ClipboardCheck,
+  ChevronDown,
   Edit3,
   FileText,
   Flame,
@@ -22,7 +23,7 @@ import {
   Waves,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import AppLayout, {
   Card,
   DataTable,
@@ -52,10 +53,15 @@ const operationalMeta = {
   delivery_site: [MapPin, "RROS References", "Parties & Locations"],
   transportation_mode: [Route, "RROS References", "Transport & Delivery"],
   vehicle_type: [Truck, "RROS References", "Transport & Delivery"],
+  dispatch_driver: [Truck, "RROS References", "Transport & Delivery"],
+  dispatch_received_by: [HandHeart, "RROS References", "Transport & Delivery"],
   transportation_source: [Building2, "RROS References", "Transport & Delivery"],
   program_activity_type: [Activity, "RROS References", "Programs & Documents"],
   incident_type: [Flame, "DRIMS References", "Incidents"],
   drrs_signatory: [ClipboardCheck, "DRRS References", "Assessment & Correspondence"],
+  rros_ris_signatory: [ClipboardCheck, "RROS References", "RIS Signatories"],
+  rros_dr_signatory: [Truck, "RROS References", "DR Signatories"],
+  rros_stf_signatory: [FileText, "RROS References", "STF Signatories"],
   drn_prefix: [Hash, "DRRS References", "Assessment & Correspondence"],
   response_letter_initials: [FileText, "DRRS References", "Assessment & Correspondence"],
   document_reference_type: [FileText, "RROS References", "Programs & Documents"],
@@ -90,12 +96,132 @@ const subgroupOrder = [
   "Inventory Transactions",
   "Transport & Delivery",
   "Programs & Documents",
+  "RIS Signatories",
+  "DR Signatories",
+  "STF Signatories",
   "Directories",
   "Incidents",
   "Assessment & Correspondence",
   "System Identity",
   "Other References",
 ];
+const rrosSignatoryTypes = ["rros_ris_signatory", "rros_dr_signatory", "rros_stf_signatory"];
+const rrosDocumentLabels = {
+  rros_ris_signatory: "RIS / DR",
+  rros_dr_signatory: "Delivery Receipt",
+  rros_stf_signatory: "STF",
+};
+const defaultSignatoryContext = {
+  rros_ris_signatory: "requested_by",
+  rros_dr_signatory: "issuance_approved_by",
+  rros_stf_signatory: "requested_by",
+};
+const rrosSignatoryRoles = {
+  rros_ris_signatory: [["requested_by", "Requested By"], ["approved_by", "Approved By"], ["issued_by", "Issued By"]],
+  rros_dr_signatory: [["issuance_approved_by", "Issuance Approved By"], ["released_by", "Released By"]],
+  rros_stf_signatory: [["requested_by", "Requested By"], ["approved_by", "Approved By"], ["issued_by", "Issued By"]],
+};
+const drrsSignatoryRoles = {
+  assessment: [["reviewed_by", "Reviewed By"], ["approved_by", "Approved By"]],
+  response_letter: [["approved_by", "Approved By"]],
+};
+const drrsRolesFor = (documentType) => drrsSignatoryRoles[documentType] || [];
+const drrsDocumentLabels = { assessment: "Assessment", response_letter: "Response Letter" };
+const signatoryContextOptions = (libraryType, documentType = "assessment") => {
+  if (libraryType === "drrs_signatory") return drrsRolesFor(documentType);
+  if (rrosSignatoryRoles[libraryType]) return rrosSignatoryRoles[libraryType];
+  if (libraryType === "response_letter_initials") return [["response_letter", "Response Letter"]];
+  if (libraryType === "drn_prefix") return [["assessment", "Assessment"], ["response_letter", "Response Letter"]];
+  return [];
+};
+const defaultContextFor = (libraryType, documentType = "assessment") =>
+  signatoryContextOptions(libraryType, documentType)[0]?.[0] || "all";
+const emptySignatorySet = (libraryType) => Object.fromEntries((rrosSignatoryRoles[libraryType] || []).map(([context]) => [context, { name: "", position: "", suffix: "", designation: "", office: "" }]));
+const signatorySetFromRows = (libraryType, rows) => Object.fromEntries((rrosSignatoryRoles[libraryType] || []).map(([context]) => {
+  const row = rows.find((entry) => entry.library_type === libraryType && entry.context === context);
+  return [context, {
+    name: row?.metadata?.employee_name || String(row?.value || "").split("|")[0].split(",")[0].trim(),
+    position: row?.metadata?.position || "",
+    suffix: row?.metadata?.suffix || "",
+    designation: row?.metadata?.designation || String(row?.value || "").split("|").slice(1).join("|").trim(),
+    office: row?.metadata?.office || "",
+  }];
+}));
+const existingSignatoriesFor = (employee, rows = []) => {
+  const name = String(employee?.value || "").trim().toLowerCase();
+  return rows.filter((row) => ["drrs_signatory", ...rrosSignatoryTypes].includes(row.library_type)
+    && (String(row.metadata?.employee_name || "").trim().toLowerCase() === name
+      || String(row.value || "").split("|")[0].trim().toLowerCase().startsWith(name)));
+};
+const existingSignatoryFor = (employee, rows = []) => existingSignatoriesFor(employee, rows)[0];
+const savedSignatoryDetail = (employee, rows, field) => existingSignatoriesFor(employee, rows)
+  .map((row) => row.metadata?.[field])
+  .find((value) => String(value || "").trim()) || "";
+const credentialsFromSavedName = (employee, rows = []) => {
+  const employeeName = String(employee?.value || "").trim();
+  return existingSignatoriesFor(employee, rows)
+    .map((row) => String(row.value || "").split("|")[0].trim())
+    .map((savedName) => savedName.toLowerCase().startsWith(employeeName.toLowerCase())
+      ? savedName.slice(employeeName.length).replace(/^\s*,\s*/, "").trim()
+      : "")
+    .find(Boolean) || "";
+};
+const generatedEmployeeInitials = (employee) => {
+  const explicitParts = [employee?.first_name, employee?.middle_name, employee?.last_name]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean);
+  if (explicitParts.length >= 2) return explicitParts.map((part) => part[0]).join("").toUpperCase();
+
+  const parts = String(employee?.value || "")
+    .split(",")[0]
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (parts.length >= 3) return `${parts[0][0]}${parts[parts.length - 2][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+  return parts.map((part) => part[0]).join("").toUpperCase();
+};
+const suggestedDesignation = (employee, rows = []) => {
+  const existing = existingSignatoryFor(employee, rows);
+  return savedSignatoryDetail(employee, rows, "designation")
+    || String(existing?.value || "").split("|").slice(1).join("|").trim()
+    || employee?.designation
+    || "";
+};
+const suggestedSuffix = (employee, rows = []) => savedSignatoryDetail(employee, rows, "suffix") || credentialsFromSavedName(employee, rows);
+const suggestedOffice = (employee, rows = []) => employee?.section_unit_program
+  || employee?.office
+  || savedSignatoryDetail(employee, rows, "office")
+  || "";
+const suggestedSignatoryDetails = (employee, rows = []) => {
+  const existing = existingSignatoryFor(employee, rows);
+  return {
+    name: employee?.value || "",
+    position: savedSignatoryDetail(employee, rows, "position") || employee?.position || "",
+    suffix: savedSignatoryDetail(employee, rows, "suffix") || credentialsFromSavedName(employee, rows),
+    designation: savedSignatoryDetail(employee, rows, "designation")
+      || String(existing?.value || "").split("|").slice(1).join("|").trim()
+      || employee?.designation
+      || "",
+    office: suggestedOffice(employee, rows),
+    initials: savedSignatoryDetail(employee, rows, "initials") || generatedEmployeeInitials(employee),
+  };
+};
+const hydratedDrrsEntry = (row, rows = []) => {
+  const name = row?.metadata?.employee_name || String(row?.value || "").split("|")[0].split(",")[0].trim();
+  const suggested = suggestedSignatoryDetails({
+    value: name,
+    position: row?.metadata?.position || "",
+    section_unit_program: row?.metadata?.office || "",
+  }, rows);
+  return {
+    ...suggested,
+    position: row?.metadata?.position || suggested.position,
+    suffix: row?.metadata?.suffix || suggested.suffix,
+    designation: row?.metadata?.designation || String(row?.value || "").split("|").slice(1).join("|").trim() || suggested.designation,
+    office: row?.metadata?.office || suggested.office,
+    initials: row?.metadata?.initials || suggested.initials,
+  };
+};
 
 export default function FniLibrary({
   items = [],
@@ -113,7 +239,7 @@ export default function FniLibrary({
   isSuperAdmin = false,
 }) {
   const [activeLibrary, setActiveLibrary] = useState(
-    initialLibrary ||
+    (rrosSignatoryTypes.some((type) => initialLibrary === `operational:${type}`) ? "rros_signatories" : initialLibrary) ||
       (libraryScope === "DRRS" ? "operational:drrs_signatory" : "fni"),
   );
   const [search, setSearch] = useState("");
@@ -133,11 +259,23 @@ export default function FniLibrary({
   });
   const operationalForm = useForm({
     library_type: "",
+    document_type: "",
     value: "",
+    position: "",
+    designation: "",
+    office: "",
+    contact_number: "",
+    suffix: "",
+    initials: "",
     short_name: "",
     context: "all",
     is_active: true,
   });
+  const rrosSignatoryForm = useForm({
+    library_type: "",
+    signatories: {},
+  });
+  const drrsSignatoryForm = useForm({ document_type: "", signatories: {} });
   const definitions = [
     {
       key: "fni",
@@ -168,7 +306,15 @@ export default function FniLibrary({
       count: warehouseLibraries.filter((row) => row.library_type === key)
         .length,
     })),
-    ...Object.entries(operationalLibraryTypes).map(([key, label]) => ({
+    ...(rrosSignatoryTypes.some((type) => operationalLibraryTypes[type]) ? [{
+      key: "rros_signatories",
+      label: "RROS Signatories",
+      icon: ClipboardCheck,
+      group: "RROS References",
+      subgroup: "Programs & Documents",
+      count: operationalLibraries.filter((row) => rrosSignatoryTypes.includes(row.library_type)).length,
+    }] : []),
+    ...Object.entries(operationalLibraryTypes).filter(([key]) => !rrosSignatoryTypes.includes(key)).map(([key, label]) => ({
       key: `operational:${key}`,
       type: key,
       label,
@@ -203,15 +349,18 @@ export default function FniLibrary({
   const activeDefinition =
     definitions.find((entry) => entry.key === activeLibrary) ?? definitions[0];
   const ActiveDefinitionIcon = activeDefinition?.icon ?? Boxes;
-  const isOperational = activeLibrary.startsWith("operational:");
+  const isRrosSignatoryLibrary = activeLibrary === "rros_signatories";
+  const isOperational = activeLibrary.startsWith("operational:") || isRrosSignatoryLibrary;
   const activeType = isOperational
-    ? activeLibrary.split(":")[1]
+    ? (isRrosSignatoryLibrary ? "rros_signatories" : activeLibrary.split(":")[1])
     : activeLibrary;
   const activeRows =
     activeLibrary === "fni"
       ? items
       : activeLibrary === "lgu_directory"
         ? lguDirectoryEntries
+        : isRrosSignatoryLibrary
+          ? operationalLibraries.filter((row) => rrosSignatoryTypes.includes(row.library_type))
         : isOperational
           ? operationalLibraries.filter(
               (row) => row.library_type === activeType,
@@ -230,6 +379,20 @@ export default function FniLibrary({
       ),
     );
   }, [activeRows, search]);
+  const documentSignatoryRows = useMemo(() => {
+    const documents = isRrosSignatoryLibrary
+      ? Object.entries(rrosDocumentLabels).map(([type, label]) => ({ type, label, roles: rrosSignatoryRoles[type] || [] }))
+      : activeType === "drrs_signatory"
+        ? Object.entries(drrsDocumentLabels).map(([type, label]) => ({ type, label, roles: drrsRolesFor(type) }))
+        : [];
+    const needle = search.trim().toLowerCase();
+    return documents.map((document) => {
+      const rows = operationalLibraries.filter((row) => isRrosSignatoryLibrary
+        ? row.library_type === document.type
+        : row.library_type === "drrs_signatory" && (row.metadata?.document_type || "assessment") === document.type);
+      return { ...document, rows, configured: document.roles.filter(([context]) => rows.some((row) => row.context === context)).length };
+    }).filter((document) => !needle || `${document.label} ${document.rows.map((row) => row.value).join(" ")}`.toLowerCase().includes(needle));
+  }, [activeType, isRrosSignatoryLibrary, operationalLibraries, search]);
 
   const openAdd = () => {
     if (activeLibrary === "fni")
@@ -239,12 +402,26 @@ export default function FniLibrary({
         brand_description: "",
         unit_of_measure: "",
       });
-    else if (isOperational)
+    else if (activeType === "drrs_signatory") {
+      drrsSignatoryForm.setData({ document_type: "", signatories: {} });
+      operationalForm.setData({ library_type: "drrs_signatory", document_type: "assessment", value: "", position: "", suffix: "", designation: "", office: "", contact_number: "", initials: "", short_name: "", context: defaultContextFor("drrs_signatory", "assessment"), is_active: true });
+    } else if (isRrosSignatoryLibrary) {
+      rrosSignatoryForm.setData({ library_type: "", signatories: {} });
+      operationalForm.setData({ library_type: "rros_ris_signatory", value: "", position: "", suffix: "", designation: "", office: "", contact_number: "", initials: "", short_name: "", context: defaultContextFor("rros_ris_signatory"), is_active: true });
+    } else if (isOperational)
       operationalForm.setData({
-        library_type: activeType,
+        library_type: isRrosSignatoryLibrary ? "rros_ris_signatory" : activeType,
         value: "",
+        position: "",
+        designation: "",
+        office: "",
+        contact_number: "",
+        suffix: "",
+        initials: "",
         short_name: "",
-        context: activeType === "drrs_signatory" ? "prepared_by" : activeType === "drn_prefix" ? "assessment" : activeType === "response_letter_initials" ? "response_letter" : "all",
+        context: ["drrs_signatory", ...rrosSignatoryTypes, "drn_prefix", "response_letter_initials"].includes(activeType)
+          ? defaultContextFor(activeType)
+          : "all",
         is_active: true,
       });
     else
@@ -274,9 +451,23 @@ export default function FniLibrary({
     else if (isOperational)
       operationalForm.setData({
         library_type: row.library_type,
-        value: row.value,
+        document_type: row.library_type === "drrs_signatory" ? (row.metadata?.document_type || "assessment") : "",
+        value: ["drrs_signatory", ...rrosSignatoryTypes].includes(row.library_type) ? String(row.value || "").split("|")[0].trim() : row.value,
+        position: row.metadata?.position || "",
+        suffix: row.metadata?.suffix || "",
+        designation: row.metadata?.designation || String(row.value || "").split("|").slice(1).join("|").trim(),
+        office: row.metadata?.office || "",
+        contact_number: row.metadata?.contact_number || "",
+        initials: row.metadata?.initials || "",
         short_name: row.metadata?.short_name || "",
-        context: row.context,
+        context: (() => {
+          const documentType = row.library_type === "drrs_signatory" ? (row.metadata?.document_type || "assessment") : undefined;
+          const allowed = signatoryContextOptions(row.library_type, documentType).map(([context]) => context);
+          if (allowed.length && !allowed.includes(row.context)) {
+            return defaultContextFor(row.library_type, documentType);
+          }
+          return row.context;
+        })(),
         is_active: row.is_active,
       });
     else
@@ -295,10 +486,28 @@ export default function FniLibrary({
       row,
     });
   };
+  const openDocumentSignatories = (documentType) => {
+    if (isRrosSignatoryLibrary) {
+      rrosSignatoryForm.setData({ library_type: documentType, signatories: signatorySetFromRows(documentType, operationalLibraries) });
+    } else {
+      drrsSignatoryForm.setData({
+        document_type: documentType,
+        signatories: Object.fromEntries(drrsRolesFor(documentType).map(([context]) => {
+          const row = operationalLibraries.find((entry) => entry.library_type === "drrs_signatory" && entry.context === context && (entry.metadata?.document_type || "assessment") === documentType);
+          return [context, hydratedDrrsEntry(row, operationalLibraries)];
+        })),
+      });
+    }
+    setModal({ kind: "operational", row: null, editingDocument: true });
+  };
   const submit = (event) => {
     event.preventDefault();
     const close = { preserveScroll: true, onSuccess: () => setModal(null) };
-    if (modal.kind === "fni")
+    if (activeType === "drrs_signatory" && !modal.row) {
+      drrsSignatoryForm.post("/operational-library/drrs-signatories", close);
+    } else if (isRrosSignatoryLibrary && !modal.row) {
+      rrosSignatoryForm.post("/operational-library/rros-signatories", close);
+    } else if (modal.kind === "fni")
       modal.row
         ? fniForm.put(`/fni-library/${modal.row.id}`, close)
         : fniForm.post("/fni-library", close);
@@ -430,8 +639,10 @@ export default function FniLibrary({
 
       {libraryModalOpen && (
         <div
-          className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm sm:p-6"
-          onMouseDown={(event) => event.target === event.currentTarget && setLibraryModalOpen(false)}
+          className="fixed inset-0 z-[220] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm sm:p-6"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`${activeDefinition?.label || "Library"} workspace`}
         >
           <div className="flex h-[min(92vh,980px)] w-full max-w-[96rem] flex-col overflow-hidden rounded-xl border border-slate-200 bg-slate-50 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
             <div className="flex items-center justify-between border-b border-slate-200 bg-white px-5 py-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -442,7 +653,7 @@ export default function FniLibrary({
                   <h2 className="text-lg font-black">{activeDefinition?.label}</h2>
                 </div>
               </div>
-              <button type="button" onClick={() => setLibraryModalOpen(false)} className="rounded-md border border-slate-200 p-2 hover:bg-slate-100 dark:border-zinc-700 dark:hover:bg-zinc-800" aria-label="Close library">
+              <button type="button" onClick={() => setLibraryModalOpen(false)} className="dromis-tip rounded-md border border-slate-200 p-2 hover:bg-slate-100 dark:border-zinc-700 dark:hover:bg-zinc-800" aria-label="Close library" data-tip="Close library workspace" data-tip-side="bottom" data-tip-preferred-side="bottom" data-tip-locked="true">
                 <X className="h-5 w-5" />
               </button>
             </div>
@@ -517,6 +728,16 @@ export default function FniLibrary({
                   />
                 ))}
               />
+            ) : (isRrosSignatoryLibrary || activeType === "drrs_signatory") ? (
+              <DataTable
+                numbered={false}
+                stickyHeader
+                className="h-[calc(100vh-30rem)] min-h-[320px] max-h-[720px] overflow-auto"
+                columns={["Document Type", "Configured Signatories", "Assignments", "Status", { label: "Actions", align: "right", actionColumn: true }]}
+                rows={documentSignatoryRows.map((document) => (
+                  <DocumentSignatoryRow key={document.type} document={document} onEdit={() => openDocumentSignatories(document.type)} />
+                ))}
+              />
             ) : isOperational ? (
               <DataTable
                 numbered={false}
@@ -525,6 +746,31 @@ export default function FniLibrary({
                 columns={activeType === "system_name" ? [
                   "Long Name",
                   "Short Name",
+                  "Status",
+                  { label: "Actions", align: "right", actionColumn: true },
+                ] : isRrosSignatoryLibrary ? [
+                  "Employee / Signatory",
+                  "Document",
+                  "Signatory Role",
+                  "Status",
+                  { label: "Actions", align: "right", actionColumn: true },
+                ] : activeType === "drrs_signatory" ? [
+                  "Employee / Signatory",
+                  "Document",
+                  "Signatory Role",
+                  "Status",
+                  { label: "Actions", align: "right", actionColumn: true },
+                ] : activeType === "dispatch_driver" ? [
+                  "Driver Name",
+                  "Contact No.",
+                  "Position",
+                  "Office",
+                  "Status",
+                  { label: "Actions", align: "right", actionColumn: true },
+                ] : activeType === "dispatch_received_by" ? [
+                  "Name",
+                  "Position",
+                  "Office",
                   "Status",
                   { label: "Actions", align: "right", actionColumn: true },
                 ] : [
@@ -539,6 +785,27 @@ export default function FniLibrary({
                     cells={activeType === "system_name" ? [
                       row.value,
                       row.metadata?.short_name || row.value,
+                      row.is_active ? "Active" : "Inactive",
+                    ] : isRrosSignatoryLibrary ? [
+                      row.value,
+                      rrosDocumentLabels[row.library_type] || row.library_type,
+                      row.context.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+                      row.is_active ? "Active" : "Inactive",
+                    ] : activeType === "drrs_signatory" ? [
+                      row.value,
+                      drrsDocumentLabels[row.metadata?.document_type || "assessment"],
+                      row.context.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+                      row.is_active ? "Active" : "Inactive",
+                    ] : activeType === "dispatch_driver" ? [
+                      row.value,
+                      row.metadata?.contact_number || "—",
+                      row.metadata?.position || "—",
+                      row.metadata?.office || "—",
+                      row.is_active ? "Active" : "Inactive",
+                    ] : activeType === "dispatch_received_by" ? [
+                      row.value,
+                      row.metadata?.position || "—",
+                      row.metadata?.office || "—",
                       row.is_active ? "Active" : "Inactive",
                     ] : [
                       row.value,
@@ -592,6 +859,9 @@ export default function FniLibrary({
           fniForm={fniForm}
           warehouseForm={warehouseForm}
           operationalForm={operationalForm}
+          rrosSignatoryForm={rrosSignatoryForm}
+          drrsSignatoryForm={drrsSignatoryForm}
+          operationalLibraries={operationalLibraries}
           onClose={() => setModal(null)}
           onSubmit={submit}
         />
@@ -631,6 +901,24 @@ function LibraryRow({ cells, row, onEdit, onDelete }) {
   );
 }
 
+function DocumentSignatoryRow({ document, onEdit }) {
+  const complete = document.configured === document.roles.length;
+  return <tr>
+    <td className="px-4 py-3 font-black">{document.label}</td>
+    <td className="px-4 py-3"><span className="font-black text-emerald-700">{document.configured}</span> / {document.roles.length}</td>
+    <td className="px-4 py-3">
+      <div className="flex flex-wrap gap-1.5">
+        {document.roles.map(([context, label]) => {
+          const row = document.rows.find((entry) => entry.context === context);
+          return <span key={context} title={row?.value || `${label} is not configured`} className={`rounded-full px-2 py-1 text-[10px] font-bold ${row ? "bg-emerald-50 text-emerald-800" : "bg-slate-100 text-slate-400"}`}>{label}</span>;
+        })}
+      </div>
+    </td>
+    <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs font-black ${complete ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>{complete ? "Complete" : "Needs setup"}</span></td>
+    <td className="px-4 py-3 text-right"><TableActionButton icon={Edit3} label={`Edit ${document.label} signatories`} tone="brand" onClick={onEdit} /></td>
+  </tr>;
+}
+
 function conditionText(row) {
   if (row.library_type === "distribution_network")
     return `Auto-filled for ${scopeLabels[row.applicability]}`;
@@ -651,23 +939,31 @@ function LibraryModal({
   fniForm,
   warehouseForm,
   operationalForm,
+  rrosSignatoryForm,
+  drrsSignatoryForm,
+  operationalLibraries,
   onClose,
   onSubmit,
 }) {
-  const form =
-    modal.kind === "fni"
+  const bulkRrosSignatories = definition.key === "rros_signatories" && !modal.row;
+  const bulkDrrsSignatories = definition.key === "operational:drrs_signatory" && !modal.row;
+  const form = bulkRrosSignatories
+    ? rrosSignatoryForm
+    : bulkDrrsSignatories ? drrsSignatoryForm
+    : modal.kind === "fni"
       ? fniForm
       : modal.kind === "operational"
         ? operationalForm
         : warehouseForm;
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+      className="fixed inset-0 z-[240] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
     >
       <form
         onSubmit={onSubmit}
-        className="w-full max-w-xl overflow-hidden rounded-lg bg-white shadow-2xl dark:bg-zinc-950"
+        className={`w-full overflow-hidden rounded-lg bg-white shadow-2xl dark:bg-zinc-950 ${bulkRrosSignatories || bulkDrrsSignatories ? "max-w-5xl" : "max-w-xl"}`}
       >
         <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-5 py-4 dark:border-zinc-800 dark:bg-zinc-900">
           <div>
@@ -675,15 +971,19 @@ function LibraryModal({
               {definition.label}
             </p>
             <h2 className="text-xl font-black">
-              {modal.row ? "Edit Library Value" : "Add Library Value"}
+              {bulkRrosSignatories ? "Configure Document Signatories" : bulkDrrsSignatories ? "Configure DRRS Signatories" : modal.row ? "Edit Library Value" : "Add Library Value"}
             </h2>
           </div>
-          <button type="button" onClick={onClose}>
+          <button type="button" onClick={onClose} aria-label="Close modal" data-tip="Close modal" data-tip-side="bottom" data-tip-preferred-side="bottom" data-tip-locked="true" className="dromis-tip">
             <X className="h-5 w-5" />
           </button>
         </div>
         <div className="space-y-4 p-5">
-          {modal.kind === "fni" ? (
+          {bulkRrosSignatories ? (
+            <RrosSignatorySetFields form={rrosSignatoryForm} operationalLibraries={operationalLibraries} />
+          ) : bulkDrrsSignatories ? (
+            <DrrsSignatorySetFields form={drrsSignatoryForm} operationalLibraries={operationalLibraries} />
+          ) : modal.kind === "fni" ? (
             <>
               <Input
                 label="Item Category"
@@ -709,6 +1009,17 @@ function LibraryModal({
             </>
           ) : modal.kind === "operational" ? (
             <>
+              {rrosSignatoryTypes.includes(form.data.library_type) && <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3">
+                <label className="block text-sm font-black text-emerald-950">Document
+                  <select className="mt-2 w-full bg-white" value={form.data.library_type} onChange={(event) => {
+                    const libraryType = event.target.value;
+                    form.setData((data) => ({ ...data, library_type: libraryType, context: defaultSignatoryContext[libraryType] }));
+                  }}>
+                    {rrosSignatoryTypes.map((type) => <option key={type} value={type}>{rrosDocumentLabels[type]}</option>)}
+                  </select>
+                </label>
+                <p className="mt-2 text-xs font-semibold text-emerald-800">One directory manages all RROS signatories while keeping each assignment specific to its official document.</p>
+              </div>}
               {form.data.library_type === "system_name" ? <>
                 <Input
                   label="Long Name"
@@ -723,17 +1034,84 @@ function LibraryModal({
                 <p className="rounded-md border border-sky-100 bg-sky-50 p-3 text-xs font-semibold text-sky-800 dark:border-sky-900 dark:bg-sky-950/30 dark:text-sky-100">
                   The long name appears on public and sign-in screens. The short name appears below the agency name in the authenticated sidebar.
                 </p>
-              </> : <Input
+              </> : ["drrs_signatory", "rros_ris_signatory", "rros_dr_signatory", "rros_stf_signatory"].includes(form.data.library_type) ? <div className="space-y-4">
+                {form.data.library_type === "drrs_signatory" && <label className="block text-sm font-bold">Document Type<select className="mt-1 w-full" value={form.data.document_type} onChange={(event) => {
+                  const documentType = event.target.value;
+                  const roles = drrsRolesFor(documentType);
+                  const nextContext = roles.some(([context]) => context === form.data.context) ? form.data.context : defaultContextFor("drrs_signatory", documentType);
+                  form.setData((data) => ({ ...data, document_type: documentType, context: nextContext }));
+                }}><option value="assessment">Assessment</option><option value="response_letter">Response Letter</option></select></label>}
+                <MyPortalSignatoryInput
+                  value={form.data.value}
+                  onChange={(value) => form.setData("value", value)}
+                  onSelect={(employee) => form.setData((data) => ({
+                    ...data,
+                    value: employee.value,
+                    position: employee.position || "",
+                    suffix: suggestedSuffix(employee, operationalLibraries),
+                    designation: suggestedDesignation(employee, operationalLibraries),
+                    office: suggestedOffice(employee, operationalLibraries),
+                  }))}
+                />
+                <Input label="Position" value={form.data.position} onChange={() => {}} readOnly />
+                <Input label="Office" value={form.data.office} onChange={() => {}} readOnly />
+                <Input label="Name Suffix / Professional Credentials" value={form.data.suffix} onChange={(value) => form.setData("suffix", value)} required={false} />
+                <Input
+                  label="Designation"
+                  value={form.data.designation}
+                  onChange={(value) => form.setData("designation", value)}
+                />
+                {form.data.library_type === "drrs_signatory" && <Input label="Signatory Initials" value={form.data.initials} onChange={(value) => form.setData("initials", value)} />}
+              </div> : form.data.library_type === "dispatch_driver" ? <div className="space-y-4">
+                <Input
+                  label="Driver Name"
+                  value={form.data.value}
+                  onChange={(value) => form.setData("value", value)}
+                />
+                <Input
+                  label="Contact No."
+                  value={form.data.contact_number}
+                  onChange={(value) => form.setData("contact_number", value)}
+                />
+                <Input
+                  label="Position"
+                  value={form.data.position}
+                  onChange={(value) => form.setData("position", value)}
+                  required={false}
+                />
+                <Input
+                  label="Office"
+                  value={form.data.office}
+                  onChange={(value) => form.setData("office", value)}
+                  required={false}
+                />
+              </div> : form.data.library_type === "dispatch_received_by" ? <div className="space-y-4">
+                <Input
+                  label="Name"
+                  value={form.data.value}
+                  onChange={(value) => form.setData("value", value)}
+                />
+                <Input
+                  label="Position"
+                  value={form.data.position}
+                  onChange={(value) => form.setData("position", value)}
+                  required={false}
+                />
+                <Input
+                  label="Office"
+                  value={form.data.office}
+                  onChange={(value) => form.setData("office", value)}
+                  required={false}
+                />
+              </div> : <Input
                 label="Reference Value"
                 value={form.data.value}
                 onChange={(value) => form.setData("value", value)}
               />}
-              {form.data.library_type !== "system_name" && (["drrs_signatory", "drn_prefix", "response_letter_initials"].includes(form.data.library_type) ? <label className="block text-sm font-bold">
+              {form.data.library_type !== "system_name" && (["drrs_signatory", "rros_ris_signatory", "rros_dr_signatory", "rros_stf_signatory", "drn_prefix", "response_letter_initials"].includes(form.data.library_type) ? <label className="block text-sm font-bold">
                 Workflow Context
                 <select className="mt-1 w-full" required value={form.data.context} onChange={(event) => form.setData("context", event.target.value)}>
-                  {(form.data.library_type === "drrs_signatory" ? [
-                    ["prepared_by", "Prepared By"], ["reviewed_by", "Reviewed By"], ["approved_by", "Approved By"],
-                  ] : form.data.library_type === "response_letter_initials" ? [["response_letter", "Response Letter"]] : [["assessment", "Assessment"], ["response_letter", "Response Letter"]]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  {signatoryContextOptions(form.data.library_type, form.data.document_type || "assessment").map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
               </label> : <Input
                 label="Workflow Context"
@@ -786,10 +1164,10 @@ function LibraryModal({
             </p>
           ))}
           <button
-            disabled={form.processing}
+            disabled={form.processing || (bulkRrosSignatories && !form.data.library_type) || (bulkDrrsSignatories && !form.data.document_type)}
             className="w-full rounded-md bg-brand-600 px-4 py-2.5 text-sm font-black text-white"
           >
-            {form.processing ? "Saving..." : "Save Library Value"}
+            {form.processing ? "Saving..." : bulkRrosSignatories ? (form.data.library_type ? `Save ${rrosDocumentLabels[form.data.library_type]} Signatories` : "Select a Document") : bulkDrrsSignatories ? (form.data.document_type ? `Save ${drrsDocumentLabels[form.data.document_type]} Signatories` : "Select a Document") : "Save Library Value"}
           </button>
         </div>
       </form>
@@ -797,15 +1175,151 @@ function LibraryModal({
   );
 }
 
-function Input({ label, value, onChange, required = true }) {
+function DrrsSignatorySetFields({ form, operationalLibraries }) {
+  const update = (context, fields) => form.setData("signatories", { ...form.data.signatories, [context]: { ...form.data.signatories[context], ...fields } });
+  const changeDocument = (documentType) => form.setData({
+    document_type: documentType,
+    signatories: documentType ? Object.fromEntries(drrsRolesFor(documentType).map(([context]) => {
+      const row = operationalLibraries.find((entry) => entry.library_type === "drrs_signatory" && entry.context === context
+        && ((entry.metadata?.document_type || "assessment") === documentType));
+      return [context, hydratedDrrsEntry(row, operationalLibraries)];
+    })) : {},
+  });
+  return <div className="space-y-4">
+    <div className="rounded-xl border border-sky-200 bg-gradient-to-r from-sky-50 to-indigo-50 p-4">
+      <label className="block text-sm font-black text-sky-950">DRRS Document Type
+        <select className="mt-2 w-full bg-white" value={form.data.document_type} onChange={(event) => changeDocument(event.target.value)}>
+          <option value="">Select Assessment or Response Letter</option>
+          <option value="assessment">Assessment</option>
+          <option value="response_letter">Response Letter</option>
+        </select>
+      </label>
+      <p className="mt-2 text-xs font-semibold text-sky-800">Configure the complete signatory set independently for each DRRS document.</p>
+    </div>
+    <div className="max-h-[58vh] space-y-3 overflow-y-auto pr-1">
+    {drrsRolesFor(form.data.document_type).map(([context, label], index) => {
+      const entry = form.data.signatories[context] || { name: "", position: "", suffix: "", designation: "", office: "", initials: "" };
+      return <section key={context} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-3 flex items-center gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-sky-100 text-xs font-black text-sky-800">{index + 1}</span><h3 className="font-black">{label}</h3></div>
+        <div className="space-y-4">
+          <MyPortalSignatoryInput value={entry.name} onChange={(name) => update(context, { name })} onSelect={(employee) => update(context, suggestedSignatoryDetails(employee, operationalLibraries))} />
+          <Input label="Position" value={entry.position} onChange={() => {}} readOnly />
+          <Input label="Office" value={entry.office || ""} onChange={() => {}} readOnly />
+          <Input label="Name Suffix / Professional Credentials" value={entry.suffix} onChange={(suffix) => update(context, { suffix })} required={false} />
+          <Input label="Designation" value={entry.designation} onChange={(designation) => update(context, { designation })} />
+          <Input label="Signatory Initials" value={entry.initials} onChange={(initials) => update(context, { initials })} />
+        </div>
+      </section>;
+    })}
+    </div>
+  </div>;
+}
+
+function RrosSignatorySetFields({ form, operationalLibraries }) {
+  const setEntry = (context, field, value) => form.setData("signatories", {
+    ...form.data.signatories,
+    [context]: { ...form.data.signatories[context], [field]: value },
+  });
+  const changeDocument = (libraryType) => form.setData({
+    library_type: libraryType,
+    signatories: signatorySetFromRows(libraryType, operationalLibraries),
+  });
+
+  return <div className="space-y-4">
+    <div className="rounded-xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-sky-50 p-4">
+      <label className="block text-sm font-black text-emerald-950">RROS Document Type
+        <select className="mt-2 w-full bg-white" value={form.data.library_type} onChange={(event) => changeDocument(event.target.value)}>
+          <option value="">Select RIS / DR, Delivery Receipt, or STF</option>
+          {rrosSignatoryTypes.map((type) => <option key={type} value={type}>{rrosDocumentLabels[type]}</option>)}
+        </select>
+      </label>
+      <p className="mt-2 text-xs font-semibold text-emerald-800">Complete all official signatory assignments for this document, then save them together.</p>
+    </div>
+    <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+      {(rrosSignatoryRoles[form.data.library_type] || []).map(([context, label], index) => {
+        const entry = form.data.signatories[context] || { name: "", position: "", suffix: "", designation: "", office: "" };
+        return <section key={context} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-100 text-xs font-black text-emerald-800">{index + 1}</span><h3 className="font-black text-slate-950">{label}</h3></div>
+          <div className="space-y-4">
+            <MyPortalSignatoryInput value={entry.name} onChange={(value) => setEntry(context, "name", value)} onSelect={(employee) => {
+              form.setData("signatories", {
+                ...form.data.signatories,
+                [context]: { ...entry, ...suggestedSignatoryDetails(employee, operationalLibraries) },
+              });
+            }} />
+            <Input label="Position" value={entry.position} onChange={() => {}} readOnly />
+            <Input label="Office" value={entry.office || ""} onChange={() => {}} readOnly />
+            <Input label="Name Suffix / Professional Credentials" value={entry.suffix} onChange={(value) => setEntry(context, "suffix", value)} required={false} />
+            <Input label="Designation" value={entry.designation} onChange={(value) => setEntry(context, "designation", value)} />
+          </div>
+        </section>;
+      })}
+    </div>
+  </div>;
+}
+
+function MyPortalSignatoryInput({ value, onChange, onSelect }) {
+  const [query, setQuery] = useState(value || "");
+  const [options, setOptions] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const wrapper = useRef(null);
+
+  useEffect(() => setQuery(value || ""), [value]);
+  useEffect(() => {
+    const close = (event) => !wrapper.current?.contains(event.target) && setOpen(false);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
+  useEffect(() => {
+    const search = query.trim();
+    if (!open || search.length < 2 || search === value) return undefined;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setLoading(true); setError("");
+      try {
+        const response = await fetch(`/myportal-employees?search=${encodeURIComponent(search)}`, { headers: { Accept: "application/json" }, signal: controller.signal });
+        const payload = await response.json();
+        setOptions(payload.employees || []);
+        setError(payload.directory_error || (!response.ok ? "Employee directory search failed." : ""));
+      } catch (exception) {
+        if (exception.name !== "AbortError") { setOptions([]); setError("Could not connect to MyPortal."); }
+      } finally { if (!controller.signal.aborted) setLoading(false); }
+    }, 300);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [query, open, value]);
+
+  return <label className="block text-sm font-bold">DSWD Caraga Employee *
+    <span className="mt-1 block text-xs font-semibold text-slate-500">Enter at least 2 letters of the employee's last name or first name, then select the correct employee.</span>
+    <div ref={wrapper} className="relative mt-2">
+      <input required autoComplete="off" role="combobox" aria-expanded={open} value={query} onFocus={() => setOpen(true)} onChange={(event) => { setQuery(event.target.value); setOpen(true); if (value) onChange(""); }} placeholder="Search MyPortal employee directory" className="w-full pr-10" />
+      <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+      {open && query.trim().length >= 2 && query !== value && <div className="absolute z-[260] mt-1 max-h-80 w-full overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-2xl">
+        {loading && <p className="p-3 text-sm text-slate-500">Searching MyPortal...</p>}
+        {!loading && error && <p className="p-3 text-sm font-semibold text-rose-700">{error}</p>}
+        {!loading && !error && options.length === 0 && <p className="p-3 text-sm text-slate-500">No active employee matched.</p>}
+        {!loading && options.map((option) => <button key={`${option.id_number}-${option.value}`} type="button" className="block w-full border-b px-4 py-3 text-left hover:bg-emerald-50" onClick={() => { onSelect?.(option); setQuery(option.value); setOpen(false); }}>
+          <span className="block font-black text-slate-950">{option.id_number ? `[${option.id_number}] ` : ""}{option.value}</span>
+          {option.position && <span className="block text-xs font-bold text-slate-600">{option.position}</span>}
+          {option.section_unit_program && <span className="mt-1 block text-xs text-emerald-700">{option.section_unit_program}</span>}
+          {option.division && <span className="block text-[11px] text-slate-500">{option.division}</span>}
+        </button>)}
+      </div>}
+    </div>
+  </label>;
+}
+
+function Input({ label, value, onChange, required = true, readOnly = false }) {
   return (
     <label className="block text-sm font-bold">
       {label}
       <input
-        className="mt-1 w-full"
         required={required}
+        readOnly={readOnly}
         value={value}
-        onChange={(event) => onChange(event.target.value)}
+        className={`mt-1 w-full ${readOnly ? "cursor-not-allowed bg-slate-100 text-slate-600" : ""}`}
+        onChange={(event) => !readOnly && onChange(event.target.value)}
       />
     </label>
   );

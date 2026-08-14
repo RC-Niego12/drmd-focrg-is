@@ -58,18 +58,42 @@ const allowedOrigins = new Set([
 ]);
 const allowOrigin = (origin) => !origin || allowedOrigins.has(String(origin).toLowerCase());
 
+const resolveHerdTlsPaths = () => {
+    if (process.env.SOCKET_IO_CERT && process.env.SOCKET_IO_KEY) {
+        return { certPath: process.env.SOCKET_IO_CERT, keyPath: process.env.SOCKET_IO_KEY };
+    }
+
+    const certificateDirectory = path.join(os.homedir(), '.config', 'herd', 'config', 'valet', 'Certificates');
+    const host = appUrl.hostname;
+    const candidates = [
+        host,
+        host.endsWith('.lan') || host.endsWith('.test') ? null : `${host}.lan`,
+        host.endsWith('.lan') || host.endsWith('.test') ? null : `${host}.test`,
+    ].filter(Boolean);
+
+    for (const base of candidates) {
+        const certPath = path.join(certificateDirectory, `${base}.crt`);
+        const keyPath = path.join(certificateDirectory, `${base}.key`);
+        if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+            return { certPath, keyPath };
+        }
+    }
+
+    throw new Error(
+        `Herd TLS certs not found for ${host}. Looked under ${certificateDirectory} `
+        + `(tried ${candidates.join(', ')}). Set SOCKET_IO_CERT / SOCKET_IO_KEY, `
+        + 'or use http://…:6001 only when APP_URL is also http.',
+    );
+};
+
 let publicServer;
 if (publicUrl.protocol === 'https:') {
-    const certificateBase = appUrl.hostname.endsWith('.test') || appUrl.hostname.endsWith('.lan')
-        ? appUrl.hostname
-        : `${appUrl.hostname}.lan`;
-    const certificateDirectory = path.join(os.homedir(), '.config', 'herd', 'config', 'valet', 'Certificates');
-    const certPath = process.env.SOCKET_IO_CERT || path.join(certificateDirectory, `${certificateBase}.crt`);
-    const keyPath = process.env.SOCKET_IO_KEY || path.join(certificateDirectory, `${certificateBase}.key`);
+    const { certPath, keyPath } = resolveHerdTlsPaths();
     publicServer = https.createServer({
         cert: fs.readFileSync(certPath),
         key: fs.readFileSync(keyPath),
     });
+    process.stdout.write(`DROMIS Socket.IO TLS using ${certPath}\n`);
 } else {
     publicServer = http.createServer();
 }
@@ -137,8 +161,9 @@ const internalServer = http.createServer((request, response) => {
     });
 });
 
-publicServer.listen(publicPort, '127.0.0.1', () => {
-    process.stdout.write(`DROMIS Socket.IO gateway listening on ${publicUrl.origin}\n`);
+const publicHost = process.env.SOCKET_IO_PUBLIC_HOST || '0.0.0.0';
+publicServer.listen(publicPort, publicHost, () => {
+    process.stdout.write(`DROMIS Socket.IO gateway listening on ${publicUrl.protocol}//${publicHost}:${publicPort} (public ${publicUrl.origin})\n`);
 });
 internalServer.listen(internalPort, '127.0.0.1', () => {
     process.stdout.write(`DROMIS internal event publisher listening on 127.0.0.1:${internalPort}\n`);

@@ -1,25 +1,31 @@
 import { usePage } from '@inertiajs/react';
-import { ClipboardList, FileCheck2 } from 'lucide-react';
-import SystemTabs from '@/Components/SystemTabs';
+import { ClipboardList, FileCheck2, FileSpreadsheet } from 'lucide-react';
+import SectionTabs from '@/Components/SectionTabs';
 
-export default function DrrsRequestsWorkspaceTabs({ active }) {
+export default function DrrsRequestsWorkspaceTabs({ active, onChange, mode }) {
     const roles = usePage().props.auth?.user?.roles ?? [];
-    if (!roles.includes('DRRS') && !roles.includes('Super Admin')) {
+    const url = usePage().url || '';
+    const isRros = mode === 'rros'
+        || (roles.some((role) => ['RROS', 'RROS AA'].includes(role)) && !roles.includes('DRRS'))
+        || url.startsWith('/rros/requests');
+    if (!roles.includes('DRRS') && !roles.includes('Super Admin') && !isRros) {
         return null;
     }
 
     return (
-        <div className="rounded-t-lg border border-b-0 border-slate-200 bg-white px-4 pt-3 dark:border-zinc-800 dark:bg-zinc-900">
-            <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-slate-400">DRRS Requests Workspace</p>
-            <SystemTabs
-                active={active}
-                ariaLabel="DRRS requests workspace"
-                className="rounded-b-none border-b-0"
-                items={[
-                    { key: 'fni', label: 'FNI Requests', icon: ClipboardList, href: '/requests' },
-                    { key: 'lgu', label: 'LGU Reports & Requests', icon: FileCheck2, href: '/dromic/lgu-reports' },
-                ]}
-            />
-        </div>
+        <SectionTabs
+            label={isRros ? 'RIS/DR/STF Workspace' : 'DRRS Requests Workspace'}
+            appearance="stack-top"
+            value={active}
+            onChange={onChange}
+            ariaLabel={isRros ? 'RIS/DR/STF workspace' : 'DRRS requests workspace'}
+            tabs={isRros ? [
+                { id: 'fni', label: 'RIS/DR', icon: ClipboardList, href: '/rros/requests' },
+                { id: 'stf', label: 'STF', icon: FileSpreadsheet, href: '/rros/requests?section=stf' },
+            ] : [
+                { id: 'fni', label: 'FNI Requests', icon: ClipboardList, href: '/requests' },
+                { id: 'lgu', label: 'LGU Reports & Requests', icon: FileCheck2, href: '/dromic/lgu-reports' },
+            ]}
+        />
     );
 }

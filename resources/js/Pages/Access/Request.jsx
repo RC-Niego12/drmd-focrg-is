@@ -58,8 +58,8 @@ export default function Request({ access, roleOptions }) {
         <AppLayout title="Access Request">
             <Head title="Access Request" />
             <div className="mx-auto max-w-3xl">
-                <Card className="overflow-hidden p-0">
-                    <div className="border-b border-slate-200 bg-slate-50 p-6 dark:border-zinc-800 dark:bg-zinc-900">
+                <Card className="overflow-visible p-0">
+                    <div className="rounded-t-md border-b border-slate-200 bg-slate-50 p-6 dark:border-zinc-800 dark:bg-zinc-900">
                         <div className="flex items-start gap-4">
                             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-brand-50 text-brand-700 ring-1 ring-brand-100 dark:bg-brand-950 dark:text-brand-100 dark:ring-brand-800">
                                 {approved ? <CheckCircle2 className="h-6 w-6" /> : denied ? <AlertTriangle className="h-6 w-6" /> : <Clock3 className="h-6 w-6" />}

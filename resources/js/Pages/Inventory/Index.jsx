@@ -1,10 +1,13 @@
 import { Head, router, useForm, usePage } from '@inertiajs/react';
-import { Boxes, Eye, Filter, PackageMinus, PackagePlus, RefreshCw, Search, X } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { Boxes, Clock3, Eye, Filter, PackageMinus, PackagePlus, Search, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import AppLayout, { Card, DataTable, ExportableCard, TableActionButton } from '@/Layouts/AppLayout';
 import SearchableSelect from '@/Components/SearchableSelect';
 import LookerMultiSelect from '@/Components/LookerMultiSelect';
-import SystemTabs from '@/Components/SystemTabs';
+import SectionTabs from '@/Components/SectionTabs';
+import { listenRealtime } from '@/realtime';
+import { formatDateTime } from '@/Utils/dateFormat';
 
 const today = new Date().toISOString().slice(0, 10);
 const money = (value) => `₱${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -24,6 +27,7 @@ export default function Index({ warehouses, selectedWarehouse, balanceRows, cate
     const [activeCategory, setActiveCategory] = useState(null);
     const [activeTableTab, setActiveTableTab] = useState('stockpile');
     const [detailRow, setDetailRow] = useState(null);
+    const [syncHistory, setSyncHistory] = useState({ open: false, loading: false, rows: [] });
     const [selectedLibraryItem, setSelectedLibraryItem] = useState('');
     const receipt = useForm({
         warehouse_id: selectedWarehouse?.id ?? '',
@@ -66,7 +70,23 @@ export default function Index({ warehouses, selectedWarehouse, balanceRows, cate
         remarks: '',
     });
 
-    const syncForm = useForm({});
+    useEffect(() => {
+        const stop = listenRealtime('wit.sync.completed', () => {
+            router.reload({ only: ['balanceRows', 'categoryReferenceRows', 'sync'], preserveScroll: true });
+        });
+        return stop;
+    }, []);
+
+    const openSyncHistory = async () => {
+        setSyncHistory({ open: true, loading: true, rows: [] });
+        try {
+            const response = await fetch('/wit/sync-history', { headers: { Accept: 'application/json' }, credentials: 'same-origin' });
+            const payload = await response.json();
+            setSyncHistory({ open: true, loading: false, rows: payload.data || [] });
+        } catch {
+            setSyncHistory({ open: true, loading: false, rows: [] });
+        }
+    };
     const warehouseOptions = warehouses.map((warehouse) => ({
         value: warehouse.id,
         label: warehouse.display_name ?? warehouse.name,
@@ -218,9 +238,8 @@ export default function Index({ warehouses, selectedWarehouse, balanceRows, cate
                             <PackageMinus className="h-4 w-4" />
                             Release Items
                         </button>
-                        <button type="button" disabled={syncForm.processing} onClick={() => syncForm.post('/inventory/sync-google-sheet', { preserveScroll: true })} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-70 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
-                            <RefreshCw className={`h-4 w-4 ${syncForm.processing ? 'animate-spin' : ''}`} />
-                            Sync
+                        <button type="button" onClick={openSyncHistory} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-black text-slate-700 shadow-sm hover:bg-slate-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+                            <Clock3 className="h-4 w-4" /> History
                         </button>
                     </div>}
                 </div>
@@ -301,13 +320,16 @@ export default function Index({ warehouses, selectedWarehouse, balanceRows, cate
                         </div>
                     </div>
                 )}>
-                <SystemTabs
-                    active={activeTableTab}
-                    ariaLabel="Inventory table views"
+                <SectionTabs
+                    label="Inventory Table Views"
+                    appearance="framed"
                     className="mb-4"
-                    items={[
-                        { key: 'stockpile', label: 'Warehouse Stockpile', onClick: () => setActiveTableTab('stockpile') },
-                        { key: 'category-totals', label: 'Per Item Grand Totals', onClick: () => setActiveTableTab('category-totals') },
+                    value={activeTableTab}
+                    onChange={setActiveTableTab}
+                    ariaLabel="Inventory table views"
+                    tabs={[
+                        { id: 'stockpile', label: 'Warehouse Stockpile' },
+                        { id: 'category-totals', label: 'Per Item Grand Totals' },
                     ]}
                 />
                 <DataTable
@@ -472,6 +494,8 @@ export default function Index({ warehouses, selectedWarehouse, balanceRows, cate
                     <button disabled={release.processing} className="w-full rounded-md bg-signal-coral px-4 py-2.5 text-sm font-black text-white shadow-sm hover:opacity-90 disabled:opacity-70">{release.processing ? 'Recording...' : 'Record Issuance'}</button>
                 </form>
             </TransactionModal>}
+
+            {syncHistory.open && <SyncHistoryModal state={syncHistory} onClose={() => setSyncHistory({ open: false, loading: false, rows: [] })} />}
             {detailRow && <InventoryDetailModal row={detailRow} onClose={() => setDetailRow(null)} />}
             {activeCategory && (
                 <CategorySummaryModal
@@ -486,6 +510,59 @@ export default function Index({ warehouses, selectedWarehouse, balanceRows, cate
                 />
             )}
         </AppLayout>
+    );
+}
+
+function SyncHistoryModal({ state, onClose }) {
+    const metricLabels = {
+        warehouses: 'Warehouses',
+        inventory_rows: 'Inventory rows',
+        stockpile_quantity: 'Stockpile quantity',
+        stockpile_cost: 'Stockpile cost',
+        standby_funds: 'Standby funds',
+        grand_total: 'Grand total',
+    };
+
+    return createPortal(
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-950/55 p-4" role="dialog" aria-modal="true">
+            <div className="flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg bg-white shadow-2xl dark:bg-zinc-950">
+                <div className="flex items-center justify-between border-b px-5 py-4 dark:border-zinc-800">
+                    <div>
+                        <h2 className="text-lg font-black">WIT Synchronization History</h2>
+                        <p className="text-xs font-semibold text-slate-500">Automatic and user-triggered imports from Managed Warehouses, Data Entry, and Summary.</p>
+                    </div>
+                    <button type="button" onClick={onClose} className="rounded-md p-2 hover:bg-slate-100 dark:hover:bg-zinc-800"><X className="h-4 w-4" /></button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-auto p-5">
+                    {state.loading && <p className="py-10 text-center text-sm font-semibold text-slate-500">Loading synchronization history…</p>}
+                    {!state.loading && state.rows.length === 0 && <p className="py-10 text-center text-sm font-semibold text-slate-500">No WIT synchronization history yet.</p>}
+                    <div className="space-y-3">
+                        {state.rows.map((row) => {
+                            const changes = Object.entries(row.after || {}).filter(([key, value]) => Number(value) !== Number(row.before?.[key]));
+                            return <div key={row.id} className="rounded-md border border-slate-200 p-4 dark:border-zinc-800">
+                                <div className="flex flex-wrap items-start justify-between gap-2">
+                                    <div>
+                                        <p className="font-black">{row.event === 'wit.sync.failed' ? 'Synchronization failed' : row.changed ? 'Changes synchronized' : 'No changes detected'}</p>
+                                        <p className="mt-0.5 text-xs text-slate-500">{formatDateTime(row.created_at)} · {row.user} · {row.trigger || 'automatic'}</p>
+                                    </div>
+                                    <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ${row.event === 'wit.sync.failed' ? 'bg-rose-100 text-rose-700' : row.changed ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                                        {row.event === 'wit.sync.failed' ? 'Failed' : row.changed ? 'Updated' : 'Checked'}
+                                    </span>
+                                </div>
+                                {row.message && <p className="mt-2 text-xs font-semibold text-rose-700">{row.message}</p>}
+                                {changes.length > 0 && <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                                    {changes.map(([key, value]) => <div key={key} className="rounded bg-slate-50 px-3 py-2 text-xs dark:bg-zinc-900">
+                                        <p className="font-black text-slate-500">{metricLabels[key] || key}</p>
+                                        <p className="mt-1"><span className="text-slate-400">{number(row.before?.[key])}</span> → <span className="font-black">{number(value)}</span></p>
+                                    </div>)}
+                                </div>}
+                            </div>;
+                        })}
+                    </div>
+                </div>
+            </div>
+        </div>,
+        document.body,
     );
 }
 
@@ -512,8 +589,8 @@ function InventoryDetailModal({ row, onClose }) {
             ['Cost', money(row.cost)],
         ];
 
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+    return createPortal(
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
             <div className="max-h-[92vh] w-full max-w-3xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
                 <div className="flex items-start justify-between gap-4 border-b border-slate-200 p-4 dark:border-zinc-800">
                     <div>
@@ -533,7 +610,8 @@ function InventoryDetailModal({ row, onClose }) {
                     ))}
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body,
     );
 }
 
@@ -591,6 +669,13 @@ function CategoryMetric({ category, color, percent, onOpen }) {
 
 function CategorySummaryModal({ category, rows, referenceRows = [], onClose }) {
     const isFfp = category === 'Family Food Packs';
+    useEffect(() => {
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        return () => {
+            document.body.style.overflow = previousOverflow;
+        };
+    }, []);
     const modalRows = useMemo(() => {
         const keyed = new Map();
         const makeKey = (row) => [
@@ -689,8 +774,8 @@ function CategorySummaryModal({ category, rows, referenceRows = [], onClose }) {
         warehouses: filteredFfpRows.filter((row) => Number(row.stockpile || 0) > 0).length,
     }), [filteredFfpRows]);
 
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm">
+    return createPortal(
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm" role="dialog" aria-modal="true">
             <div className="flex max-h-[94vh] w-full max-w-[96rem] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
                 <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-zinc-800">
                     <div className="min-w-0">
@@ -722,7 +807,8 @@ function CategorySummaryModal({ category, rows, referenceRows = [], onClose }) {
                     )}
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body,
     );
 }
 
@@ -966,23 +1052,29 @@ function CategoryWarehouseView({ category, rows, totalStockpile, totalCost, filt
     return (
         <div className="space-y-5">
             {isFoodCategory && (
-                <SystemTabs
-                    active={foodTab}
+                <SectionTabs
+                    label="Food Categories"
+                    appearance="framed"
+                    value={foodTab}
+                    onChange={setFoodTab}
                     ariaLabel="Food stockpile categories"
-                    items={[
-                        { key: 'rtef', label: 'Ready-to-Eat Food', onClick: () => setFoodTab('rtef') },
-                        { key: 'water', label: 'Bottled Water', onClick: () => setFoodTab('water') },
+                    tabs={[
+                        { id: 'rtef', label: 'Ready-to-Eat Food' },
+                        { id: 'water', label: 'Bottled Water' },
                     ]}
                 />
             )}
 
             {isMaterialCategory && (
-                <SystemTabs
-                    active={materialTab}
+                <SectionTabs
+                    label="Material Categories"
+                    appearance="framed"
+                    value={materialTab}
+                    onChange={setMaterialTab}
                     ariaLabel="Material stockpile categories"
-                    items={[
-                        { key: 'indirect', label: 'Indirect Materials', onClick: () => setMaterialTab('indirect') },
-                        { key: 'raw', label: 'Raw Materials', onClick: () => setMaterialTab('raw') },
+                    tabs={[
+                        { id: 'indirect', label: 'Indirect Materials' },
+                        { id: 'raw', label: 'Raw Materials' },
                     ]}
                 />
             )}
@@ -1318,8 +1410,8 @@ function TransactionModal({ open, title, children, onClose, tone }) {
 
     const accent = tone === 'coral' ? 'bg-signal-coral' : 'bg-brand-600';
 
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+    return createPortal(
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
             <div className="max-h-[92vh] w-full max-w-3xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
                 <div className={`h-1.5 ${accent}`} />
                 <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-zinc-800">
@@ -1335,6 +1427,7 @@ function TransactionModal({ open, title, children, onClose, tone }) {
                     {children}
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body,
     );
 }

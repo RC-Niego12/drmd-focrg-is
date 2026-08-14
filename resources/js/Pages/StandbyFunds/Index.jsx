@@ -1,5 +1,5 @@
-import { Head, router, useForm } from '@inertiajs/react';
-import { BadgeDollarSign, RefreshCw, Save } from 'lucide-react';
+import { Head, useForm } from '@inertiajs/react';
+import { BadgeDollarSign, Save } from 'lucide-react';
 import AppLayout, { Card, ExportableCard } from '@/Layouts/AppLayout';
 import { formatDateTime } from '@/Utils/dateFormat';
 
@@ -14,15 +14,6 @@ export default function Index({ standbyFund, defaultSheetUrl, defaultCell }) {
     const save = (event) => {
         event.preventDefault();
         form.put('/standby-funds', { preserveScroll: true });
-    };
-
-    const sync = () => {
-        router.post('/standby-funds/sync-google-sheet', {
-            google_sheet_url: form.data.google_sheet_url,
-            cell_reference: form.data.cell_reference,
-        }, {
-            preserveScroll: true,
-        });
     };
 
     return (
@@ -124,15 +115,6 @@ export default function Index({ standbyFund, defaultSheetUrl, defaultCell }) {
                         >
                             <Save className="h-4 w-4" />
                             Save Standby Fund
-                        </button>
-                        <button
-                            type="button"
-                            onClick={sync}
-                            disabled={form.processing}
-                            className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-60 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                        >
-                            <RefreshCw className="h-4 w-4" />
-                            Sync WIT Cell
                         </button>
                     </div>
                 </form>

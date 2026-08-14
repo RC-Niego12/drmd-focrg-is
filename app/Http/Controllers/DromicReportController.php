@@ -5,14 +5,14 @@ namespace App\Http\Controllers;
 use App\Models\AssistanceRequest;
 use App\Models\DromicReport;
 use App\Models\PsgcAddress;
+use App\Services\AorCoverageService;
 use App\Services\AuditLogger;
 use App\Services\LguReliefRequestHandoffService;
 use App\Services\WorkflowNotificationService;
+use App\Support\LguDromicReportTitle;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
-use App\Support\LguDromicReportTitle;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -30,27 +30,32 @@ class DromicReportController extends Controller
         ]);
     }
 
-    public function lguReports(Request $request): Response
+    public function lguReports(Request $request, AorCoverageService $aorCoverage): Response
     {
+        $user = $request->user();
         abort_unless(
-            $request->user()?->hasAnyRole(['DRIMS', 'DRRS', 'QRT', 'Quick Response Team', 'Super Admin']),
+            $user?->hasAnyRole(['DRIMS', 'DRRS', 'QRT', 'Quick Response Team', 'OCD Caraga', 'Super Admin'])
+                || $user?->can('monitor requests')
+                || $user?->can('manage regional alerts'),
             403,
         );
 
         $baseQuery = AssistanceRequest::query()
-                ->with([
-                    'incident:id,name,incident_date',
-                    'lguSubmitter:id,name,lgu_name,lgu_psgc_code,area_of_assignment',
-                    'lguDromicReviewer:id,name,office',
-                    'lguReliefReviewer:id,name,office',
-                    'lguDromicViewer:id,name,office',
-                    'lguReliefViewer:id,name,office',
-                    'reliefAugmentationRequest:id,source_lgu_dromic_request_id,reference_number,status',
-                    'signedDocumentVersions:id,request_id,kind,path,original_name,uploaded_at,created_at',
-                ])
-                ->where('submission_type', 'lgu_dromic_relief_request')
-                ->whereNotNull('lgu_submitted_to_dswd_at')
-                ->whereIn('lgu_report_status', ['advance_submitted', 'submitted']);
+            ->with([
+                'incident:id,name,incident_date',
+                'lguSubmitter:id,name,lgu_name,lgu_psgc_code,area_of_assignment',
+                'lguDromicReviewer:id,name,office',
+                'lguReliefReviewer:id,name,office',
+                'lguDromicViewer:id,name,office',
+                'lguReliefViewer:id,name,office',
+                'lguDromicAcker:id,name,office',
+                'lguReliefAcker:id,name,office',
+                'reliefAugmentationRequest:id,source_lgu_dromic_request_id,reference_number,status',
+                'signedDocumentVersions:id,request_id,kind,path,original_name,uploaded_at,created_at',
+            ])
+            ->where('submission_type', 'lgu_dromic_relief_request')
+            ->whereNotNull('lgu_submitted_to_dswd_at')
+            ->whereIn('lgu_report_status', ['advance_submitted', 'submitted']);
 
         $incidentRows = AssistanceRequest::query()
             ->with([
@@ -96,30 +101,45 @@ class DromicReportController extends Controller
                     });
             });
         }
+
+        $aorCodes = $aorCoverage->normalizeUserAorCodes($user);
+        $hasAssignedAor = $aorCodes['cities'] !== [] || $aorCodes['districts'] !== [] || $aorCodes['provinces'] !== [];
+        if ($hasAssignedAor && ! $user->hasRole('Super Admin') && ! $user->hasAnyRole(['QRT', 'Quick Response Team'])) {
+            $coveredIds = (clone $baseQuery)
+                ->get(['id', 'lgu_psgc_code', 'province', 'municipality'])
+                ->filter(fn (AssistanceRequest $row): bool => $aorCoverage->coversRequest($user, $row, null))
+                ->pluck('id')
+                ->all();
+            $baseQuery->whereIn('id', $coveredIds ?: [0]);
+            $incidentRows = $incidentRows->filter(
+                fn (AssistanceRequest $row): bool => $aorCoverage->coversRequest($user, $row, null)
+            )->values();
+        }
+
         $filteredQuery = $baseQuery
-                ->when($seriesKey, fn ($query, $value) => $query->where('lgu_dromic_series_key', $value))
-                ->when($search, fn ($query, $value) => $query->where(fn ($nested) => $nested
-                    ->where('reference_number', 'like', "%{$value}%")
-                    ->orWhere('lgu_relief_request_reference', 'like', "%{$value}%")
-                    ->orWhere('requesting_agency', 'like', "%{$value}%")
-                    ->orWhere('requester', 'like', "%{$value}%")
-                    ->orWhere('municipality', 'like', "%{$value}%")
-                    ->orWhere('province', 'like', "%{$value}%")
-                    ->orWhere('barangay', 'like', "%{$value}%")
-                    ->orWhere('lgu_dromic_series_key', 'like', "%{$seriesSearch}%")
-                    ->orWhere('lgu_dromic_payload->incident_name', 'like', "%{$value}%")
-                    ->orWhere('lgu_dromic_payload->incident_type', 'like', "%{$value}%")))
-                ->when($validation, fn ($query, $value) => $query->where(
-                    $tab === 'requests' ? 'lgu_relief_validation_status' : 'lgu_dromic_validation_status',
-                    $value,
-                ))
-                ->when($submissionStatus, fn ($query, $value) => $query->where('lgu_report_status', $value))
-                ->when($classification, fn ($query, $value) => $query->where('lgu_dromic_report_classification', $value));
+            ->when($seriesKey, fn ($query, $value) => $query->where('lgu_dromic_series_key', $value))
+            ->when($search, fn ($query, $value) => $query->where(fn ($nested) => $nested
+                ->where('reference_number', 'like', "%{$value}%")
+                ->orWhere('lgu_relief_request_reference', 'like', "%{$value}%")
+                ->orWhere('requesting_agency', 'like', "%{$value}%")
+                ->orWhere('requester', 'like', "%{$value}%")
+                ->orWhere('municipality', 'like', "%{$value}%")
+                ->orWhere('province', 'like', "%{$value}%")
+                ->orWhere('barangay', 'like', "%{$value}%")
+                ->orWhere('lgu_dromic_series_key', 'like', "%{$seriesSearch}%")
+                ->orWhere('lgu_dromic_payload->incident_name', 'like', "%{$value}%")
+                ->orWhere('lgu_dromic_payload->incident_type', 'like', "%{$value}%")))
+            ->when($validation, fn ($query, $value) => $query->where(
+                $tab === 'requests' ? 'lgu_relief_validation_status' : 'lgu_dromic_validation_status',
+                $value,
+            ))
+            ->when($submissionStatus, fn ($query, $value) => $query->where('lgu_report_status', $value))
+            ->when($classification, fn ($query, $value) => $query->where('lgu_dromic_report_classification', $value));
         $metricRows = (clone $filteredQuery)->get();
         $reports = $filteredQuery
-                ->latest('created_at')
-                ->paginate(20)
-                ->withQueryString();
+            ->latest('created_at')
+            ->paginate(20)
+            ->withQueryString();
 
         $barangaysByLguCode = PsgcAddress::query()
             ->where('level', 'barangay')
@@ -169,6 +189,8 @@ class DromicReportController extends Controller
             ] : null,
             'seen_at' => $report->lgu_dromic_seen_at,
             'seen_by' => $report->lguDromicViewer?->name,
+            'acked_at' => $report->lgu_dromic_acked_at,
+            'acked_by' => $report->lguDromicAcker?->name,
             'relief_validation_status' => $report->lgu_relief_validation_status ?: ((bool) data_get($report->lgu_dromic_payload, 'has_relief_request') ? 'pending_review' : 'not_applicable'),
             'relief_validation_note' => $report->lgu_relief_review_note,
             'relief_validation_screenshots' => $report->lgu_relief_review_screenshots ?? [],
@@ -181,6 +203,8 @@ class DromicReportController extends Controller
             ] : null,
             'relief_seen_at' => $report->lgu_relief_seen_at,
             'relief_seen_by' => $report->lguReliefViewer?->name,
+            'relief_acked_at' => $report->lgu_relief_acked_at,
+            'relief_acked_by' => $report->lguReliefAcker?->name,
             'has_relief_request' => filled($report->lgu_relief_request_reference),
             'signed_document_versions' => $report->signedDocumentVersions
                 ->map(fn ($version): array => [
@@ -198,6 +222,10 @@ class DromicReportController extends Controller
             'lgu_signed_report_path' => $report->lgu_signed_report_path,
             'lgu_signed_request_path' => $report->lgu_signed_request_path,
             'last_reporter' => $report->requester ?: $report->lguSubmitter?->name,
+            'can_acknowledge_report' => $user->hasRole('Super Admin')
+                || ($user->hasRole('DRIMS') && (! $hasAssignedAor || $aorCoverage->coversRequest($user, $report, 'DRIMS'))),
+            'can_acknowledge_request' => $user->hasRole('Super Admin')
+                || ($user->hasRole('DRRS') && (! $hasAssignedAor || $aorCoverage->coversRequest($user, $report, 'DRRS'))),
         ];
         $reports->through($serializeReport);
 
@@ -590,7 +618,12 @@ class DromicReportController extends Controller
 
     public function store(Request $request, AuditLogger $audit, WorkflowNotificationService $workflowNotifications): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage dromic reports'), 403);
+        $user = $request->user();
+        abort_unless(
+            $user
+            && ($user->hasAnyRole(['Super Admin', 'DRIMS']) || $user->can('manage dromic reports')),
+            403,
+        );
 
         $data = $request->validate([
             'request_id' => ['required', 'exists:requests,id'],

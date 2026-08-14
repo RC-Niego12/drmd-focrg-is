@@ -4,10 +4,19 @@ import { useEffect, useRef, useState } from 'react';
 import LookerMultiSelect from '@/Components/LookerMultiSelect';
 import AppLayout, { Card, DataTable } from '@/Layouts/AppLayout';
 import DromicReportStatus, { CorrectedVersionMark, DromicAdvanceCopyMark, DromicSubmissionMark, DromicValidationMark, ReliefRequestMark, RequestSubmissionMark, RequestValidationMark, StatusLegend } from '@/Components/DromicReportStatus';
-import ReadonlyDromicReportModal from '@/Components/ReadonlyDromicReportModal';
+import ReadonlyDromicReportModal, { DromicEncodedReportBody } from '@/Components/ReadonlyDromicReportModal';
+import { DEFAULT_DOCUMENT_PREVIEW_ZOOM } from '@/Components/DocumentPreviewCanvas';
+import DocumentPreviewModal from '@/Components/DocumentPreviewModal';
 import SignedPdfPreview from '@/Components/SignedPdfPreview';
-import SystemTabs from '@/Components/SystemTabs';
+import PdfPreviewModal from '@/Components/PdfPreviewModal';
+import SectionTabs from '@/Components/SectionTabs';
 import { formatDate, formatDateTime } from '@/Utils/dateFormat';
+import {
+    coerceWholeQuantity,
+    formatWholeQuantity,
+    wholeQuantityInputValue,
+} from '@/Utils/wholeQuantity';
+import { listenRealtime } from '@/realtime';
 
 const DEFAULT_NOT_APPLICABLE_SECTIONS = [
     'related_incidents',
@@ -1308,7 +1317,13 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
     const [justificationAiMessage, setJustificationAiMessage] = useState('');
     const [justificationAiBusy, setJustificationAiBusy] = useState(false);
     const [validationNotice, setValidationNotice] = useState('');
+    const [responseLetterBusyId, setResponseLetterBusyId] = useState(null);
+    const [responseLetterNotice, setResponseLetterNotice] = useState('');
+    const [responseLetterPreview, setResponseLetterPreview] = useState({ open: false, title: '', subtitle: null, src: null });
+    const [draftPreviewOpen, setDraftPreviewOpen] = useState(false);
+    const [draftPreviewZoom, setDraftPreviewZoom] = useState(DEFAULT_DOCUMENT_PREVIEW_ZOOM);
     const [reportSearch, setReportSearch] = useState(reportFilters.search || '');
+    const realtimeReloadTimer = useRef(null);
     const activeReportTab = ['reports', 'requests'].includes(reportFilters.tab) ? reportFilters.tab : 'incidents';
     const summaryFiltersActive = Boolean(reportFilters.search || reportFilters.status || reportFilters.classification || reportFilters.validation || reportFilters.series_key);
     const openReportView = (overrides = {}) => {
@@ -1318,6 +1333,25 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
             search: reportSearch,
             ...overrides,
         }, { preserveState: true, preserveScroll: true, replace: true });
+    };
+    const acknowledgeResponseLetter = async (row, kind) => {
+        const letter = row?.dswd_response_letter;
+        const fniId = letter?.fni_request_id;
+        if (!fniId) return;
+        setResponseLetterBusyId(`${row.id}-${kind}`);
+        setResponseLetterNotice('');
+        try {
+            const response = await window.axios.post(`/lgu/response-letters/${fniId}/acknowledge`, { kind }, {
+                headers: { Accept: 'application/json' },
+                withXSRFToken: true,
+            });
+            setResponseLetterNotice(response.data?.message || 'Receipt acknowledged.');
+            router.reload({ only: ['requests'], preserveScroll: true });
+        } catch (error) {
+            setResponseLetterNotice(error?.response?.data?.message || 'Unable to acknowledge response letter receipt.');
+        } finally {
+            setResponseLetterBusyId(null);
+        }
     };
     const [pendingDeleteEcIndex, setPendingDeleteEcIndex] = useState(null);
     const [pendingDeleteOutsideEcIndex, setPendingDeleteOutsideEcIndex] = useState(null);
@@ -1359,9 +1393,10 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
         }));
     };
     const setRequestedFniQuantity = (fniLibraryItemId, requestedQuantity) => {
+        const next = coerceWholeQuantity(requestedQuantity, { min: 1 });
         form.setData('requested_fni_items', requestedFniItems.map((row) => (
             String(row.fni_library_item_id) === String(fniLibraryItemId)
-                ? { ...row, requested_quantity: requestedQuantity }
+                ? { ...row, requested_quantity: next === '' ? '' : next }
                 : row
         )));
     };
@@ -1494,6 +1529,34 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
         if (correction) openDraftReport(correction);
     }, [flash.correction_draft_id, correctionDraft?.id]);
 
+    useEffect(() => {
+        const reloadFniProcessing = (payload = {}) => {
+            const lguPsgc = String(lguProfile?.psgc_code || '');
+            const payloadPsgc = String(payload.lgu_psgc_code || '');
+
+            // Events are user-room scoped to concerned LGU recipients; PSGC is an extra guard.
+            if (lguPsgc && payloadPsgc && lguPsgc !== payloadPsgc) {
+                return;
+            }
+
+            window.clearTimeout(realtimeReloadTimer.current);
+            realtimeReloadTimer.current = window.setTimeout(() => {
+                router.reload({
+                    only: ['requests', 'requestDashboard'],
+                    preserveScroll: true,
+                    preserveState: true,
+                });
+            }, 350);
+        };
+
+        const stop = listenRealtime('lgu.fni.processing.updated', reloadFniProcessing);
+
+        return () => {
+            stop();
+            window.clearTimeout(realtimeReloadTimer.current);
+        };
+    }, [lguProfile?.psgc_code]);
+
     const uploadSignedCopies = () => {
         if (!previewReportId || (!signedReport && !signedRequest)) return;
         const data = new FormData();
@@ -1558,9 +1621,20 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
     const notApplicableSections = Array.isArray(form.data.not_applicable_sections) ? form.data.not_applicable_sections : [];
     const isSectionNotApplicable = (key) => key !== 'response_actions' && notApplicableSections.includes(key);
     const toggleSectionNotApplicable = (key) => {
-        const next = isSectionNotApplicable(key)
-            ? notApplicableSections.filter((sectionKey) => sectionKey !== key)
-            : [...notApplicableSections, key];
+        const turningOn = !isSectionNotApplicable(key);
+        const next = turningOn
+            ? [...notApplicableSections, key]
+            : notApplicableSections.filter((sectionKey) => sectionKey !== key);
+
+        if (key === 'advisory_screenshots' && turningOn) {
+            form.setData((current) => ({
+                ...current,
+                not_applicable_sections: next,
+                official_advisory_rows: [],
+            }));
+            setAdvisoryExtractionBusy(false);
+            return;
+        }
 
         form.setData('not_applicable_sections', next);
     };
@@ -2739,11 +2813,12 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
         form.data.incident_specific_details,
     ].filter(Boolean).join(' ').toLocaleLowerCase();
     const advisoryScreenshotsApplicable = /(typhoon|tropical|storm|weather|rain|flood|thunder|monsoon|low pressure|lpa|earthquake|seismic|volcan|tsunami)/i.test(advisoryIncidentText);
-    const advisoryScreenshotStatus = !advisoryScreenshotsApplicable
+    const advisoryScreenshotsNa = isSectionNotApplicable('advisory_screenshots');
+    const advisoryScreenshotStatus = advisoryScreenshotsNa || !advisoryScreenshotsApplicable
         ? 'na'
         : advisoryExtractionBusy
             ? 'locked'
-            : (advisoryScreenshotRows.length > 0 && officialAdvisoryIssues.length === 0 ? 'complete' : 'needs');
+            : (officialAdvisoryIssues.length === 0 ? 'complete' : 'needs');
     const sectionProgressItems = [
         {
             label: 'INCIDENT INFORMATION',
@@ -2882,6 +2957,19 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
             required: withReliefRequest,
         },
         {
+            label: 'ADVISORY SCREENSHOTS',
+            anchor: progressAnchorFor('advisory_screenshots'),
+            status: advisoryScreenshotStatus,
+            summary: advisoryScreenshotsNa
+                ? 'Marked not applicable by the encoder.'
+                : !advisoryScreenshotsApplicable
+                    ? 'Not required for this incident type. Mark N/A to persist that choice for Situation Overview AI.'
+                    : (advisoryScreenshotRows.length
+                        ? `${formatNumber(advisoryScreenshotRows.length)} advisory screenshot/text source/s encoded.`
+                        : 'Optional for weather/earthquake reports. Paste screenshots when available, or mark N/A if none apply.'),
+            required: false,
+        },
+        {
             label: 'SITUATION OVERVIEW',
             anchor: progressAnchorFor('situation_overview'),
             status: String(form.data.narrative || '').trim() ? 'complete' : 'needs',
@@ -2895,7 +2983,7 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
     const progressPercent = progressEntries.length ? Math.round((completedProgress / progressEntries.length) * 100) : 0;
     const aiPrerequisiteEntries = flattenProgressItems(sectionProgressItems)
         .filter((item) => item.label !== 'SITUATION OVERVIEW');
-    const advisoryScreenshotsReady = officialAdvisoryIssues.length === 0 && !advisoryExtractionBusy;
+    const advisoryScreenshotsReady = advisoryScreenshotsNa || (!advisoryExtractionBusy && officialAdvisoryIssues.length === 0);
     const situationOverviewAiReady = aiPrerequisiteEntries.length > 0
         && aiPrerequisiteEntries.every((item) => item.status === 'complete' || item.status === 'na')
         && advisoryScreenshotsReady;
@@ -2954,12 +3042,20 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                 specific_details: form.data.incident_specific_details,
                 summary: form.data.incident_summary,
                 location: [form.data.municipality, form.data.province].filter(Boolean).join(', '),
+                affected_barangays: selectedBarangays,
                 affected_barangay_count: selectedBarangays.length,
+                occurrence_datetime: formatNarrativeDate(form.data.occurrence_started_at || form.data.incident_date),
                 occurrence_date: formatNarrativeDate(String(form.data.occurrence_started_at || form.data.incident_date || '').slice(0, 10)),
                 status: form.data.incident_status,
                 ended_date: form.data.incident_status === 'Ended'
                     ? formatNarrativeDate(String(form.data.incident_ended_at || '').slice(0, 10))
                     : null,
+                ended_datetime: form.data.incident_status === 'Ended'
+                    ? formatNarrativeDate(form.data.incident_ended_at)
+                    : null,
+                ...(String(form.data.incident_type || '').toLowerCase().includes('fire') && form.data.incident_status === 'Ended' && form.data.incident_ended_at
+                    ? { fireout: formatNarrativeDate(form.data.incident_ended_at) }
+                    : {}),
             },
             affected_population_totals: {
                 families: formatNumber(totalAffectedFamilies || form.data.affected_families),
@@ -2996,9 +3092,16 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
             calamity_declarations: compactNarrativeRows(calamityDeclarationRows),
             preemptive_evacuation: compactNarrativeRows(preemptiveEvacuationRows),
             lgu_response_actions: compactNarrativeRows(responseActionRows),
-            official_agency_advisories: compactFactRows(officialAdvisoryRows.map((advisory) => Object.fromEntries(
-                Object.entries(advisory).filter(([field]) => !['screenshot_data_url', 'screenshot_name', 'pasted_text'].includes(field)),
-            ))),
+            official_agency_advisories_not_applicable: advisoryScreenshotsNa
+                || (!advisoryScreenshotsApplicable && officialAdvisoryRows.length === 0),
+            official_agency_advisories_status: (advisoryScreenshotsNa || (!advisoryScreenshotsApplicable && officialAdvisoryRows.length === 0))
+                ? 'not_applicable'
+                : (officialAdvisoryRows.length > 0 ? 'supplied' : 'none_supplied'),
+            official_agency_advisories: (advisoryScreenshotsNa || (!advisoryScreenshotsApplicable && officialAdvisoryRows.length === 0))
+                ? []
+                : compactFactRows(officialAdvisoryRows.map((advisory) => Object.fromEntries(
+                    Object.entries(advisory).filter(([field]) => !['screenshot_data_url', 'screenshot_name', 'pasted_text'].includes(field)),
+                ))),
             cluster_gaps_and_actions: compactNarrativeRows(clusterGapRows),
             assistance_provided: compactNarrativeRows(assistanceRows),
             identified_needs: form.data.needs,
@@ -3184,8 +3287,8 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                 return;
             }
 
-            if (officialAdvisoryIssues.length) {
-                setValidationNotice('Review the selected official agency source. Complete its agency, advisory title, verified excerpt, and official URL, or remove the incomplete source.');
+            if (!isSectionNotApplicable('advisory_screenshots') && officialAdvisoryIssues.length) {
+                setValidationNotice('Review the selected official agency source. Complete its agency, advisory title, verified excerpt, and official URL, remove the incomplete source, or mark PAGASA / PHIVOLCS Advisory Screenshots as N/A.');
                 return;
             }
 
@@ -3384,25 +3487,28 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                     </div>
                 )}
 
-                <Card>
-                    <div className="border-b border-slate-200 p-5 dark:border-zinc-800">
+                <Card className="p-0">
+                    <div className="px-5 pt-5">
                         <h2 className="font-black">{isProvince ? 'City / Municipal LGU DROMIC reports' : 'Status of DROMIC / Situational Reports'}</h2>
                         <p className="mt-1 text-sm text-slate-500">
                             {isProvince
                                 ? 'Open individual reports or use the figures above for quick provincial monitoring.'
                                 : 'Review incidents first, then open their complete reporting history. DROMIC / SitRep validation and request-letter processing remain separate.'}
                         </p>
-                        <SystemTabs
-                            active={activeReportTab}
-                            ariaLabel="DROMIC report views"
-                            className="mt-4 w-fit"
-                            items={[
-                                { key: 'incidents', label: 'All Incidents', icon: ListChecks, href: '/lgu/dromic-sitrep?tab=incidents', preserveState: true },
-                                { key: 'reports', label: 'All Reports', icon: FileCheck2, title: 'View all reports', onClick: () => openReportView({ tab: 'reports', series_key: '', request_letter: '' }) },
-                                { key: 'requests', label: 'Requests', icon: FilePlus2, title: 'View request letters for relief augmentation', onClick: () => router.get('/lgu/dromic-sitrep', { tab: 'requests' }, { preserveScroll: true, preserveState: true }) },
-                            ]}
-                        />
                     </div>
+                    <SectionTabs
+                        label="DROMIC Report Views"
+                        appearance="framed"
+                        className="mt-4"
+                        contentClassName="px-5"
+                        value={activeReportTab}
+                        ariaLabel="DROMIC report views"
+                        tabs={[
+                            { id: 'incidents', label: 'All Incidents', icon: ListChecks, href: '/lgu/dromic-sitrep?tab=incidents', preserveState: true },
+                            { id: 'reports', label: 'All Reports', icon: FileCheck2, title: 'View all reports', onClick: () => openReportView({ tab: 'reports', series_key: '', request_letter: '' }) },
+                            { id: 'requests', label: 'Requests', icon: FilePlus2, title: 'View request letters for relief augmentation', onClick: () => router.get('/lgu/dromic-sitrep', { tab: 'requests' }, { preserveScroll: true, preserveState: true }) },
+                        ]}
+                    />
                     {activeReportTab === 'incidents' && (
                         <>
                             <form onSubmit={(event) => { event.preventDefault(); router.get('/lgu/dromic-sitrep', { tab: 'incidents', search: reportSearch }, { preserveScroll: true, preserveState: true, replace: true }); }} className="flex flex-col gap-3 border-b border-slate-200 bg-slate-50 p-4 md:flex-row dark:border-zinc-800 dark:bg-zinc-950/40">
@@ -3456,9 +3562,12 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                         </div>
                     </form>
                     <StatusLegend kind={activeReportTab === 'requests' ? 'request' : 'report'} />
+                    {responseLetterNotice && activeReportTab === 'requests' && (
+                        <p className="border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-xs font-bold text-emerald-900">{responseLetterNotice}</p>
+                    )}
                     <DataTable columns={isProvince
-                        ? [activeReportTab === 'requests' ? 'Request Code' : 'Report Title', 'Submitting LGU', 'Occurrence', 'Affected Areas', 'Last Reporter', ...(activeReportTab === 'reports' ? ['Advance Copy'] : []), activeReportTab === 'requests' ? 'Signed Request' : 'Signed Copy', activeReportTab === 'requests' ? 'DRRS Validation' : 'DROMIC Validation', ...(activeReportTab === 'requests' ? ['FNI Processing'] : []), 'Corrected Version', 'Last Updated', 'PDF']
-                        : [activeReportTab === 'requests' ? 'Request Code' : 'Report Title', 'Occurrence', 'Affected Areas', 'Last Reporter', ...(activeReportTab === 'reports' ? ['Advance Copy'] : []), activeReportTab === 'requests' ? 'Signed Request' : 'Signed Copy', activeReportTab === 'requests' ? 'DRRS Validation' : 'DROMIC Validation', ...(activeReportTab === 'requests' ? ['FNI Processing'] : []), 'Corrected Version', 'Last Updated', 'Action']} rows={(requests?.data ?? []).map((row) => (
+                        ? [activeReportTab === 'requests' ? 'Request Code' : 'Report Title', 'Submitting LGU', 'Occurrence', 'Affected Areas', 'Last Reporter', ...(activeReportTab === 'reports' ? ['Advance Copy'] : []), activeReportTab === 'requests' ? 'Signed Request' : 'Signed Copy', activeReportTab === 'requests' ? 'DRRS Validation' : 'DROMIC Validation', ...(activeReportTab === 'requests' ? ['FNI Processing'] : []), 'Corrected Version', 'Last Updated', ...(activeReportTab === 'requests' ? ['DSWD Response Letter'] : []), 'PDF']
+                        : [activeReportTab === 'requests' ? 'Request Code' : 'Report Title', 'Occurrence', 'Affected Areas', 'Last Reporter', ...(activeReportTab === 'reports' ? ['Advance Copy'] : []), activeReportTab === 'requests' ? 'Signed Request' : 'Signed Copy', activeReportTab === 'requests' ? 'DRRS Validation' : 'DROMIC Validation', ...(activeReportTab === 'requests' ? ['FNI Processing'] : []), 'Corrected Version', 'Last Updated', ...(activeReportTab === 'requests' ? ['DSWD Response Letter'] : []), 'Action']} rows={(requests?.data ?? []).map((row) => (
                         <tr key={row.id} className={(activeReportTab === 'requests' ? row.lgu_relief_validation_status : row.lgu_dromic_validation_status) === 'needs_lgu_action' ? 'bg-rose-50 dark:bg-rose-950/20' : (activeReportTab === 'requests' ? row.lgu_relief_validation_status : row.lgu_dromic_validation_status) === 'validated_no_findings' ? 'bg-emerald-50/40 dark:bg-emerald-950/10' : ''}>
                             <td className="w-[430px] min-w-[380px] max-w-[430px] px-4 py-3">
                                 <p className="whitespace-normal break-words font-black leading-5">{activeReportTab === 'requests' ? row.lgu_relief_request_reference : row.report_title}</p>
@@ -3479,10 +3588,29 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                 ? <RequestValidationMark hasSignedRequest={Boolean(row.lgu_signed_request_path)} validationStatus={row.lgu_relief_validation_status} />
                                 : <DromicValidationMark submissionStatus={row.lgu_report_status || row.status || 'draft'} validationStatus={row.lgu_dromic_validation_status} hasSignedReport={Boolean(row.lgu_signed_report_path)} />}</td>
                             {activeReportTab === 'requests' && <td className="min-w-[160px] px-4 py-3">{row.relief_augmentation_request
-                                ? <div><p className="font-black text-emerald-800">{row.relief_augmentation_request.reference_number}</p><p className="mt-1 text-xs font-bold capitalize text-slate-500">{String(row.relief_augmentation_request.status || '').replaceAll('_', ' ')}</p></div>
+                                ? <div><p className="font-black text-emerald-800">{row.relief_augmentation_request.reference_number}</p><p className="mt-1 text-xs font-bold text-slate-500">{fniProcessingLabel(row)}</p></div>
                                 : <span className="text-xs text-slate-400">Starts after DRRS validation</span>}</td>}
                             <td className="w-24 px-3 py-3 text-center"><CorrectedVersionMark corrected={Boolean(row.lgu_correction_of_id) && (activeReportTab === 'requests' ? row.lgu_correction_target === 'request' && Boolean(row.lgu_signed_request_path) : row.lgu_correction_target !== 'request' && ['advance_submitted', 'submitted'].includes(row.lgu_report_status || row.status))} kind={activeReportTab === 'requests' ? 'request' : 'report'} validationStatus={activeReportTab === 'requests' ? row.lgu_relief_validation_status : row.lgu_dromic_validation_status} /></td>
                             <td className="whitespace-nowrap px-4 py-3">{formatDateTime(row.updated_at)}</td>
+                            {activeReportTab === 'requests' && (
+                                <td className="min-w-[220px] px-4 py-3">
+                                    <DswdResponseLetterCell
+                                        row={row}
+                                        busyId={responseLetterBusyId}
+                                        onAcknowledge={acknowledgeResponseLetter}
+                                        onView={(kind, letter) => {
+                                            const src = kind === 'advance' ? letter?.advance?.view_url : letter?.signed?.view_url;
+                                            if (!src) return;
+                                            setResponseLetterPreview({
+                                                open: true,
+                                                title: kind === 'advance' ? 'Advance Response Letter' : 'Signed Response Letter',
+                                                subtitle: letter?.reference_number || row.reference_number || row.request_code,
+                                                src,
+                                            });
+                                        }}
+                                    />
+                                </td>
+                            )}
                             <td className="whitespace-nowrap px-4 py-3">
                                 {isProvince ? (
                                     <a title="Open report PDF" aria-label="Open report PDF" href={`/lgu/dromic-sitrep/${row.id}/pdf?inline=1`} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-brand-200 bg-brand-50 text-brand-700"><Download className="h-4 w-4" /></a>
@@ -3535,18 +3663,18 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
             </div>
 
             {open && (
-                <div className="fixed inset-0 z-[80] flex items-start justify-center overflow-x-hidden overflow-y-auto bg-slate-950/60 p-2 py-3 backdrop-blur-sm">
-                    <form id="lgu-dromic-report-form" onSubmit={submit} className="dromic-fit-modal min-w-0 w-full max-w-[calc(100vw-1rem)] overflow-hidden rounded-lg bg-white shadow-2xl dark:bg-zinc-900">
+                <div className="fixed inset-0 z-[80] flex overflow-hidden bg-slate-950/60 backdrop-blur-sm">
+                    <form id="lgu-dromic-report-form" onSubmit={submit} className="dromic-fit-modal flex h-dvh min-w-0 w-screen max-w-none flex-col overflow-hidden bg-white shadow-2xl dark:bg-zinc-900">
                         <style>{`
                             .dromic-fit-modal,
                             .dromic-fit-modal * {
                                 box-sizing: border-box;
                             }
                             .dromic-fit-modal {
-                                inline-size: calc(100vw - 1rem) !important;
-                                width: calc(100vw - 1rem) !important;
-                                max-inline-size: calc(100vw - 1rem) !important;
-                                max-width: calc(100vw - 1rem) !important;
+                                inline-size: 100vw !important;
+                                width: 100vw !important;
+                                max-inline-size: none !important;
+                                max-width: none !important;
                                 overflow-x: clip;
                                 contain: inline-size;
                             }
@@ -3777,7 +3905,7 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                 <button type="button" onClick={() => setOpen(false)} className="shrink-0 rounded-md border px-3 py-2 text-sm font-bold">Close</button>
                             </div>
                         </div>
-                        <div className="dromic-modal-body min-w-0 max-w-full max-h-[calc(100vh-11rem)] overflow-x-hidden overflow-y-auto p-3 sm:p-5">
+                        <div className="dromic-modal-body min-h-0 min-w-0 max-w-full flex-1 overflow-x-hidden overflow-y-auto p-3 sm:p-5">
                             <div id="dromic-section-incident-information" className="dromic-section-anchor min-w-0 rounded-lg border border-slate-200 p-4 dark:border-zinc-800">
                                 <p className="mb-3 text-lg font-black uppercase tracking-wide text-emerald-700">Incident Information</p>
                                 <div className="grid min-w-0 gap-4 lg:grid-cols-3">
@@ -4170,12 +4298,13 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                                                     </div>
                                                                     <div>
                                                                         <input
-                                                                            type="number"
+                                                                            type="text"
                                                                             min="1"
-                                                                            step="1"
                                                                             inputMode="numeric"
+                                                                            pattern="[0-9]*"
                                                                             className="w-full"
-                                                                            value={row.requested_quantity}
+                                                                            value={wholeQuantityInputValue(row.requested_quantity)}
+                                                                            onInput={(event) => setRequestedFniQuantity(row.fni_library_item_id, event.target.value)}
                                                                             onChange={(event) => setRequestedFniQuantity(row.fni_library_item_id, event.target.value)}
                                                                             placeholder={item?.unit_of_measure ? `No. of ${item.unit_of_measure}` : 'Number of items'}
                                                                         />
@@ -4199,6 +4328,8 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                     incidentDate={form.data.occurrence_started_at || form.data.incident_date || defaultIncidentDate}
                                     province={form.data.province || provinceFromProfile()}
                                     municipality={form.data.municipality || lguProfile?.name}
+                                    isNa={isSectionNotApplicable('advisory_screenshots')}
+                                    toggleNa={() => toggleSectionNotApplicable('advisory_screenshots')}
                                     onExtractionStateChange={setAdvisoryExtractionBusy}
                                 />
 
@@ -4247,6 +4378,17 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                     </div>
                                 )}
                             </div>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setDraftPreviewZoom(1);
+                                    setDraftPreviewOpen(true);
+                                }}
+                                className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-black text-slate-700"
+                                title="Preview encoded DROMIC / SitRep from the values currently in this form"
+                            >
+                                <Eye className="h-4 w-4" /> Preview Report
+                            </button>
                             <button type="button" onClick={() => setOpen(false)} className="rounded-md border px-4 py-2 text-sm font-bold">Cancel</button>
                             <button type="submit" name="submission_status" value="draft" disabled={form.processing} className="rounded-md border border-amber-200 bg-amber-50 px-5 py-2 text-sm font-black text-amber-900 hover:bg-amber-100 disabled:opacity-60 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
                                 {form.processing ? 'Saving...' : 'Save as Draft'}
@@ -4327,6 +4469,33 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                             onConfirm={() => applyZeroNowDisaggregation(pendingZeroNowEcIndex)}
                         />
                     )}
+                    <DocumentPreviewModal
+                        open={draftPreviewOpen}
+                        onClose={() => setDraftPreviewOpen(false)}
+                        zIndexClass="z-[195]"
+                        eyebrow="Document preview"
+                        badge="Draft / local preview"
+                        title="DROMIC / Situational Report"
+                        subtitle="Paper preview · live values from this encoding form (not a signed PDF)"
+                        notice="Draft preview only — finalize and generate the PDF to print or download the official advance copy."
+                        zoom={draftPreviewZoom}
+                        onZoomChange={setDraftPreviewZoom}
+                        paperWidth="210mm"
+                    >
+                        <DromicEncodedReportBody
+                            report={{
+                                reference_number: editingReport?.reference_number || 'Draft DROMIC / SitRep',
+                                requesting_agency: form.data.requesting_lgu || lguProfile?.name,
+                                municipality: form.data.municipality || lguProfile?.name,
+                                province: form.data.province || lguProfile?.province,
+                                requester: form.data.requester_name || form.data.dromic_reporter,
+                                affected_families: form.data.affected_families,
+                                affected_persons: form.data.affected_persons,
+                                lgu_dromic_report_number: editingReport?.lgu_dromic_report_number || 1,
+                                lgu_dromic_payload: form.data,
+                            }}
+                        />
+                    </DocumentPreviewModal>
                 </div>
             )}
             {closedReportNowWarningOpen && (
@@ -4434,13 +4603,17 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                             </div>
                         </div>
                         {previewDocumentKind === 'report' && !previewControlsCollapsed && <div className="shrink-0 border-b bg-white px-4 py-3 dark:bg-zinc-900">
-                            <SystemTabs
-                                active={previewContentTab}
+                            <SectionTabs
+                                appearance="plain"
+                                value={previewContentTab}
+                                onChange={(tab) => {
+                                    setPreviewContentTab(tab);
+                                    if (tab === 'narrative') setReportCopyTab('advance');
+                                }}
                                 ariaLabel="Report preview format"
-                                className="w-fit"
-                                items={[
-                                    { key: 'narrative', label: 'Narrative Report', icon: FileCheck2, onClick: () => { setPreviewContentTab('narrative'); setReportCopyTab('advance'); } },
-                                    { key: 'encoded', label: 'Encoded Data', icon: ListChecks, onClick: () => setPreviewContentTab('encoded') },
+                                tabs={[
+                                    { id: 'narrative', label: 'Narrative Report', icon: FileCheck2 },
+                                    { id: 'encoded', label: 'Encoded Data', icon: ListChecks },
                                 ]}
                             />
                         </div>}
@@ -4466,13 +4639,14 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                             ) : previewMode === 'incident' && bothDocumentsValidated ? (
                                 <div className="flex min-h-0 flex-col bg-slate-100">
                                     {!previewControlsCollapsed && <div className="shrink-0 border-b bg-white p-3 dark:bg-zinc-900">
-                                        <SystemTabs
-                                            active={combinedPreviewTab}
+                                        <SectionTabs
+                                            appearance="plain"
+                                            value={combinedPreviewTab}
+                                            onChange={setCombinedPreviewTab}
                                             ariaLabel="Incident document preview"
-                                            className="w-fit"
-                                            items={[
-                                                { key: 'request', label: 'Request Letter', icon: FilePlus2, onClick: () => setCombinedPreviewTab('request') },
-                                                { key: 'report', label: 'DROMIC / SitRep', icon: FileCheck2, onClick: () => setCombinedPreviewTab('report') },
+                                            tabs={[
+                                                { id: 'request', label: 'Request Letter', icon: FilePlus2 },
+                                                { id: 'report', label: 'DROMIC / SitRep', icon: FileCheck2 },
                                             ]}
                                         />
                                     </div>}
@@ -4493,14 +4667,15 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                             ) : <div className="flex min-h-0 flex-col bg-slate-100">
                                 {previewReport?.lgu_report_status === 'submitted' && previewReport?.lgu_signed_report_path && !previewControlsCollapsed && (
                                     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-white p-3 dark:bg-zinc-900">
-                                        <span className="mr-1 text-[10px] font-black uppercase tracking-wide text-slate-500">Document copy:</span>
-                                        <SystemTabs
-                                            active={reportCopyTab}
+                                        <SectionTabs
+                                            label="Document copy"
+                                            appearance="plain"
+                                            value={reportCopyTab}
+                                            onChange={setReportCopyTab}
                                             ariaLabel="Document copy"
-                                            subtle
-                                            items={[
-                                                { key: 'advance', label: 'Advance Copy', icon: FileCheck2, title: 'View the advance copy generated from the encoded report data', onClick: () => setReportCopyTab('advance') },
-                                                { key: 'signed', label: 'Signed Copy', icon: UploadCloud, title: 'View the signed PDF submitted by the LGU', onClick: () => setReportCopyTab('signed') },
+                                            tabs={[
+                                                { id: 'advance', label: 'Advance Copy', icon: FileCheck2, title: 'View the advance copy generated from the encoded report data' },
+                                                { id: 'signed', label: 'Signed Copy', icon: UploadCloud, title: 'View the signed PDF submitted by the LGU' },
                                             ]}
                                         />
                                     </div>
@@ -4576,6 +4751,13 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
             )}
             {historyPreview && <SignedDocumentHistoryModal row={historyPreview.row} kind={historyPreview.kind} onClose={() => setHistoryPreview(null)} />}
             {revisionPreview && <RevisionHistoryModal row={revisionPreview.row} kind={revisionPreview.kind} onClose={() => setRevisionPreview(null)} />}
+            <PdfPreviewModal
+                open={responseLetterPreview.open}
+                title={responseLetterPreview.title}
+                subtitle={responseLetterPreview.subtitle}
+                src={responseLetterPreview.src}
+                onClose={() => setResponseLetterPreview({ open: false, title: '', subtitle: null, src: null })}
+            />
         </AppLayout>
     );
 }
@@ -4663,6 +4845,8 @@ function OfficialAdvisorySection({
     incidentDate = '',
     province = '',
     municipality = '',
+    isNa = false,
+    toggleNa = null,
     onExtractionStateChange = () => {},
 }) {
     const [busy, setBusy] = useState(false);
@@ -4892,21 +5076,28 @@ function OfficialAdvisorySection({
                 <div>
                     <p className="text-lg font-black uppercase tracking-wide text-emerald-700 dark:text-emerald-100">PAGASA / PHIVOLCS Advisory Screenshots</p>
                     <p className="mt-1 max-w-4xl text-sm leading-6 text-slate-600 dark:text-zinc-300">
-                        Paste up to five screenshots or copied advisory texts. Groq will use the readable incident information for the first paragraph of the Situation Overview.
+                        Paste up to five screenshots or copied advisory texts. Groq will use the readable incident information for the first paragraph of the Situation Overview. Mark N/A when no PAGASA/PHIVOLCS advisory applies.
                     </p>
                 </div>
-                {showLegacySourceTools && <div className="flex shrink-0 flex-wrap gap-2">
-                    <button type="button" onClick={lookup} disabled={busy} className="inline-flex items-center gap-2 rounded-md bg-brand-700 px-3 py-2 text-xs font-black text-white disabled:opacity-60">
-                        <Search className={`h-4 w-4 ${busy ? 'animate-pulse' : ''}`} />
-                        {busy ? 'Checking...' : 'Find official sources'}
-                    </button>
-                    <button type="button" onClick={() => addSource()} className="inline-flex items-center gap-2 rounded-md border border-emerald-300 bg-white px-3 py-2 text-xs font-black text-emerald-800 dark:border-emerald-900 dark:bg-zinc-950 dark:text-emerald-100">
-                        <Plus className="h-4 w-4" /> Add verified source
-                    </button>
-                </div>}
+                <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-2">
+                    {showLegacySourceTools && !isNa && (
+                        <>
+                            <button type="button" onClick={lookup} disabled={busy} className="inline-flex items-center gap-2 rounded-md bg-brand-700 px-3 py-2 text-xs font-black text-white disabled:opacity-60">
+                                <Search className={`h-4 w-4 ${busy ? 'animate-pulse' : ''}`} />
+                                {busy ? 'Checking...' : 'Find official sources'}
+                            </button>
+                            <button type="button" onClick={() => addSource()} className="inline-flex items-center gap-2 rounded-md border border-emerald-300 bg-white px-3 py-2 text-xs font-black text-emerald-800 dark:border-emerald-900 dark:bg-zinc-950 dark:text-emerald-100">
+                                <Plus className="h-4 w-4" /> Add verified source
+                            </button>
+                        </>
+                    )}
+                    {toggleNa && <NotApplicableToggle checked={isNa} onChange={toggleNa} />}
+                </div>
             </div>
 
-            {showLegacySourceTools && <div className="mt-4 rounded-lg border border-brand-200 bg-brand-50/50 p-4 dark:border-brand-900 dark:bg-brand-950/20">
+            {isNa ? <NotApplicableNotice section="PAGASA / PHIVOLCS Advisory Screenshots" /> : null}
+
+            {!isNa && showLegacySourceTools && <div className="mt-4 rounded-lg border border-brand-200 bg-brand-50/50 p-4 dark:border-brand-900 dark:bg-brand-950/20">
                 <label className="text-xs font-black uppercase tracking-wide text-brand-800 dark:text-brand-100">Import advisory from link</label>
                 <div className="mt-2 flex flex-col gap-2 md:flex-row">
                     <input
@@ -4932,6 +5123,7 @@ function OfficialAdvisorySection({
                 </p>
             </div>}
 
+            {!isNa && <>
             <div
                 role="button"
                 tabIndex={0}
@@ -5127,6 +5319,7 @@ function OfficialAdvisorySection({
                     })}
                 </div>
             )}
+            </>}
         </DromicSectionCard>
     );
 }
@@ -5251,7 +5444,7 @@ function RequestedFniPanel({ rows = [], row = null }) {
             {items.length ? items.map((item, index) => <div key={`${item.fni_library_item_id || item.item_name}-${index}`} className="rounded-lg border border-violet-100 bg-violet-50 p-3 dark:border-violet-900 dark:bg-violet-950/20">
                 <p className="font-black">{item.item_name || item.name || 'Requested FNI'}</p>
                 {item.brand_description && <p className="mt-1 text-xs text-slate-500">{item.brand_description}</p>}
-                <p className="mt-2 text-sm font-black text-violet-800">{Number(item.requested_quantity || 0).toLocaleString()} {item.unit_of_measure || item.unit || ''}</p>
+                <p className="mt-2 text-sm font-black text-violet-800">{formatWholeQuantity(item.requested_quantity, '0')} {item.unit_of_measure || item.unit || ''}</p>
             </div>) : <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-500">No requested FNI line items were encoded.</p>}
         </div>
     </aside>;
@@ -5314,6 +5507,90 @@ function DocumentActionNotice({ label, note }) {
     </div>;
 }
 
+function fniProcessingLabel(row) {
+    const letter = row?.dswd_response_letter;
+    if (letter?.processing_label) return letter.processing_label;
+    if (row?.relief_augmentation_request?.processing_label) return row.relief_augmentation_request.processing_label;
+
+    const hasAdvance = Boolean(letter?.advance?.available);
+    const hasSigned = Boolean(letter?.signed?.available);
+    if (hasSigned) return 'Acted';
+    if (hasAdvance) return 'Awaiting signed response letter';
+
+    const status = String(row?.relief_augmentation_request?.status || '').trim();
+    if (!status) return 'Pending';
+    return status.replaceAll('_', ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function DswdResponseLetterCell({ row, busyId, onAcknowledge, onView }) {
+    const letter = row?.dswd_response_letter;
+    if (!letter?.advance?.available && !letter?.signed?.available) {
+        return <span className="text-xs text-slate-400">Awaiting DSWD release</span>;
+    }
+
+    return (
+        <div className="flex min-w-[200px] flex-col gap-2">
+            {letter.advance?.available && (
+                <div className="rounded-md border border-amber-200 bg-amber-50 p-2 dark:border-amber-900 dark:bg-amber-950/30">
+                    <p className="text-[10px] font-black uppercase tracking-wide text-amber-800">Advance copy</p>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <button
+                            type="button"
+                            title="View advance response letter"
+                            onClick={() => onView?.('advance', letter)}
+                            className="inline-flex h-7 items-center gap-1 rounded border border-amber-300 bg-white px-2 text-[11px] font-black text-amber-900"
+                        >
+                            <Eye className="h-3.5 w-3.5" /> View
+                        </button>
+                        {letter.advance.acked_at ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5" />Acked {formatDateTime(letter.advance.acked_at)}</span>
+                        ) : (
+                            <button
+                                type="button"
+                                disabled={busyId === `${row.id}-advance`}
+                                onClick={() => onAcknowledge(row, 'advance')}
+                                className="inline-flex h-7 items-center gap-1 rounded bg-amber-600 px-2 text-[11px] font-black text-white disabled:opacity-60"
+                            >
+                                Acknowledge
+                            </button>
+                        )}
+                    </div>
+                </div>
+            )}
+            {letter.signed?.available && (
+                <div className="rounded-md border border-emerald-200 bg-emerald-50 p-2 dark:border-emerald-900 dark:bg-emerald-950/30">
+                    <p className="text-[10px] font-black uppercase tracking-wide text-emerald-800">Signed copy</p>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <button
+                            type="button"
+                            title="View signed response letter"
+                            onClick={() => onView?.('signed', letter)}
+                            className="inline-flex h-7 items-center gap-1 rounded border border-emerald-300 bg-white px-2 text-[11px] font-black text-emerald-900"
+                        >
+                            <Eye className="h-3.5 w-3.5" /> View
+                        </button>
+                        {letter.signed.acked_at ? (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5" />Acked {formatDateTime(letter.signed.acked_at)}</span>
+                        ) : (
+                            <button
+                                type="button"
+                                disabled={busyId === `${row.id}-signed`}
+                                onClick={() => onAcknowledge(row, 'signed')}
+                                className="inline-flex h-7 items-center gap-1 rounded bg-emerald-700 px-2 text-[11px] font-black text-white disabled:opacity-60"
+                            >
+                                Acknowledge
+                            </button>
+                        )}
+                    </div>
+                </div>
+            )}
+            {!letter.signed?.available && letter.advance?.available && (
+                <p className="text-[10px] font-semibold text-slate-500">Signed copy will follow after e-PIRMA routing.</p>
+            )}
+        </div>
+    );
+}
+
 function ReportStatusTracks({ row }) {
     return <DromicReportStatus
         submissionStatus={row.lgu_report_status || row.status || 'draft'}
@@ -5322,6 +5599,8 @@ function ReportStatusTracks({ row }) {
         correctionScope={row.lgu_dromic_correction_scope}
         seenAt={row.lgu_dromic_seen_at}
         viewerName={row.lgu_dromic_viewer?.name}
+        ackedAt={row.lgu_dromic_acked_at}
+        ackerName={row.lgu_dromic_acker?.name}
         reviewNote={row.lgu_dromic_review_note}
         reviewerName={row.lgu_dromic_reviewer?.name}
         reviewedAt={row.lgu_dromic_reviewed_at}
@@ -5413,7 +5692,9 @@ function RequestStatusTrack({ row }) {
         {validationStatus !== 'not_submitted' && <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-black uppercase ${validation[1]}`}><Icon className="h-3.5 w-3.5" />{validation[0]}</span>}
         {validationStatus === 'needs_lgu_action' && row.lgu_relief_correction_scope && <span className="rounded-full bg-rose-50 px-2 py-1 text-[10px] font-black uppercase text-rose-700 ring-1 ring-rose-200">Correction: {row.lgu_relief_correction_scope === 'both' ? 'Encoding + PDF' : row.lgu_relief_correction_scope === 'encoding' ? 'Encoded request entries' : 'PDF document'}</span>}
         {validationStatus === 'needs_lgu_action' && row.lgu_relief_review_note && <div className="mt-0.5 w-full max-w-[320px] rounded-lg border border-rose-200 bg-rose-50 p-2.5 text-rose-900 shadow-sm dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-100"><p className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wide"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />Required LGU correction</p><p className="mt-1 whitespace-normal text-xs font-semibold leading-5">{row.lgu_relief_review_note}</p></div>}
-        {row.lgu_relief_seen_at && <p className="flex w-full items-center gap-1 pt-0.5 text-[11px] font-bold text-sky-700"><Eye className="h-3.5 w-3.5 shrink-0" />Seen by {row.lgu_relief_viewer?.name || 'DRRS recipient'} · {formatDateTime(row.lgu_relief_seen_at)}</p>}
+        {row.lgu_relief_acked_at
+            ? <p className="flex w-full items-center gap-1 pt-0.5 text-[11px] font-bold text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5 shrink-0" />Acknowledged by {row.lgu_relief_acker?.name || row.lgu_relief_viewer?.name || 'DRRS recipient'} · {formatDateTime(row.lgu_relief_acked_at)}</p>
+            : (row.lgu_relief_seen_at && <p className="flex w-full items-center gap-1 pt-0.5 text-[11px] font-bold text-sky-700"><Eye className="h-3.5 w-3.5 shrink-0" />Seen by {row.lgu_relief_viewer?.name || 'DRRS recipient'} · {formatDateTime(row.lgu_relief_seen_at)}</p>)}
         {hasSignedRequest && <span className="inline-flex items-center gap-1 rounded-full bg-violet-100 px-2 py-1 text-xs font-black uppercase text-violet-800"><Send className="h-3.5 w-3.5" />{routing}</span>}
         {validationStatus !== 'needs_lgu_action' && row.lgu_relief_review_note && <p title={row.lgu_relief_review_note} className="line-clamp-2 max-w-[280px] text-xs font-semibold leading-5 text-slate-700 dark:text-zinc-200">{row.lgu_relief_review_note}</p>}
     </div>;

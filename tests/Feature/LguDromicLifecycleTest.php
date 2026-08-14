@@ -1,13 +1,17 @@
 <?php
 
+use App\Http\Controllers\LguDromicRequestController;
 use App\Models\AssistanceRequest;
 use App\Models\FniLibraryItem;
 use App\Models\User;
 use Database\Seeders\DatabaseSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Inertia\Testing\AssertableInertia as Assert;
+use Spatie\Permission\Models\Role;
+use Spatie\Permission\PermissionRegistrar;
 
 uses(RefreshDatabase::class);
 
@@ -869,7 +873,7 @@ it('renders the harmonized narrative report with template logos signatories orde
             ['title' => 'Second collage', 'data_url' => 'data:image/jpeg;base64,c2Vjb25kLWNvbGxhZ2U='],
         ],
     ]);
-    $report->setAttribute('lgu_submitted_to_dswd_at', \Illuminate\Support\Carbon::parse('2026-07-28 08:15:00'));
+    $report->setAttribute('lgu_submitted_to_dswd_at', Carbon::parse('2026-07-28 08:15:00'));
     $logo = 'data:image/png;base64,bG9nbw==';
     $html = view('documents.lgu-dromic', [
         'request' => $report->load('incident'),
@@ -1049,8 +1053,8 @@ it('uses barangay names in the report title only when one or two barangays are a
 });
 
 it('selects PDF orientation from the widest table that will actually be rendered', function (): void {
-    $controller = app(\App\Http\Controllers\LguDromicRequestController::class);
-    $orientation = new \ReflectionMethod($controller, 'dromicPdfOrientation');
+    $controller = app(LguDromicRequestController::class);
+    $orientation = new ReflectionMethod($controller, 'dromicPdfOrientation');
     $wideSections = [
         'inside_ec',
         'outside_ec',
@@ -1097,9 +1101,9 @@ it('selects PDF orientation from the widest table that will actually be rendered
 });
 
 it('requires completed past-tense response language in closed-report Situation Overviews', function (): void {
-    $controller = app(\App\Http\Controllers\LguDromicRequestController::class);
-    $promptMethod = new \ReflectionMethod($controller, 'situationOverviewSystemPrompt');
-    $correctionMethod = new \ReflectionMethod($controller, 'situationOverviewNeedsCorrection');
+    $controller = app(LguDromicRequestController::class);
+    $promptMethod = new ReflectionMethod($controller, 'situationOverviewSystemPrompt');
+    $correctionMethod = new ReflectionMethod($controller, 'situationOverviewNeedsCorrection');
     $prompt = $promptMethod->invoke($controller);
     $ongoingNarrative = implode("\n\n", [
         'The incident affected the municipality.',
@@ -1116,6 +1120,46 @@ it('requires completed past-tense response language in closed-report Situation O
             $ongoingNarrative,
             'Report Classification: terminal',
         ))->toBeTrue();
+});
+
+it('builds fire Situation Overview prompt rules with fireout, barangay names, and omitted PAGASA when N/A', function (): void {
+    $controller = app(LguDromicRequestController::class);
+    $promptMethod = new ReflectionMethod($controller, 'situationOverviewSystemPrompt');
+    $correctionMethod = new ReflectionMethod($controller, 'situationOverviewNeedsCorrection');
+    $profileMethod = new ReflectionMethod($controller, 'situationOverviewIncidentProfile');
+    $promptMethod->setAccessible(true);
+    $correctionMethod->setAccessible(true);
+    $profileMethod->setAccessible(true);
+
+    $fireFacts = [
+        'incident' => [
+            'type' => 'Fire Incident',
+            'affected_barangays' => ['San Juan'],
+            'status' => 'Ended',
+            'fireout' => '2 August 2026, 3:40 PM',
+        ],
+        'official_agency_advisories_status' => 'not_applicable',
+        'official_agency_advisories_not_applicable' => true,
+        'official_agency_advisories' => [],
+    ];
+    $prompt = $promptMethod->invoke($controller, $fireFacts);
+    $profile = $profileMethod->invoke($controller, $fireFacts);
+    $vagueNarrative = implode("\n\n", [
+        'A fire affected one barangay according to PAGASA.',
+        'Five families were affected.',
+        'The LGU conducted local validation.',
+        'The report presents the final validated situation.',
+    ]);
+    $factsString = 'Incident: '.json_encode($fireFacts['incident'])."\nOfficial Agency Advisories Status: not_applicable";
+
+    expect($profile['kind'])->toBe('fire')
+        ->and($profile['omit_warning_agencies'])->toBeTrue()
+        ->and($prompt)->toContain('This is a fire incident')
+        ->and($prompt)->toContain('fireout')
+        ->and($prompt)->toContain('actual name(s) of the affected barangay')
+        ->and($prompt)->toContain('never mention PAGASA or PHIVOLCS')
+        ->and($prompt)->not->toContain('Never name, list, or enumerate the affected barangays')
+        ->and($correctionMethod->invoke($controller, $vagueNarrative, $factsString, $fireFacts))->toBeTrue();
 });
 
 it('allows authorized DSWD users to fetch structured encoded report data without embedded image blobs', function (): void {
@@ -1191,6 +1235,7 @@ it('keeps unsubmitted final reports private and creates a separate DRRS request 
     $owner = User::where('email', 'superadmin@example.test')->firstOrFail();
     $drrs = User::where('email', 'drrs@example.test')->firstOrFail();
     $drims = User::where('email', 'drims@example.test')->firstOrFail();
+    $rros = User::where('email', 'rros@example.test')->firstOrFail();
     $drmdAa = User::where('email', 'drmd-aa@example.test')->firstOrFail();
     $chief = User::where('email', 'drmd-chief@example.test')->firstOrFail();
     $fniItem = FniLibraryItem::query()->create([
@@ -1295,6 +1340,10 @@ it('keeps unsubmitted final reports private and creates a separate DRRS request 
         ->assertSessionHasNoErrors();
 
     $reliefRequest = AssistanceRequest::where('source_lgu_dromic_request_id', $report->id)->firstOrFail();
+    $this->actingAs($rros)
+        ->get("/lgu/dromic-sitrep/{$report->id}/signed-copy/request")
+        ->assertOk()
+        ->assertHeader('content-type', 'application/pdf');
     $this->actingAs($drmdAa)
         ->get('/drmd-aa/requests')
         ->assertInertia(fn (Assert $page) => $page
@@ -1702,12 +1751,89 @@ it('records report and request-letter view receipts for the originating LGU', fu
     $this->actingAs($reviewer)
         ->patchJson("/lgu/dromic-sitrep/{$report->id}/document-viewed", ['kind' => 'report'])
         ->assertOk()
-        ->assertJsonPath('seen_by', $reviewer->name);
+        ->assertJsonPath('seen_by', $reviewer->name)
+        ->assertJsonPath('acked_by', $reviewer->name);
 
     $receipt = $report->fresh();
     expect($receipt->lgu_dromic_seen_at)->not->toBeNull()
         ->and($receipt->lgu_dromic_seen_by)->toBe($reviewer->id)
+        ->and($receipt->lgu_dromic_acked_at)->not->toBeNull()
+        ->and($receipt->lgu_dromic_acked_by)->toBe($reviewer->id)
         ->and($receipt->lgu_relief_seen_at)->toBeNull();
+});
+
+it('lets DRIMS view the advance-copy PDF and acknowledge receipt even after validation', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $owner = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $drims = User::where('email', 'drims@example.test')->firstOrFail();
+
+    $this->actingAs($owner)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload())
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+    $report = AssistanceRequest::where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+    $this->actingAs($owner)->post("/lgu/dromic-sitrep/{$report->id}/submit")->assertRedirect();
+
+    $this->actingAs($drims)
+        ->get("/lgu/dromic-sitrep/{$report->id}/pdf?inline=1")
+        ->assertOk()
+        ->assertHeader('content-type', 'application/pdf');
+
+    $this->actingAs($owner)->post("/lgu/dromic-sitrep/{$report->id}/signed-copies", [
+        'signed_report' => UploadedFile::fake()->create('signed-report.pdf', 100, 'application/pdf'),
+    ])->assertRedirect()->assertSessionHasNoErrors();
+
+    $this->actingAs($drims)
+        ->get("/lgu/dromic-sitrep/{$report->id}/pdf?inline=1")
+        ->assertOk()
+        ->assertHeader('content-type', 'application/pdf');
+    $this->actingAs($drims)
+        ->get("/lgu/dromic-sitrep/{$report->id}/signed-copy/report")
+        ->assertOk()
+        ->assertHeader('content-type', 'application/pdf');
+
+    $this->actingAs($drims)->patch("/dromic/lgu-reports/{$report->id}/validation", [
+        'validation_status' => 'validated_no_findings',
+        'review_note' => 'Advance and signed copies are clean.',
+    ])->assertRedirect()->assertSessionHasNoErrors();
+
+    $this->actingAs($drims)
+        ->patchJson("/lgu/dromic-sitrep/{$report->id}/document-viewed", ['kind' => 'report'])
+        ->assertOk()
+        ->assertJsonPath('acked_by', $drims->name);
+
+    expect($report->fresh()->lgu_dromic_acked_at)->not->toBeNull()
+        ->and($report->fresh()->lgu_dromic_acked_by)->toBe($drims->id)
+        ->and($report->fresh()->lgu_dromic_validation_status)->toBe('validated_no_findings');
+});
+
+it('lets DRIMS view advance PDFs by role even when permission sync is missing', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    $owner = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $drims = User::where('email', 'drims@example.test')->firstOrFail();
+
+    $drimsRole = Role::findByName('DRIMS', 'web');
+    $drimsRole->syncPermissions([]);
+    app(PermissionRegistrar::class)->forgetCachedPermissions();
+    $drims = $drims->fresh();
+    expect($drims->can('monitor requests'))->toBeFalse()
+        ->and($drims->hasRole('DRIMS'))->toBeTrue();
+
+    $this->actingAs($owner)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload())
+        ->assertRedirect();
+    $report = AssistanceRequest::where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+    $this->actingAs($owner)->post("/lgu/dromic-sitrep/{$report->id}/submit")->assertRedirect();
+
+    $this->actingAs($drims)
+        ->get("/lgu/dromic-sitrep/{$report->id}/pdf?inline=1")
+        ->assertOk()
+        ->assertHeader('content-type', 'application/pdf');
+    $this->actingAs($drims)
+        ->patchJson("/lgu/dromic-sitrep/{$report->id}/document-viewed", ['kind' => 'report'])
+        ->assertOk()
+        ->assertJsonPath('message', 'Report receipt acknowledged.');
 });
 
 it('separates DROMIC and relief document review permissions and locks each validated PDF', function (): void {

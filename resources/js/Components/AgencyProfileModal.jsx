@@ -42,7 +42,7 @@ export default function AgencyProfileModal({ user, onClose }) {
     ];
 
     return (
-        <div className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-slate-950/60 p-4 py-8 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-slate-950/60 p-4 py-8 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="Agency profile">
             <form onSubmit={submit} className="w-full max-w-4xl overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-950">
                 <header className="flex items-start justify-between border-b border-slate-200 bg-slate-50 p-5 dark:border-zinc-800 dark:bg-zinc-900">
                     <div>

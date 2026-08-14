@@ -1,9 +1,13 @@
 <?php
 
+use App\Console\Commands\DiagnoseEpirma;
 use App\Console\Commands\ImportWarehouseSheet;
+use App\Console\Commands\ReconcileInventoryBalances;
+use App\Console\Commands\RegisterEpirmaClient;
 use App\Console\Commands\RemindLguDromicSignedCopies;
 use App\Console\Commands\RemindLguRegionalAlertDeadlines;
-use App\Console\Commands\ReconcileInventoryBalances;
+use App\Console\Commands\SyncDispatchContacts;
+use App\Console\Commands\SyncRisData;
 use App\Console\Commands\TestMyPortalConnection;
 use App\Http\Middleware\HandleInertiaRequests;
 use Illuminate\Foundation\Application;
@@ -22,9 +26,13 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withCommands([
         ImportWarehouseSheet::class,
         ReconcileInventoryBalances::class,
+        DiagnoseEpirma::class,
+        RegisterEpirmaClient::class,
         RemindLguDromicSignedCopies::class,
         RemindLguRegionalAlertDeadlines::class,
         TestMyPortalConnection::class,
+        SyncRisData::class,
+        SyncDispatchContacts::class,
     ])
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->validateCsrfTokens(except: [

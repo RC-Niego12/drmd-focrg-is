@@ -8,7 +8,14 @@ class InventoryItemRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()?->can('manage inventory') ?? false;
+        $user = $this->user();
+
+        if (! $user) {
+            return false;
+        }
+
+        return $user->hasAnyRole(['Super Admin', 'RROS', 'RROS AA'])
+            || $user->can('manage inventory');
     }
 
     public function rules(): array

@@ -7,7 +7,7 @@ import { AlertTriangle, BarChart3, CalendarClock, CheckCircle2, ClipboardList, E
 import { useMemo, useState } from 'react';
 import AppLayout, { Card, DataTable, ExportableCard, TableActionButton } from '@/Layouts/AppLayout';
 import NearExpiryMonthSummary from '@/Components/NearExpiryMonthSummary';
-import SystemTabs from '@/Components/SystemTabs';
+import SectionTabs from '@/Components/SectionTabs';
 
 const number = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const peso = (value) => `₱${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -16,7 +16,7 @@ const chartColors = ['#3b82f6', '#f97316', '#a855f7', '#9dbb4f', '#2db6c4'];
 const chartHoverColors = ['#2563eb', '#ea580c', '#9333ea', '#82983f', '#0891b2'];
 
 export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptions = {} }) {
-    const isRros = (usePage().props.auth.user?.roles ?? []).includes('RROS');
+    const isRros = (usePage().props.auth.user?.roles ?? []).some((role) => ['RROS', 'RROS AA'].includes(role));
     const [tab, setTab] = useState('expiry');
     const [showFilters, setShowFilters] = useState(false);
     const [filters, setFilters] = useState({ q: '', category: [], item: [], brand: [], warehouse: [], status: [] });
@@ -95,13 +95,15 @@ export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptio
 
             <Card id="near-expiry-filters" className="mt-6 scroll-mt-28">
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                    <SystemTabs
-                        active={tab}
+                    <SectionTabs
+                        appearance="plain"
+                        value={tab}
+                        onChange={setTab}
                         ariaLabel="Near-expiry views"
-                        items={[
-                            { key: 'expiry', label: 'Expiry', onClick: () => setTab('expiry') },
-                            { key: 'ageing', label: 'Ageing', onClick: () => setTab('ageing') },
-                            { key: 'plans', label: 'Distribution Plan', onClick: () => setTab('plans') },
+                        tabs={[
+                            { id: 'expiry', label: 'Expiry' },
+                            { id: 'ageing', label: 'Ageing' },
+                            { id: 'plans', label: 'Distribution Plan' },
                         ]}
                     />
                     <div className="flex flex-col gap-2 sm:flex-row">

@@ -26,9 +26,10 @@ class DashboardController extends Controller
         $user = request()->user();
         $role = request()->attributes->get('dashboard_role_override') ?: $this->dashboardRole($user);
         $isSuperAdmin = $role === 'Super Admin';
-        $isRros = $role === 'RROS';
+        $isRros = in_array($role, ['RROS', 'RROS AA'], true);
         $isDrrs = $role === 'DRRS';
         $isDrmdAa = $role === 'DRMD AA';
+        $isDrrsAa = $role === 'DRRS AA';
         $isDrims = $role === 'DRIMS';
         $isFinancialAnalyst = $role === 'DRMD Financial Analyst';
         $isLgu = $user->hasRole('LGU')
@@ -37,7 +38,7 @@ class DashboardController extends Controller
             || filled($user->lgu_name);
 
         if (! request()->attributes->has('dashboard_role_override')
-            && ($isDrmdAa || $isDrims || $isDrrs || $isFinancialAnalyst || $isLgu)) {
+            && ($isDrmdAa || $isDrrsAa || $isDrims || $isDrrs || $isFinancialAnalyst || $isLgu)) {
             return Inertia::render('Dashboard/Empty', ['dashboardRole' => $role]);
         }
         $canViewInventoryDashboard = $isRros || $isDrrs || $isSuperAdmin || $isFinancialAnalyst;
@@ -142,6 +143,7 @@ class DashboardController extends Controller
         abort_unless($user->hasAnyRole([
             'Super Admin',
             'RROS',
+            'RROS AA',
             'DRRS',
             'DRIMS',
             'DRMD AA',
@@ -157,7 +159,7 @@ class DashboardController extends Controller
 
     private function dashboardRole(User $user): string
     {
-        foreach (['Super Admin', 'RROS', 'DRRS', 'DRIMS', 'DRMD AA', 'DRMD Financial Analyst'] as $role) {
+        foreach (['Super Admin', 'RROS AA', 'RROS', 'DRRS AA', 'DRRS', 'DRIMS', 'DRMD AA', 'DRMD Financial Analyst'] as $role) {
             if ($user->hasRole($role)) {
                 return $role;
             }
@@ -195,7 +197,7 @@ class DashboardController extends Controller
     private function userLevelCounts()
     {
         return Role::query()
-            ->whereIn('name', ['Super Admin', 'RROS', 'DRRS', 'DRIMS', 'DRMD AA', 'DRMD Financial Analyst'])
+            ->whereIn('name', ['Super Admin', 'RROS', 'RROS AA', 'DRRS', 'DRIMS', 'DRMD AA', 'DRMD Financial Analyst'])
             ->withCount('users')
             ->orderByRaw("case name when 'Super Admin' then 0 when 'RROS' then 1 when 'DRRS' then 2 when 'DRIMS' then 3 when 'DRMD AA' then 4 when 'DRMD Financial Analyst' then 5 else 6 end")
             ->get()
@@ -460,9 +462,9 @@ class DashboardController extends Controller
         $warehouses = $groupByItem
             ? collect()
             : Warehouse::query()
-            ->whereIn('id', $rows->pluck('warehouse_id')->filter()->unique()->values())
-            ->get()
-            ->keyBy('id');
+                ->whereIn('id', $rows->pluck('warehouse_id')->filter()->unique()->values())
+                ->get()
+                ->keyBy('id');
 
         return [
             'group_by' => $groupByItem ? 'item' : 'warehouse',
@@ -556,5 +558,4 @@ class DashboardController extends Controller
             ->filter(fn ($value): bool => filled($value))
             ->implode(', ') ?: 'Unspecified location';
     }
-
 }

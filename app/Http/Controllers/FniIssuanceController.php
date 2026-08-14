@@ -3,13 +3,15 @@
 namespace App\Http\Controllers;
 
 use App\Models\InventoryTransaction;
+use App\Models\WarehouseSheetImport;
+use App\Services\WitReleaseCrossmatchService;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
 
 class FniIssuanceController extends Controller
 {
-    public function __invoke(Request $request): Response
+    public function __invoke(Request $request, WitReleaseCrossmatchService $crossmatch): Response
     {
         $transactions = InventoryTransaction::query()
             ->with(['batch.item', 'batch.warehouse', 'user', 'sheetImport'])
@@ -18,7 +20,8 @@ class FniIssuanceController extends Controller
             ->orderByDesc('id')
             ->get();
 
-        $rows = $transactions->map(fn (InventoryTransaction $transaction): array => $this->row($transaction))->values();
+        $imports = WarehouseSheetImport::query()->where('import_status', 'imported')->get();
+        $rows = $transactions->map(fn (InventoryTransaction $transaction): array => $this->row($transaction, $crossmatch, $imports))->values();
 
         return Inertia::render('Inventory/FniIssuances', [
             'rows' => $rows,
@@ -27,7 +30,7 @@ class FniIssuanceController extends Controller
         ]);
     }
 
-    private function row(InventoryTransaction $transaction): array
+    private function row(InventoryTransaction $transaction, WitReleaseCrossmatchService $crossmatch, $imports): array
     {
         $batch = $transaction->batch;
         $item = $batch?->item;
@@ -37,6 +40,10 @@ class FniIssuanceController extends Controller
         $unitCost = (float) ($transaction->unit_cost ?? 0);
         $totalCost = (float) ($transaction->total_cost ?? ($quantity * $unitCost));
 
+        $comparison = filled($transaction->transactionable_type)
+            ? $crossmatch->compare($transaction, $imports)
+            : ['status' => 'wit_only', 'label' => 'WIT record only', 'summary' => 'No system Dispatch release is linked to this WIT row.', 'fields' => []];
+
         return [
             'id' => $transaction->id,
             'date' => $date?->format('M j Y') ?? '-',
@@ -45,6 +52,7 @@ class FniIssuanceController extends Controller
             'expiry_month' => $batch?->expiration_date?->format('M Y') ?? '-',
             'expiry_sort' => $batch?->expiration_date?->format('Y-m-d'),
             'reference' => $this->firstFilled($transaction->reference_number, $transaction->ris_if_stf, $transaction->call_off_number, '-'),
+            'dr_number' => $this->clean($transaction->reference_number, '-'),
             'ris_if_stf' => $this->clean($transaction->ris_if_stf, '-'),
             'warehouse' => $this->clean($warehouse?->display_name),
             'warehouse_name' => $this->clean($warehouse?->name),
@@ -72,6 +80,11 @@ class FniIssuanceController extends Controller
             'encoded_at' => $transaction->encoded_at?->format('M j Y, g:i A') ?? $transaction->created_at?->format('M j Y, g:i A') ?? '-',
             'edited_at' => $transaction->edited_at?->format('M j Y, g:i A') ?? $transaction->updated_at?->format('M j Y, g:i A') ?? '-',
             'remarks' => $this->clean($transaction->remarks, '-'),
+            'record_source' => $transaction->sheetImport ? 'WIT Data Entry' : 'System Dispatch',
+            'reconciliation_status' => $transaction->reconciliation_status ?: ($transaction->sheetImport ? 'wit_only' : 'not_required'),
+            'reconciled_at' => $transaction->reconciled_at?->format('M j Y, g:i A'),
+            'crossmatch' => $comparison,
+            'crossmatch_status' => $comparison['status'],
         ];
     }
 

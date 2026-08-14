@@ -137,7 +137,12 @@ class DistributionPlanController extends Controller
 
     public function store(Request $request, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage near expiry'), 403);
+        $user = $request->user();
+        abort_unless(
+            $user
+            && ($user->hasAnyRole(['Super Admin', 'RROS', 'RROS AA', 'DRRS']) || $user->can('manage near expiry')),
+            403,
+        );
 
         $data = $request->validate([
             'inventory_batch_id' => ['nullable', 'exists:inventory_batches,id'],

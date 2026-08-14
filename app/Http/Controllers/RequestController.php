@@ -5,45 +5,69 @@ namespace App\Http\Controllers;
 use App\Http\Requests\AssistanceRequestRequest;
 use App\Models\AssessmentType;
 use App\Models\AssistanceRequest;
+use App\Models\FniLibraryItem;
 use App\Models\Incident;
 use App\Models\InventoryItem;
-use App\Models\FniLibraryItem;
+use App\Models\LguDirectoryEntry;
 use App\Models\OperationalLibraryValue;
 use App\Models\PsgcAddress;
 use App\Models\RequestParty;
+use App\Models\RequisitionIssuanceSlip;
+use App\Models\RisSyncRun;
+use App\Models\StfSyncRun;
 use App\Models\SystemSetting;
 use App\Models\User;
+use App\Models\Warehouse;
 use App\Services\AorCoverageService;
 use App\Services\AuditLogger;
-use App\Services\InventoryService;
+use App\Services\EpirmaWorkflowService;
 use App\Services\InventoryBalanceService;
+use App\Services\InventoryService;
 use App\Services\PreviousAugmentationResolver;
 use App\Services\RequestPartySheetService;
 use App\Services\ResponseLetterDocumentService;
-use App\Services\WorkflowNotificationService;
+use App\Services\RisReservationService;
+use App\Services\StfSheetSyncService;
 use App\Services\WordToPdfService;
-use App\Support\DocumentReferenceNumber;
+use App\Services\WorkflowNotificationService;
 use App\Support\AssessmentNarrative;
+use App\Support\InlinePdfFilename;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
-use Barryvdh\DomPDF\Facade\Pdf;
-use Symfony\Component\HttpFoundation\Response as HttpResponse;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Facades\Http;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
+use Symfony\Component\HttpFoundation\Response as HttpResponse;
 
 class RequestController extends Controller
 {
-    public function drrsRequests(Request $request): Response
-    {
+    public function drrsRequests(
+        Request $request,
+        InventoryBalanceService $inventoryBalanceService,
+        AorCoverageService $aorCoverage,
+    ): Response {
         $request->merge(['status' => 'actionable', 'default_tab' => 'tracker']);
 
-        return $this->index($request);
+        return $this->index($request, $inventoryBalanceService, $aorCoverage);
+    }
+
+    public function rrosRequests(
+        Request $request,
+        InventoryBalanceService $inventoryBalanceService,
+        AorCoverageService $aorCoverage,
+    ): Response {
+        abort_unless($request->user()?->hasAnyRole(['RROS', 'RROS AA', 'Super Admin']), 403);
+        $request->merge(['default_tab' => 'still_for_action']);
+        $request->attributes->set('request_workspace_mode', 'rros');
+
+        return $this->index($request, $inventoryBalanceService, $aorCoverage);
     }
 
     public function index(Request $request, InventoryBalanceService $inventoryBalanceService, AorCoverageService $aorCoverage): Response|RedirectResponse
@@ -75,18 +99,45 @@ class RequestController extends Controller
             ->orderBy('name')
             ->get(['code', 'parent_code', 'name', 'type']);
         $barangays = PsgcAddress::query()->where('is_active', true)->where('level', 'barangay')->whereIn('parent_code', $municipalities->pluck('code'))->orderBy('name')->get(['code', 'parent_code', 'name']);
+        $warehouseLocations = Warehouse::query()->get(['id', 'province', 'municipality', 'district', 'latitude', 'longitude'])->keyBy('id');
         $warehouseStock = $inventoryBalanceService->balanceRows()
-            ->map(fn (array $row): array => [
-                'warehouse_id' => $row['warehouse_id'] ?? null,
-                'warehouse' => $row['warehouse'] ?? 'Unnamed Warehouse',
-                'item' => $row['item'] ?? '',
-                'uom' => $row['uom'] ?? '',
-                'available' => max(0, (float) ($row['available_balance'] ?? 0)),
-            ])->filter(fn (array $row): bool => filled($row['warehouse_id']) && filled($row['item']))->values();
+            ->map(function (array $row) use ($warehouseLocations): array {
+                $location = $warehouseLocations->get($row['warehouse_id'] ?? null);
+
+                return [
+                    'warehouse_id' => $row['warehouse_id'] ?? null,
+                    'warehouse' => $row['warehouse'] ?? 'Unnamed Warehouse',
+                    'warehouse_type' => $row['warehouse_type'] ?? null,
+                    'warehouse_ownership' => $row['partnership'] ?? null,
+                    'province' => $location?->province ?? $row['warehouse_province'] ?? null,
+                    'municipality' => $location?->municipality ?? $row['warehouse_municipality'] ?? null,
+                    'district' => $location?->district ?? null,
+                    'latitude' => filled($location?->latitude) ? (float) $location->latitude : null,
+                    'longitude' => filled($location?->longitude) ? (float) $location->longitude : null,
+                    'item' => $row['item'] ?? '',
+                    'category' => $row['category'] ?? null,
+                    'uom' => $row['uom'] ?? '',
+                    'brand_description' => $row['brand_description'] ?? null,
+                    'available' => max(0, (float) ($row['available_balance'] ?? 0)),
+                    'expiry' => $row['expiry'] ?? null,
+                    'unit_price' => (float) ($row['current_balance'] ?? 0) > 0
+                        ? max(0, (float) ($row['cost'] ?? 0)) / (float) $row['current_balance']
+                        : null,
+                ];
+            })->filter(fn (array $row): bool => filled($row['warehouse_id']) && filled($row['item']))->values();
 
         $user = $request->user();
-        $withAssessmentAccess = function ($paginator) use ($user, $aorCoverage) {
-            $paginator->getCollection()->transform(function (AssistanceRequest $record) use ($user, $aorCoverage) {
+        $districtsByPsgc = $municipalities->mapWithKeys(fn ($row) => [$row->code => $row->district]);
+        $sdn1Municipalities = $municipalities->filter(fn ($row) => str_replace(' ', '', strtolower((string) $row->district)) === 'sdn1')->pluck('name')->map(fn ($name) => strtolower(trim($name)))->all();
+        $withAssessmentAccess = function ($paginator) use ($user, $aorCoverage, $districtsByPsgc, $sdn1Municipalities) {
+            $paginator->getCollection()->transform(function (AssistanceRequest $record) use ($user, $aorCoverage, $districtsByPsgc, $sdn1Municipalities) {
+                $province = strtolower((string) $record->province);
+                $district = strtolower((string) $districtsByPsgc->get($record->lgu_psgc_code, ''));
+                $isSdn1 = str_replace(' ', '', $district) === 'sdn1'
+                    || (str_contains($province, 'surigao') && str_contains($province, 'norte') && in_array(strtolower(trim((string) $record->municipality)), $sdn1Municipalities, true));
+                $record->setAttribute('location_zone', str_contains($province, 'dinagat')
+                    ? 'pdi'
+                    : ($isSdn1 ? 'sdn1' : 'mainland'));
                 $record->setAttribute('assessment_access', $user
                     ? $aorCoverage->assessmentAccessFor($user, $record)
                     : [
@@ -109,24 +160,89 @@ class RequestController extends Controller
             ->where('submission_type', '!=', 'lgu_dromic_relief_request')
             ->where('endorsed_to_drrs', true);
 
+        $applyStillForAction = function ($query): void {
+            // Needs PDRC assessment — omit any draft/final (or later) assessed rows.
+            $query->whereNull('assessment_status');
+        };
+        $applyCreatedAssessments = function ($query): void {
+            $query->whereNotNull('assessment_status')
+                ->where(function ($inner): void {
+                    $inner->whereNull('epirma_assessment_signed_at')
+                        ->orWhereNull('epirma_response_letter_signed_at');
+                });
+        };
+        $applyApproved = function ($query): void {
+            $query->whereNotNull('epirma_assessment_signed_at')
+                ->whereNotNull('epirma_response_letter_signed_at');
+        };
+        // RROS: Still for Action = RIS/DR has not been started or remains a draft.
+        $applyRisStillForAction = function ($query) use ($applyApproved): void {
+            $applyApproved($query);
+            $query->where(function ($inner): void {
+                $inner->whereDoesntHave('requisitionIssuanceSlip')
+                    ->orWhereHas(
+                        'requisitionIssuanceSlip',
+                        fn ($slip) => $slip->where('status', 'draft')
+                    );
+            });
+        };
+        // RROS: In Progress = prepared/generated and awaiting approval or post-RIS work.
+        $applyRisInProgress = function ($query) use ($applyApproved): void {
+            $applyApproved($query);
+            $query->whereHas(
+                'requisitionIssuanceSlip',
+                fn ($slip) => $slip->where('status', 'prepared')
+            );
+        };
+        // RROS: Approved = post RIS/DR form completed (delivery / accounting recorded).
+        $applyRisApproved = function ($query) use ($applyApproved): void {
+            $applyApproved($query);
+            $query->whereHas(
+                'requisitionIssuanceSlip',
+                fn ($slip) => $slip->where('status', 'approved')
+            );
+        };
+        // RROS: Completed = fully closed with post RIS/DR requirements satisfied.
+        $applyRisCompleted = function ($query) use ($applyApproved): void {
+            $applyApproved($query);
+            $query->whereHas(
+                'requisitionIssuanceSlip',
+                fn ($slip) => $slip->where('status', 'completed')
+            );
+        };
+        $applySearch = function ($query, ?string $search): void {
+            if (blank($search)) {
+                return;
+            }
+
+            $query->where(function ($inner) use ($search): void {
+                $inner->where('reference_number', 'like', "%{$search}%")
+                    ->orWhere('requesting_agency', 'like', "%{$search}%")
+                    ->orWhere('requester', 'like', "%{$search}%")
+                    ->orWhere('province', 'like', "%{$search}%")
+                    ->orWhere('municipality', 'like', "%{$search}%")
+                    ->orWhere('request_drn', 'like', "%{$search}%")
+                    ->orWhereHas('sourceLguDromicReport', function ($source) use ($search): void {
+                        $source->where('reference_number', 'like', "%{$search}%")
+                            ->orWhere('lgu_relief_request_reference', 'like', "%{$search}%");
+                    });
+            });
+        };
+
+        $isRrosWorkspace = $request->attributes->get('request_workspace_mode') === 'rros';
+
         $workspaceSummary = [
             'requests' => (clone $workspaceBase)->count(),
-            'acted' => (clone $workspaceBase)->where(function ($query): void {
-                $query->whereIn('assessment_status', ['final', 'submitted'])
-                    ->orWhereIn('status', ['acted', 'approved', 'partially_approved', 'rejected']);
-            })->count(),
-            'still_for_action' => (clone $workspaceBase)->where(function ($query): void {
-                $query->whereNull('assessment_status')
-                    ->orWhere('assessment_status', 'draft');
-            })->whereNotIn('status', ['approved', 'partially_approved', 'rejected'])->count(),
+            'still_for_action' => (clone $workspaceBase)->tap($applyStillForAction)->count(),
+            'created_assessments' => (clone $workspaceBase)->tap($applyCreatedAssessments)->count(),
+            'approved' => (clone $workspaceBase)->tap($applyApproved)->count(),
+            'ris_still_for_action' => (clone $workspaceBase)->tap($applyRisStillForAction)->count(),
+            'ris_in_progress' => (clone $workspaceBase)->tap($applyRisInProgress)->count(),
+            // Legacy alias kept for any stale clients during deploy.
+            'ris_for_signing' => (clone $workspaceBase)->tap($applyRisInProgress)->count(),
+            'ris_approved' => (clone $workspaceBase)->tap($applyRisApproved)->count(),
+            'ris_completed' => (clone $workspaceBase)->tap($applyRisCompleted)->count(),
             'lgu_linked' => (clone $workspaceBase)->whereNotNull('source_lgu_dromic_request_id')->count(),
-            'breakdown' => [
-                'awaiting_assessment' => (clone $workspaceBase)->whereNull('assessment_status')->whereNotIn('status', ['approved', 'partially_approved', 'rejected'])->count(),
-                'draft_under_review' => (clone $workspaceBase)->where('assessment_status', 'draft')->count(),
-                'final' => (clone $workspaceBase)->where('assessment_status', 'final')->count(),
-                'submitted' => (clone $workspaceBase)->where('assessment_status', 'submitted')->count(),
-                'approved' => (clone $workspaceBase)->whereIn('status', ['approved', 'partially_approved'])->count(),
-            ],
         ];
 
         $reliefRequestBase = AssistanceRequest::query()
@@ -147,75 +263,290 @@ class RequestController extends Controller
         ];
 
         $highlightRequestId = $request->integer('highlight') ?: null;
+        $search = $request->search ? (string) $request->search : null;
+
+        $listRelations = [
+            'items',
+            'assessmentType',
+            'incident',
+            'encoder:id,name,office',
+            'assessmentActor:id,name,office',
+            'assessmentOnBehalfOwner:id,name,office',
+            'sourceLguDromicReport:id,incident_id,reference_number,lgu_relief_request_reference,lgu_signed_request_path,lgu_signed_report_path,lgu_relief_validation_status,lgu_dromic_payload,lgu_dromic_narrative,affected_families,province,municipality,barangay,requesting_agency,requester,requester_position,requester_address,contact_number',
+            'sourceLguDromicReport.incident',
+            'requestParty.lguDirectoryEntry.officials',
+            'requestParty.lguDirectoryEntry.contacts',
+        ];
+
+        $withSignedPreview = function ($paginator) {
+            $paginator->getCollection()->transform(function (AssistanceRequest $record) {
+                $signedDocs = $record->relationLoaded('epirmaSignedDocuments')
+                    ? $record->epirmaSignedDocuments
+                    : $record->epirmaSignedDocuments()
+                        ->where('routing_status', 'signed')
+                        ->orderByDesc('id')
+                        ->get();
+
+                $assessmentDoc = $signedDocs->firstWhere('document_type', 'assessment')
+                    ?: $signedDocs->first(fn ($doc) => ($doc->document_type ?? 'assessment') === 'assessment');
+                $responseDoc = $signedDocs->firstWhere('document_type', 'response_letter');
+
+                // Same path as response letter: always route signed assessments through
+                // /epirma/documents/{id}/view so viewDocument can download+cache.
+                // Never point Signed Assessment at DomPDF /assessment-pdf.
+                $assessmentViewUrl = null;
+                $assessmentPreviewKind = null;
+                if ($assessmentDoc?->id) {
+                    $assessmentViewUrl = url("/requests/{$record->id}/epirma/documents/{$assessmentDoc->id}/view");
+                    $assessmentPreviewKind = 'signed';
+                }
+
+                $record->setAttribute('signed_assessment_view_url', $assessmentViewUrl);
+                $record->setAttribute('signed_assessment_preview_kind', $assessmentPreviewKind);
+                $record->setAttribute(
+                    'signed_response_letter_view_url',
+                    $responseDoc?->id
+                        ? url("/requests/{$record->id}/epirma/documents/{$responseDoc->id}/view")
+                        : null
+                );
+
+                $directory = $record->requestParty?->lguDirectoryEntry;
+                if (! $directory && filled($record->lgu_psgc_code)) {
+                    $directory = LguDirectoryEntry::with(['officials', 'contacts'])->where('psgc_code', $record->lgu_psgc_code)->first();
+                }
+                if (! $directory) {
+                    $place = $record->municipality ?: $record->lgu ?: $record->requesting_agency;
+                    if (filled($place)) {
+                        $directory = LguDirectoryEntry::with(['officials', 'contacts'])
+                            ->where(fn ($query) => $query->where('lgu_name', 'like', "%{$place}%")->orWhere('override_lgu_name', 'like', "%{$place}%"))
+                            ->first();
+                    }
+                }
+                $lswdo = $directory?->officials?->firstWhere('role', 'lswd_officer');
+                $record->setAttribute('ris_receiving_representative', $lswdo?->override_name ?: $lswdo?->name ?: $directory?->lswd_alternate_name);
+                $record->setAttribute('ris_receiving_contact_number', $directory?->lswd_contact_number ?: $directory?->lswd_alternate_contact_number);
+
+                $slip = $record->requisitionIssuanceSlip;
+                if ($slip) {
+                    $record->setAttribute(
+                        'signed_ris_view_url',
+                        $slip->approval_routing_mode === 'epirma' && $slip->ris_epirma_status === 'signed'
+                            ? url("/rros/ris/{$slip->id}/epirma/signed-preview")
+                            : null
+                    );
+                    $record->setAttribute('ris_view_url', filled($slip->ris_drn) && filled($slip->ris_link) ? url("/rros/ris/{$slip->id}/documents/ris") : null);
+                    $record->setAttribute('ris_drn_pending', blank($slip->ris_drn));
+                    $record->setAttribute('rds_view_url', filled($slip->rds_path) || filled($slip->rds_link) ? url("/rros/ris/{$slip->id}/documents/rds") : null);
+                    $record->setAttribute('csmr_view_url', filled($slip->csmr_path) || filled($slip->csmr_link) ? url("/rros/ris/{$slip->id}/documents/csmr") : null);
+                    $record->setAttribute('ris_preview', $this->serializeRisPreviewPayload($slip));
+                    // Same-origin DomPDF advance previews (iframe parity with Assessment draft).
+                    $record->setAttribute('ris_advance_pdf_view_url', "/rros/ris/{$slip->id}/preview-pdf/ris?inline=1");
+                    $hasDr = filled($slip->dr_number)
+                        || filled(data_get($slip->tracking_data, 'dr_number'));
+                    $record->setAttribute(
+                        'dr_advance_pdf_view_url',
+                        $hasDr ? "/rros/ris/{$slip->id}/preview-pdf/dr?inline=1" : null
+                    );
+                    $record->setAttribute('ris_slip_id', $slip->id);
+                    $record->setAttribute('assessment_pdf_view_url', "/requests/{$record->id}/assessment-pdf?margin=18&inline=1");
+                } else {
+                    $record->setAttribute('assessment_pdf_view_url', "/requests/{$record->id}/assessment-pdf?margin=18&inline=1");
+                }
+
+                return $record;
+            });
+
+            return $paginator;
+        };
+
+        $stillForAction = $withAssessmentAccess(
+            AssistanceRequest::query()
+                ->with($listRelations)
+                ->where('submission_type', '!=', 'lgu_dromic_relief_request')
+                ->where('endorsed_to_drrs', true)
+                ->tap($applyStillForAction)
+                ->when(! $highlightRequestId && $request->status === 'actionable', fn ($q) => $q->whereIn('status', ['endorsed', 'submitted', 'under_review', 'acted']))
+                ->when(! $highlightRequestId && $request->status && $request->status !== 'actionable', fn ($q, $status) => $q->where('status', $status))
+                ->tap(fn ($q) => $applySearch($q, $search))
+                ->when(
+                    $highlightRequestId,
+                    fn ($q) => $q->orderByRaw('CASE WHEN id = ? THEN 0 ELSE 1 END', [$highlightRequestId])->latest(),
+                    fn ($q) => $q->latest(),
+                )
+                ->paginate(15)
+                ->withQueryString()
+        );
+
+        $createdAssessments = $withSignedPreview($withAssessmentAccess(
+            AssistanceRequest::query()
+                ->with([
+                    ...$listRelations,
+                    'items.sourceWarehouse:id,name,province',
+                    'epirmaSignedDocuments' => fn ($q) => $q->where('routing_status', 'signed')->orderByDesc('id'),
+                ])
+                ->where('submission_type', '!=', 'lgu_dromic_relief_request')
+                ->where('endorsed_to_drrs', true)
+                ->tap($applyCreatedAssessments)
+                ->tap(fn ($q) => $applySearch($q, $search))
+                ->latest('updated_at')
+                ->paginate(15, ['*'], 'assessments_page')
+                ->withQueryString()
+        ));
+
+        $approvedRelations = [
+            ...$listRelations,
+            'items.sourceWarehouse:id,name,province,municipality',
+            'requisitionIssuanceSlip.preparer:id,name,office',
+            'requisitionIssuanceSlip.allocationItems',
+            'requisitionIssuanceSlip.dispatchPlan',
+            'epirmaSignedDocuments' => fn ($q) => $q->where('routing_status', 'signed')->orderByDesc('id'),
+        ];
+
+        $approved = $withSignedPreview($withAssessmentAccess(
+            AssistanceRequest::query()
+                ->with($approvedRelations)
+                ->where('submission_type', '!=', 'lgu_dromic_relief_request')
+                ->where('endorsed_to_drrs', true)
+                ->tap($isRrosWorkspace ? $applyRisStillForAction : $applyApproved)
+                ->tap(fn ($q) => $applySearch($q, $search))
+                ->latest('epirma_response_letter_signed_at')
+                ->paginate(15, ['*'], 'approved_page')
+                ->withQueryString()
+        ));
+
+        $emptyPaginator = ['data' => [], 'links' => [], 'meta' => null];
+
+        $inProgress = $isRrosWorkspace
+            ? $withSignedPreview($withAssessmentAccess(
+                AssistanceRequest::query()
+                    ->with($approvedRelations)
+                    ->where('submission_type', '!=', 'lgu_dromic_relief_request')
+                    ->where('endorsed_to_drrs', true)
+                    ->tap($applyRisInProgress)
+                    ->tap(fn ($q) => $applySearch($q, $search))
+                    ->latest('epirma_response_letter_signed_at')
+                    ->paginate(15, ['*'], 'in_progress_page')
+                    ->withQueryString()
+            ))
+            : $emptyPaginator;
+
+        $risApproved = $isRrosWorkspace
+            ? $withSignedPreview($withAssessmentAccess(
+                AssistanceRequest::query()
+                    ->with($approvedRelations)
+                    ->where('submission_type', '!=', 'lgu_dromic_relief_request')
+                    ->where('endorsed_to_drrs', true)
+                    ->tap($applyRisApproved)
+                    ->tap(fn ($q) => $applySearch($q, $search))
+                    ->latest('epirma_response_letter_signed_at')
+                    ->paginate(15, ['*'], 'ris_approved_page')
+                    ->withQueryString()
+            ))
+            : $emptyPaginator;
+
+        $risCompleted = $isRrosWorkspace
+            ? $withSignedPreview($withAssessmentAccess(
+                AssistanceRequest::query()
+                    ->with($approvedRelations)
+                    ->where('submission_type', '!=', 'lgu_dromic_relief_request')
+                    ->where('endorsed_to_drrs', true)
+                    ->tap($applyRisCompleted)
+                    ->tap(fn ($q) => $applySearch($q, $search))
+                    ->latest('epirma_response_letter_signed_at')
+                    ->paginate(15, ['*'], 'ris_completed_page')
+                    ->withQueryString()
+            ))
+            : $emptyPaginator;
+
+        $defaultTab = $request->get('default_tab', $request->get('tab', 'tracker'));
+        // Map legacy RROS tab ids from older links/notifications.
+        if ($isRrosWorkspace) {
+            $defaultTab = match ($defaultTab) {
+                'approved' => 'still_for_action',
+                'for_signing' => 'in_progress',
+                default => $defaultTab,
+            };
+        }
+        $allowedTabs = $isRrosWorkspace
+            ? ['still_for_action', 'in_progress', 'ris_approved', 'ris_completed', 'ris_transactions']
+            : ['tracker', 'assessments', 'approved'];
+        if (! in_array($defaultTab, $allowedTabs, true)) {
+            $defaultTab = $isRrosWorkspace ? 'still_for_action' : 'tracker';
+        }
+
+        $risTransactions = $isRrosWorkspace
+            ? RequisitionIssuanceSlip::query()
+                ->withCount('allocationItems')
+                ->latest('ris_date')
+                ->latest('id')
+                ->get()
+                ->map(fn (RequisitionIssuanceSlip $slip): array => [
+                    'id' => $slip->id,
+                    'ris_number' => $slip->ris_number,
+                    'dr_number' => $slip->dr_number ?: data_get($slip->tracking_data, 'dr_number'),
+                    'ris_date' => optional($slip->ris_date)?->toDateString(),
+                    'recipient' => $slip->recipient,
+                    'delivery_site' => $slip->delivery_site,
+                    'status' => match (true) {
+                        (bool) $slip->fully_delivered && (bool) $slip->forwarded_to_accounting => 'Fully Delivered / Picked-up and Forwarded to Accounting',
+                        (bool) $slip->fully_delivered => 'Fully Delivered / Picked-up',
+                        (bool) $slip->forwarded_to_accounting => 'Forwarded to Accounting',
+                        default => 'Recorded',
+                    },
+                    'source' => $slip->sync_source,
+                    'item_count' => $slip->allocation_items_count,
+                    'sheet_synced_at' => optional($slip->sheet_synced_at)?->toIso8601String(),
+                    'ris_preview_url' => $slip->approval_routing_mode === 'epirma' && $slip->ris_epirma_status === 'signed'
+                        ? "/rros/ris/{$slip->id}/epirma/signed-preview"
+                        : "/rros/ris/{$slip->id}/preview-pdf/ris?inline=1",
+                    'ris_preview_kind' => $slip->approval_routing_mode === 'epirma' && $slip->ris_epirma_status === 'signed'
+                        ? 'signed'
+                        : 'draft',
+                    'dr_preview_url' => filled($slip->dr_number ?: data_get($slip->tracking_data, 'dr_number'))
+                        ? "/rros/ris/{$slip->id}/preview-pdf/dr?inline=1"
+                        : null,
+                ])
+            : collect();
 
         return Inertia::render('Requests/Index', [
             'workspaceSummary' => $workspaceSummary,
             'reliefAssessmentGate' => $reliefAssessmentGate,
             'highlightRequestId' => $highlightRequestId,
-            'requests' => $withAssessmentAccess(
-                AssistanceRequest::query()
-                    ->with([
-                        'items',
-                        'assessmentType',
-                        'incident',
-                        'encoder:id,name,office',
-                        'assessmentActor:id,name,office',
-                        'assessmentOnBehalfOwner:id,name,office',
-                        'sourceLguDromicReport:id,incident_id,reference_number,lgu_relief_request_reference,lgu_signed_request_path,lgu_signed_report_path,lgu_relief_validation_status,lgu_dromic_payload,lgu_dromic_narrative,affected_families,province,municipality,barangay,requesting_agency,requester,requester_position,requester_address,contact_number',
-                        'sourceLguDromicReport.incident',
-                    ])
-                    ->where('submission_type', '!=', 'lgu_dromic_relief_request')
-                    ->when(! $highlightRequestId && $request->status === 'actionable', fn ($q) => $q->whereIn('status', ['endorsed', 'submitted', 'under_review', 'acted']))
-                    ->when(! $highlightRequestId && $request->status && $request->status !== 'actionable', fn ($q, $status) => $q->where('status', $status))
-                    ->when(! $highlightRequestId && $request->search, function ($q, $search): void {
-                        $q->where(function ($query) use ($search): void {
-                            $query->where('reference_number', 'like', "%{$search}%")
-                                ->orWhere('requesting_agency', 'like', "%{$search}%")
-                                ->orWhere('requester', 'like', "%{$search}%")
-                                ->orWhere('province', 'like', "%{$search}%")
-                                ->orWhere('municipality', 'like', "%{$search}%")
-                                ->orWhereHas('sourceLguDromicReport', function ($source) use ($search): void {
-                                    $source->where('reference_number', 'like', "%{$search}%")
-                                        ->orWhere('lgu_relief_request_reference', 'like', "%{$search}%");
-                                });
-                        });
-                    })
-                    ->when(
-                        $highlightRequestId,
-                        fn ($q) => $q->orderByRaw('CASE WHEN id = ? THEN 0 ELSE 1 END', [$highlightRequestId])->latest(),
-                        fn ($q) => $q->latest(),
-                    )
-                    ->paginate(15)
-                    ->withQueryString()
-            ),
-            'assessments' => $withAssessmentAccess(
-                AssistanceRequest::query()
-                    ->with([
-                        'items.sourceWarehouse:id,name,province',
-                        'incident',
-                        'encoder:id,name,office',
-                        'assessmentActor:id,name,office',
-                        'assessmentOnBehalfOwner:id,name,office',
-                        'sourceLguDromicReport:id,reference_number,lgu_relief_request_reference',
-                    ])
-                    ->where('submission_type', '!=', 'lgu_dromic_relief_request')
-                    ->whereNotNull('assessment_status')
-                    ->latest('updated_at')
-                    ->paginate(15, ['*'], 'assessments_page')
-                    ->withQueryString()
-            ),
+            'requests' => $stillForAction,
+            'assessments' => $createdAssessments,
+            'approved' => $approved,
+            'inProgress' => $inProgress,
+            'risApproved' => $risApproved,
+            'risCompleted' => $risCompleted,
+            'risTransactions' => $risTransactions,
+            // Legacy alias — same as inProgress (prepared RIS bucket).
+            'forSigning' => $inProgress,
             'filters' => $request->only(['search', 'status']),
             'assessmentTypes' => AssessmentType::where('is_active', true)->orderBy('name')->get(),
             'inventoryItems' => InventoryItem::where('status', 'active')->orderBy('name')->get(),
             'fniLibraryItems' => FniLibraryItem::query()->orderBy('item_category')->orderBy('item_name')->orderBy('brand_description')->get(),
             'libraryOptions' => OperationalLibraryValue::groupedOptions(),
-            'drrsSignatories' => OperationalLibraryValue::query()->where('library_type', 'drrs_signatory')->where('is_active', true)->orderBy('context')->get(['id', 'value', 'context']),
+            'drrsSignatories' => OperationalLibraryValue::query()->where('library_type', 'drrs_signatory')->where('is_active', true)
+                ->where(fn ($query) => $query->where('metadata->document_type', 'assessment')->orWhereNull('metadata->document_type'))
+                ->orderBy('context')->get(['id', 'value', 'context', 'metadata']),
+            'rrosSignatories' => OperationalLibraryValue::query()->whereIn('library_type', ['rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory'])->where('is_active', true)->orderBy('library_type')->orderBy('context')->get(['id', 'library_type', 'value', 'context', 'metadata']),
             'drnPrefixes' => OperationalLibraryValue::query()->where('library_type', 'drn_prefix')->where('is_active', true)->orderBy('context')->orderBy('value')->get(['id', 'value', 'context']),
             'requestParties' => RequestParty::query()->with('lguDirectoryEntry:id,psgc_code,lgu_name,override_lgu_name')->where('is_active', true)->orderBy('requesting_party')->orderBy('office_agency_details')->get(),
             'psgc' => ['provinces' => $provinces, 'municipalities' => $municipalities, 'barangays' => $barangays],
             'socialWorkers' => User::query()->role('DRRS')->where('is_active', true)->orderBy('name')->get(['id', 'name']),
             'warehouseStock' => $warehouseStock,
-            'defaultTab' => $request->get('default_tab', $request->get('tab', 'tracker')),
+            'warehouseReservations' => app(RisReservationService::class)->payload(),
+            'defaultTab' => $defaultTab,
+            'workspaceMode' => $request->attributes->get('request_workspace_mode', 'drrs'),
+            'risSync' => $request->attributes->get('request_workspace_mode') === 'rros'
+                ? RisSyncRun::latest('started_at')->first()
+                : null,
+            'stfSync' => $request->attributes->get('request_workspace_mode') === 'rros'
+                ? StfSyncRun::latest('started_at')->first()
+                : null,
+            'stfRecords' => $request->attributes->get('request_workspace_mode') === 'rros'
+                ? app(StfSheetSyncService::class)->transactionRows()
+                : [],
         ]);
     }
 
@@ -300,11 +631,16 @@ class RequestController extends Controller
         AssistanceRequest $assistanceRequest,
         PreviousAugmentationResolver $resolver,
     ): JsonResponse {
+        $user = request()->user();
+        abort_unless($user, 403, 'Authentication is required.');
+        // Prefer role checks so stale Spatie permission cache cannot block assessment prep.
         abort_unless(
-            request()->user()?->can('encode requests')
-                || request()->user()?->can('monitor requests')
-                || request()->user()?->can('process requests'),
+            $user->hasAnyRole(['Super Admin', 'DRRS'])
+                || $user->can('encode requests')
+                || $user->can('monitor requests')
+                || $user->can('process requests'),
             403,
+            'You are not allowed to load previous augmentations for this request.',
         );
 
         $resolved = $resolver->resolve($assistanceRequest);
@@ -323,6 +659,7 @@ class RequestController extends Controller
 
         return Inertia::render('Requests/AssessmentForm', [
             'request' => $assistanceRequest->load(['items', 'assessmentType', 'incident', 'encoder', 'assessmentActor', 'assessmentOnBehalfOwner', 'sourceLguDromicReport']),
+            'epirma' => app(EpirmaWorkflowService::class)->capabilitiesFor($assistanceRequest),
             'drnPrefixes' => OperationalLibraryValue::query()->where('library_type', 'drn_prefix')->where('is_active', true)->orderBy('context')->orderBy('value')->get(['id', 'value', 'context']),
             'assessmentAccess' => $access,
         ]);
@@ -346,16 +683,33 @@ class RequestController extends Controller
 
     public function assessmentPdf(Request $request, AssistanceRequest $assistanceRequest): HttpResponse
     {
-        $record = $assistanceRequest->load(['items.sourceWarehouse', 'assessmentType', 'incident', 'encoder']);
+        $record = $assistanceRequest->load([
+            'items.sourceWarehouse',
+            'assessmentType',
+            'incident',
+            'encoder',
+            'sourceLguDromicReport:id,lgu_dromic_payload,affected_families',
+        ]);
         $requestedMargin = (int) $request->integer('margin', 18);
         $pageMargin = in_array($requestedMargin, [18, 27, 36, 54, 72], true) ? $requestedMargin : 18;
         $pdf = Pdf::loadView('documents.assessment', ['request' => $record, 'pageMargin' => $pageMargin])->setPaper('a4', 'portrait');
-        $filename = "Assessment-{$record->reference_number}.pdf";
+        $filename = InlinePdfFilename::fromCandidates(
+            $record->assessment_drn ? 'Assessment-'.$record->assessment_drn : null,
+            $record->reference_number ? 'Assessment-'.$record->reference_number : null,
+            'Assessment-'.$record->id,
+        );
+
         return $request->boolean('inline') ? $pdf->stream($filename) : $pdf->download($filename);
     }
 
     public function updateAssessment(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit): RedirectResponse
     {
+        abort_if(
+            filled($assistanceRequest->epirma_forwarded_to_drrs_aa_at),
+            422,
+            'This assessment was forwarded to DRRS AA and can no longer be edited.'
+        );
+
         $data = $request->validate([
             'assessment_type_id' => ['nullable', 'exists:assessment_types,id'], 'purpose' => ['nullable', 'string', 'max:255'],
             'incident_name' => ['nullable', 'required_if:purpose,Relief Augmentation', 'string', 'max:255'], 'incident_date' => ['nullable', 'required_if:purpose,Relief Augmentation', 'date'],
@@ -382,12 +736,15 @@ class RequestController extends Controller
                 ...collect($data)->except(['incident_name', 'incident_date', 'items'])->all(),
                 'incident_id' => $incident?->id,
             ]);
-            if (! $incident && $oldIncident && $oldIncident->requests()->doesntExist()) $oldIncident->delete();
+            if (! $incident && $oldIncident && $oldIncident->requests()->doesntExist()) {
+                $oldIncident->delete();
+            }
             foreach ($data['items'] as $item) {
                 $assistanceRequest->items()->whereKey($item['id'])->update(collect($item)->except('id')->all());
             }
         });
         $audit->log('request.assessment_updated', $assistanceRequest, $old, $assistanceRequest->fresh(['items', 'incident'])->toArray());
+
         return back()->with('success', 'Assessment saved and ready for printing.');
     }
 
@@ -397,9 +754,13 @@ class RequestController extends Controller
         AuditLogger $audit,
         InventoryBalanceService $inventoryBalanceService,
         AorCoverageService $aorCoverage
-    ): RedirectResponse
-    {
+    ): RedirectResponse {
         abort_unless($assistanceRequest->endorsed_to_drrs, 422, 'Only records endorsed to DRRS can be assessed through this workflow.');
+        abort_if(
+            filled($assistanceRequest->epirma_forwarded_to_drrs_aa_at),
+            422,
+            'This assessment was forwarded to DRRS AA and can no longer be edited.'
+        );
 
         $user = $request->user();
         abort_unless($user, 403);
@@ -413,7 +774,7 @@ class RequestController extends Controller
             );
         } else {
             abort_unless(
-                $user->hasRole('Super Admin') || ($user->hasRole('DRRS') && $user->can('encode requests')),
+                $user->hasAnyRole(['Super Admin', 'DRRS']) || $user->can('encode requests'),
                 403,
                 'Only DRRS encoders can create assessments.'
             );
@@ -429,15 +790,26 @@ class RequestController extends Controller
         $data = $request->validated();
         $data['recommendations'] = AssessmentNarrative::sanitize($data['recommendations'] ?? null);
         $availableTotals = $inventoryBalanceService->availableTotalsByItem();
-        $data['items'] = collect($data['items'])->map(function (array $item) use ($availableTotals): array {
+        $reservedByItem = app(RisReservationService::class)->totalsByItem();
+        $data['items'] = collect($data['items'])->map(function (array $item) use ($availableTotals, $reservedByItem): array {
             $key = preg_replace('/[^a-z0-9]+/', '', strtolower((string) ($item['item_name'] ?? ''))) ?? '';
-
-            if ($key !== '' && $availableTotals->has($key)) {
-                $item['available_quantity'] = max(0, (float) $availableTotals->get($key));
-            }
+            $physical = $key === '' ? 0.0 : (float) $availableTotals->get($key, 0);
+            $reserved = $key === '' ? 0.0 : (float) $reservedByItem->get($key, 0);
+            // Same available-to-plan rule as RROS RIS planning: physical available_balance minus active RIS reservations.
+            $item['available_quantity'] = max(0, $physical - $reserved);
 
             return $item;
         })->all();
+        $unavailableItems = collect($data['items'])->filter(
+            fn (array $item): bool => (float) ($item['requested_quantity'] ?? 0) > (float) ($item['available_quantity'] ?? 0)
+        );
+        if ($unavailableItems->isNotEmpty()) {
+            $names = $unavailableItems->pluck('item_name')->filter()->unique()->implode(', ');
+
+            return back()->withErrors([
+                'items' => 'Assessment cannot be submitted because the requested quantity is not available to plan (stockpile minus quantities already reserved by active RIS): '.$names.'.',
+            ])->withInput();
+        }
         $old = $assistanceRequest->load(['items', 'incident'])->toArray();
 
         DB::transaction(function () use ($assistanceRequest, $data, $user): void {
@@ -475,7 +847,9 @@ class RequestController extends Controller
             foreach ($data['items'] as $item) {
                 $assistanceRequest->items()->create($item);
             }
-            if (! $incident && $oldIncident && $oldIncident->requests()->doesntExist()) $oldIncident->delete();
+            if (! $incident && $oldIncident && $oldIncident->requests()->doesntExist()) {
+                $oldIncident->delete();
+            }
         });
 
         $fresh = $assistanceRequest->fresh(['items', 'incident', 'requestParty']);
@@ -486,7 +860,7 @@ class RequestController extends Controller
             ->with('success', "Assessment for {$fresh->reference_number} saved. Assessment and response-letter previews, printing, and downloads are ready.");
     }
 
-    public function assessmentStatus(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit, WorkflowNotificationService $workflowNotifications, AorCoverageService $aorCoverage): RedirectResponse
+    public function assessmentStatus(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit, WorkflowNotificationService $workflowNotifications, AorCoverageService $aorCoverage, InventoryBalanceService $inventoryBalanceService): RedirectResponse
     {
         $user = $request->user();
         abort_unless($user, 403);
@@ -495,16 +869,42 @@ class RequestController extends Controller
 
         $data = $request->validate(['assessment_status' => ['required', 'in:draft,final,submitted']]);
         abort_if(blank($assistanceRequest->assessment_status), 422, 'Create the assessment before changing its status.');
+
+        // After forward/signed, status is owned by e-PIRMA routing — no reopen/submit/recall from UI.
+        abort_if(
+            filled($assistanceRequest->epirma_forwarded_to_drrs_aa_at),
+            422,
+            'This assessment was forwarded to DRRS AA. Status changes (including reopen) are no longer allowed.'
+        );
+
         $old = $assistanceRequest->assessment_status;
         $allowed = match ($old) {
             // Drafts become final only after the e-PIRMA callback verifies a
             // successful signature. A direct status request cannot bypass it.
             'draft' => [],
+            // Legacy non-e-PIRMA path: final→submitted still exists for rare cases
+            // where an assessment reached final without AA forward. UI no longer
+            // exposes Submit; keep the transition for API/admin recovery only.
             'final' => ['draft', 'submitted'],
             'submitted' => in_array($assistanceRequest->status, ['submitted', 'rejected'], true) ? ['draft'] : [],
             default => [],
         };
-        abort_unless(in_array($data['assessment_status'], $allowed, true), 422, 'This assessment status transition is not allowed. Reopen or revise the assessment through the Created Assessments tab.');
+        abort_unless(in_array($data['assessment_status'], $allowed, true), 422, 'This assessment status transition is not allowed. Reopen or revise the assessment through the In Progress tab.');
+        if ($data['assessment_status'] === 'submitted') {
+            $availableTotals = $inventoryBalanceService->availableTotalsByItem();
+            $reservedByItem = app(RisReservationService::class)->totalsByItem();
+            $unavailable = $assistanceRequest->items()->get()->filter(function ($item) use ($availableTotals, $reservedByItem): bool {
+                $key = preg_replace('/[^a-z0-9]+/', '', strtolower((string) $item->item_name)) ?? '';
+                $availableToPlan = max(0, (float) $availableTotals->get($key, 0) - (float) $reservedByItem->get($key, 0));
+
+                return (float) $item->requested_quantity > $availableToPlan;
+            });
+            abort_if(
+                $unavailable->isNotEmpty(),
+                422,
+                'Assessment cannot be submitted because stock available to plan is insufficient for: '.$unavailable->pluck('item_name')->unique()->implode(', ').'.'
+            );
+        }
         $assistanceRequest->update([
             'assessment_status' => $data['assessment_status'],
             'status' => match ($data['assessment_status']) {
@@ -539,9 +939,26 @@ class RequestController extends Controller
         }
 
         $apiKey = (string) config('services.groq.api_key');
-        if ($apiKey === '') return response()->json(['message' => 'Groq AI is not configured. Add GROQ_API_KEY to the server environment, then clear the configuration cache.'], 503);
+        if ($apiKey === '') {
+            return response()->json(['message' => 'Groq AI is not configured. Add GROQ_API_KEY to the server environment, then clear the configuration cache.'], 503);
+        }
 
         $context = (array) ($data['form_context'] ?? []);
+        validator(['incidents' => $context['incidents'] ?? []], [
+            'incidents' => ['array', 'max:25'],
+            'incidents.*.incident_type' => ['nullable', 'string', 'max:255'],
+            'incidents.*.incident_details' => ['nullable', 'string', 'max:1000'],
+            'incidents.*.occurrence_at' => ['nullable', 'date'],
+            'incidents.*.city_municipality' => ['nullable', 'string', 'max:255'],
+            'incidents.*.barangay' => ['nullable', 'string', 'max:255'],
+            'incidents.*.affected_families' => ['nullable', 'integer', 'min:0'],
+            'incidents.*.affected_persons' => ['nullable', 'integer', 'min:0'],
+            'incidents.*.description' => ['nullable', 'string', 'max:3000'],
+            'incidents.*.source_reference' => ['nullable', 'string', 'max:255'],
+        ])->validate();
+        $incidentRows = collect($context['incidents'] ?? [])
+            ->filter(fn ($row) => is_array($row) && filled($row['incident_type'] ?? null))
+            ->values();
         $incidentStatus = trim((string) ($context['incident_status'] ?? ''));
         $reportClassification = trim((string) ($context['source_report_classification'] ?? ''));
         $incidentEndedAt = trim((string) ($context['incident_ended_at'] ?? ''));
@@ -607,6 +1024,8 @@ class RequestController extends Controller
             'Affected geographic area: '.$affectedLocality,
             'Stored requesting-party label (abbreviated form of the governing body; do not state it separately from the canonical identity): '.($requestingAgency !== '' ? $requestingAgency : 'Not specified'),
             'Incident: '.collect([$data['incident_name'] ?? null, $data['incident_details'] ?? null])->filter()->implode(' - '),
+            'Structured incident occurrences (each row is a separate incident; preserve its own date, place, population, details, and source): '.($incidentRows->isNotEmpty() ? $incidentRows->toJson(JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : 'Not supplied'),
+            'Number of separate incidents: '.($incidentRows->isNotEmpty() ? $incidentRows->count() : 1),
             'Purpose: '.($data['purpose'] ?? 'Not specified'),
             'Affected families (preserve this exact number): '.(array_key_exists('affected_families', $data) ? number_format((int) $data['affected_families']) : 'Not supplied'),
             'Affected persons (preserve this exact number): '.(array_key_exists('affected_persons', $context) ? number_format((int) $context['affected_persons']) : 'Not supplied'),
@@ -626,7 +1045,10 @@ class RequestController extends Controller
                 ? 'Use four concise cohesive paragraphs in the required sequence.'
                 : 'Retain the draft’s existing paragraph structure and sequence; do not expand it into a new assessment.';
             $lguIdentityInstruction = 'MLGU means Municipal Local Government Unit, CLGU means City Local Government Unit, and PLGU means Provincial Local Government Unit. The LGU is the governing body; the municipality, city, or province is the geographic area under its jurisdiction. Keep their grammatical roles distinct. Only the geographic area may experience, be affected by, or recover from a disaster. Only the LGU may report, request assistance, monitor, coordinate, validate, or undertake response actions. Never say that an MLGU, CLGU, or PLGU is experiencing or is affected by the hazard. Introduce the canonical requesting-party identity only when describing an LGU action; use the affected geographic area when describing the hazard and its effects. The stored requesting-party label is merely an abbreviated form of the canonical governing-body identity and must not be stated separately.';
-            $modeInstruction = $lguIdentityInstruction.' '.$modeInstruction;
+            $multiIncidentInstruction = $incidentRows->count() > 1
+                ? 'This consolidated request covers multiple separate incidents. Identify every encoded occurrence by its own date and location, preserve its population breakdown, then state only the reconciled combined totals. Never collapse the rows into one event, duplicate a population, or imply that separate incidents occurred on the same date or at the same location. Explain that one consolidated assessment and augmentation recommendation covers them.'
+                : '';
+            $modeInstruction = collect([$lguIdentityInstruction, $multiIncidentInstruction, $modeInstruction])->filter()->implode(' ');
 
             $response = Http::timeout(45)->retry(1, 500)->withToken($apiKey)->acceptJson()->post(rtrim((string) config('services.groq.base_url'), '/').'/chat/completions', [
                 'model' => config('services.groq.model'), 'temperature' => $data['mode'] === 'generate' ? 0.3 : 0.15, 'max_completion_tokens' => 650,
@@ -637,15 +1059,19 @@ class RequestController extends Controller
             ]);
         } catch (\Throwable $exception) {
             report($exception);
+
             return response()->json(['message' => 'Groq AI could not be reached. Your current assessment was not changed.'], 503);
         }
 
         if (! $response->successful()) {
             report(new \RuntimeException('Groq API error '.$response->status().': '.$response->body()));
+
             return response()->json(['message' => 'Groq AI could not enhance the assessment. Confirm the API key, model, and free-tier availability.'], 502);
         }
         $polished = AssessmentNarrative::sanitize((string) data_get($response->json(), 'choices.0.message.content'));
-        if ($polished === '') return response()->json(['message' => 'Groq AI returned an empty result. Your current assessment was not changed.'], 502);
+        if ($polished === '') {
+            return response()->json(['message' => 'Groq AI returned an empty result. Your current assessment was not changed.'], 502);
+        }
         $endedTenseViolation = $endedIncident && preg_match(
             '/\b(is|are)\s+(?:currently\s+)?experiencing\b|\b(has|have)\s+been\s+experiencing\b|\b(is|are)\s+(?:currently\s+)?affecting\b|\bcontinues?\s+to\s+affect\b|\b(is|are)\s+expected\s+to\s+affect\b/i',
             (string) (preg_split('/\R\s*\R/u', $polished, 2)[0] ?? $polished)
@@ -685,8 +1111,9 @@ class RequestController extends Controller
 
     public function responseLetter(AssistanceRequest $assistanceRequest, ResponseLetterDocumentService $documents): BinaryFileResponse
     {
-        abort_if(blank($assistanceRequest->response_drn), 422, 'Enter the Response Letter DRN before generating the document.');
+        abort_if(blank($assistanceRequest->response_drn), 422, 'DRRS AA must assign the Response Letter DRN before downloading the document.');
         $file = $documents->generate($assistanceRequest->load(['items', 'approvals', 'incident']));
+
         return response()->download($file['path'], $file['filename'], [
             'Content-Type' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         ])->deleteFileAfterSend(true);
@@ -694,7 +1121,7 @@ class RequestController extends Controller
 
     public function responseLetterPdf(Request $request, AssistanceRequest $assistanceRequest, ResponseLetterDocumentService $documents, WordToPdfService $converter): BinaryFileResponse
     {
-        abort_if(blank($assistanceRequest->response_drn), 422, 'Enter the Response Letter DRN before generating the document.');
+        abort_if(! $request->boolean('inline') && blank($assistanceRequest->response_drn), 422, 'DRRS AA must assign the Response Letter DRN before downloading the document.');
         $record = $assistanceRequest->load(['items', 'approvals', 'incident', 'requestParty.lguDirectoryEntry.officials', 'requestParty.lguDirectoryEntry.contacts']);
         $word = $documents->generate($record);
 
@@ -704,14 +1131,18 @@ class RequestController extends Controller
             @unlink($word['path']);
         }
 
-        $filename = "Response-Letter-{$record->reference_number}.pdf";
+        $filename = InlinePdfFilename::fromCandidates(
+            $record->response_drn ? 'Response-Letter-'.$record->response_drn : null,
+            $record->reference_number ? 'Response-Letter-'.$record->reference_number : null,
+            'Response-Letter-'.$record->id,
+        );
         $headers = [
             'Content-Type' => 'application/pdf',
             'Cache-Control' => 'no-store, no-cache, must-revalidate, max-age=0',
             'Pragma' => 'no-cache',
         ];
         $response = $request->boolean('inline')
-            ? response()->file($pdfPath, [...$headers, 'Content-Disposition' => 'inline; filename="'.$filename.'"'])
+            ? response()->file($pdfPath, [...$headers, 'Content-Disposition' => InlinePdfFilename::disposition($filename)])
             : response()->download($pdfPath, $filename, $headers);
 
         return $response->deleteFileAfterSend(true);
@@ -719,17 +1150,100 @@ class RequestController extends Controller
 
     public function updateResponseDrn(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit): JsonResponse
     {
-        $data = $request->validate([
-            'prefix' => ['required', 'string', 'max:160', 'regex:/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/'],
-            'year' => ['required', 'digits:2'],
-            'month' => ['required', 'date_format:m'],
-            'specified' => ['required', 'string', 'max:80', 'regex:/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/'],
-        ]);
-        $drn = DocumentReferenceNumber::compose($data['prefix'], $data['year'], $data['month'], $data['specified']);
-        $old = $assistanceRequest->response_drn;
-        $assistanceRequest->update(['response_drn' => $drn]);
-        $audit->log('request.response_drn_updated', $assistanceRequest, ['response_drn' => $old], ['response_drn' => $drn]);
+        abort(410, 'Response Letter DRNs are assigned together with the Assessment DRN by DRRS AA after forwarding.');
+    }
 
-        return response()->json(['drn' => $drn]);
+    /**
+     * Advance RIS / DR printable payload for Document Preview (same shape as Dispatch Plan).
+     */
+    private function serializeRisPreviewPayload(RequisitionIssuanceSlip $slip): array
+    {
+        $tracking = is_array($slip->tracking_data) ? $slip->tracking_data : [];
+        $previewItems = $this->risPreviewItemsFromSlip($slip)->map(fn (array $item) => [
+            'item_name' => $item['item_name'] ?? 'Item',
+            'unit' => $item['unit'] ?? null,
+            'quantity' => (int) ($item['allocated_quantity'] ?? 0),
+            'remarks' => $item['remarks'] ?? null,
+            'warehouse_name' => $item['warehouse_name'] ?? null,
+            'warehouse_id' => $item['warehouse_id'] ?? null,
+        ])->values();
+        $remarks = trim((string) ($slip->remarks ?? ''));
+
+        return [
+            'form' => [
+                'ris_number' => $slip->ris_number,
+                'ris_date' => optional($slip->ris_date)?->format('Y-m-d'),
+                'purpose_of_release' => $slip->purpose_of_release,
+                'recipient' => $slip->recipient,
+                'delivery_site' => $slip->delivery_site,
+                'receiving_representative' => $slip->receiving_representative,
+                'contact_number' => $slip->contact_number,
+                'remarks' => $remarks !== '' ? $remarks : $slip->remarks,
+                'items' => $previewItems,
+            ],
+            'tracking' => [
+                ...$tracking,
+                'ris_drn' => $slip->ris_drn ?: ($tracking['ris_drn'] ?? null),
+                'dr_number' => $slip->dr_number ?: ($tracking['dr_number'] ?? null),
+                'prepared_by_name' => $slip->prepared_by_name ?: ($tracking['prepared_by_name'] ?? null),
+                'release_witnessed_by' => $slip->release_witnessed_by ?: ($tracking['release_witnessed_by'] ?? null),
+                'delivered_at' => optional($slip->delivered_at)?->format('Y-m-d') ?: ($tracking['delivered_at'] ?? null),
+                'returned_particulars' => $slip->returned_particulars ?: ($tracking['returned_particulars'] ?? null),
+                'returned_quantity' => $slip->returned_quantity ?? ($tracking['returned_quantity'] ?? null),
+                'returned_reason' => $slip->returned_reason ?: ($tracking['returned_reason'] ?? null),
+                'driver_name' => $tracking['driver_name'] ?? null,
+                'driver_contact_number' => $tracking['driver_contact_number'] ?? null,
+                'vehicle_plate_number' => $tracking['vehicle_plate_number'] ?? null,
+                'mode_of_transportation' => $tracking['mode_of_transportation'] ?? [],
+                'fulfillment_note' => $tracking['fulfillment_note'] ?? null,
+            ],
+            'has_dr' => filled($slip->dr_number ?: ($tracking['dr_number'] ?? null)),
+        ];
+    }
+
+    private function risPreviewItemsFromSlip(RequisitionIssuanceSlip $slip): Collection
+    {
+        $allocation = $slip->relationLoaded('allocationItems')
+            ? $slip->allocationItems
+            : $slip->allocationItems()->get();
+
+        if ($allocation->isNotEmpty()) {
+            return $allocation->map(fn ($item) => [
+                'warehouse_id' => $item->warehouse_id,
+                'item_name' => $item->item_name,
+                'unit' => $item->unit,
+                'warehouse_name' => $item->warehouse_name,
+                'allocated_quantity' => (int) $item->quantity,
+                'remarks' => $item->remarks,
+            ]);
+        }
+
+        return collect(is_array($slip->items) ? $slip->items : [])->map(fn (array $item) => [
+            'warehouse_id' => $item['warehouse_id'] ?? null,
+            'item_name' => $item['item_name'] ?? 'Item',
+            'unit' => $item['unit'] ?? null,
+            'warehouse_name' => $item['warehouse_name'] ?? null,
+            'allocated_quantity' => (int) ($item['quantity'] ?? 0),
+            'remarks' => $item['remarks'] ?? null,
+        ]);
+    }
+
+    private function asStringList(mixed $value): array
+    {
+        if (is_array($value)) {
+            return collect($value)->map(fn ($item) => trim((string) $item))->filter()->values()->all();
+        }
+        if ($value === null || $value === '') {
+            return [];
+        }
+        $text = trim((string) $value);
+        if ($text === '') {
+            return [];
+        }
+        if (str_contains($text, ',')) {
+            return collect(explode(',', $text))->map(fn ($item) => trim($item))->filter()->values()->all();
+        }
+
+        return [$text === 'Partner' ? 'Partner LGU' : $text];
     }
 }

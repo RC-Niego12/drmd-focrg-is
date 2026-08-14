@@ -3,20 +3,21 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\InventoryItemRequest;
+use App\Models\FniLibraryItem;
 use App\Models\InventoryBatch;
 use App\Models\InventoryItem;
 use App\Models\InventoryTransaction;
-use App\Models\FniLibraryItem;
 use App\Models\OperationalLibraryValue;
+use App\Models\User;
 use App\Models\Warehouse;
 use App\Models\WarehouseSheetImport;
 use App\Services\AuditLogger;
 use App\Services\InventoryBalanceService;
 use App\Services\WarehouseSheetImportService;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -165,8 +166,8 @@ class InventoryController extends Controller
             'sync' => [
                 'url' => config('services.google_sheets.url'),
                 'worksheet' => config('services.google_sheets.worksheet'),
-                'last_synced_at' => \App\Models\WarehouseSheetImport::max('updated_at'),
-                'imported_rows' => \App\Models\WarehouseSheetImport::where('import_status', 'imported')->count(),
+                'last_synced_at' => WarehouseSheetImport::max('updated_at'),
+                'imported_rows' => WarehouseSheetImport::where('import_status', 'imported')->count(),
             ],
         ]);
     }
@@ -220,7 +221,7 @@ class InventoryController extends Controller
 
     public function syncGoogleSheet(Request $request, WarehouseSheetImportService $importer, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage inventory'), 403);
+        abort_unless($this->canManageInventory($request->user()), 403);
 
         $url = config('services.google_sheets.url');
 
@@ -245,7 +246,7 @@ class InventoryController extends Controller
 
     public function receipt(Request $request, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage inventory'), 403);
+        abort_unless($this->canManageInventory($request->user()), 403);
 
         $data = $request->validate([
             'warehouse_id' => ['required', 'exists:warehouses,id'],
@@ -319,7 +320,7 @@ class InventoryController extends Controller
 
     public function release(Request $request, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage inventory'), 403);
+        abort_unless($this->canManageInventory($request->user()), 403);
 
         $data = $request->validate([
             'inventory_batch_id' => ['required', 'exists:inventory_batches,id'],
@@ -641,5 +642,15 @@ class InventoryController extends Controller
         } catch (\Throwable) {
             return PHP_INT_MAX;
         }
+    }
+
+    private function canManageInventory(?User $user): bool
+    {
+        if (! $user) {
+            return false;
+        }
+
+        return $user->hasAnyRole(['Super Admin', 'RROS', 'RROS AA'])
+            || $user->can('manage inventory');
     }
 }

@@ -16,7 +16,7 @@ class LguDromicRequestedItem extends Model
     protected function casts(): array
     {
         return [
-            'requested_quantity' => 'decimal:2',
+            'requested_quantity' => 'integer',
         ];
     }
 

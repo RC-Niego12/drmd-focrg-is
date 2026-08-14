@@ -1,5 +1,6 @@
 import { Head, Link, router, useForm, usePage } from "@inertiajs/react";
 import {
+  BadgeCheck,
   CheckCircle2,
   ClipboardList,
   Clock3,
@@ -10,7 +11,12 @@ import {
   ListChecks,
   Mail,
   Download,
+  PenLine,
   Printer,
+  RefreshCw,
+  History,
+  Route,
+  Truck,
   XCircle,
   X,
 } from "lucide-react";
@@ -22,12 +28,29 @@ import AppLayout, {
   TableActionButton,
 } from "@/Layouts/AppLayout";
 import SearchableSelect from "@/Components/SearchableSelect";
-import { currentDrnParts, ResponseDrnModal } from "@/Components/DocumentDrnFields";
+import { currentDrnParts } from "@/Components/DocumentDrnFields";
+import PdfPreviewModal from "@/Components/PdfPreviewModal";
+import { EpirmaTrackStatusPanel } from "@/Components/EpirmaSignedDocumentsModal";
 import { formatDate, formatDateTime } from "@/Utils/dateFormat";
+import {
+  coerceWholeQuantity,
+  wholeQuantityInputValue,
+} from "@/Utils/wholeQuantity";
+import {
+  composeRisDrn,
+  risDrnPrefixForDate,
+  risDrnSequenceFromValue,
+} from "@/Utils/risDrn";
+import {
+  buildRrosDocumentPreviewTabs,
+  signedAssessmentViewUrl,
+} from "@/Utils/rrosDocumentPreview";
 import AssessmentExcelForm from "./AssessmentExcelForm";
 import DrrsRequestsWorkspaceTabs from "@/Components/DrrsRequestsWorkspaceTabs";
-import SystemTabs from "@/Components/SystemTabs";
+import SectionTabs from "@/Components/SectionTabs";
 import ReliefAssessmentGateBanner, { reliefLetterBlocksAssessment } from "@/Components/ReliefAssessmentGateBanner";
+import { listenRealtime } from "@/realtime";
+import RisFormModal from "./RisFormModal";
 
 const localDateTimeValue = () => {
   const now = new Date();
@@ -104,6 +127,83 @@ const displayRequestReference = (request) =>
   || request?.assessment_form_data?.source_lgu_request_reference
   || request?.reference_number;
 
+const approvedRequestColumns = [
+  "#",
+  "Request Details",
+  "Request DRN",
+  "Requesting Party / Office",
+  "Purpose / Disaster Incident",
+  "Assessment Status",
+  { label: "Action", align: "center", actionColumn: true },
+];
+
+const assessmentDisplayStatus = (request) => {
+  if (request.epirma_assessment_signed_at && request.epirma_response_letter_signed_at) {
+    return { label: "Approved/Signed", className: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200" };
+  }
+  if (request.epirma_forwarded_to_drrs_aa_at || ["draft", "final", "submitted"].includes(request.assessment_status)) {
+    return { label: "In Progress", className: "bg-sky-100 text-sky-800 dark:bg-sky-950/50 dark:text-sky-200" };
+  }
+  return { label: "Pending", className: "bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-200" };
+};
+
+/** Display label for RIS slip status. */
+const risSlipStatusDisplay = (status) => {
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "prepared") {
+    return { label: "In progress", className: "text-sky-700 dark:text-sky-300" };
+  }
+  if (normalized === "draft") {
+    return { label: "Draft", className: "text-slate-600 dark:text-zinc-300" };
+  }
+  if (normalized === "approved") {
+    return { label: "Approved", className: "text-emerald-700 dark:text-emerald-300" };
+  }
+  if (normalized === "completed") {
+    return { label: "Completed", className: "text-emerald-700 dark:text-emerald-300" };
+  }
+  return {
+    label: String(status || "").replaceAll("_", " "),
+    className: "text-emerald-700 dark:text-emerald-300",
+  };
+};
+
+function ApprovedRequestDetailCells({ request }) {
+  return (
+    <>
+      <td className="px-4 py-3 font-medium">
+        <p className="font-black">
+          {displayRequestReference(request)}
+        </p>
+        {request.source_lgu_dromic_report && (
+          <p className="mt-1 text-[11px] font-semibold text-violet-700">
+            Linked LGU relief request
+          </p>
+        )}
+        {request.source_lgu_dromic_report?.lgu_relief_request_reference
+          && request.reference_number
+          && request.source_lgu_dromic_report.lgu_relief_request_reference !== request.reference_number && (
+          <p className="mt-1 text-[10px] font-semibold text-slate-400">
+            Legacy system code {request.reference_number}
+          </p>
+        )}
+        <p className="mt-1 text-[11px] font-semibold text-slate-500">
+          {request.submission_type === "proposal" ? `Proposal - ${request.proposal_type || "Unspecified"}` : "FNI Request"} · Received {formatDate(request.date_received_by_drmd ?? request.date_requested)}
+        </p>
+      </td>
+      <td className="whitespace-nowrap px-4 py-3">{request.request_drn || "-"}</td>
+      <td className="min-w-[220px] px-4 py-3">
+        <p className="font-bold">{request.source_lgu_dromic_report ? uniformLguName(request) : request.requesting_agency}</p>
+        <p className="mt-1 text-xs text-slate-500">{request.source_lgu_dromic_report ? uniformLguOfficeDetails(request) : (request.office_agency_details || "-")}</p>
+      </td>
+      <td className="min-w-[220px] px-4 py-3">
+        <p className="font-medium">{requestPurpose(request)}</p>
+        <p className="mt-1 text-xs text-slate-500">{requestIncident(request)}</p>
+      </td>
+    </>
+  );
+}
+
 export default function Index({
   requests,
   assessmentTypes,
@@ -111,24 +211,74 @@ export default function Index({
   fniLibraryItems = [],
   libraryOptions = {},
   drrsSignatories = [],
+  rrosSignatories = [],
   requestParties = [],
   psgc = {},
   socialWorkers = [],
   warehouseStock = [],
+  warehouseReservations = [],
   assessments = { data: [] },
+  approved = { data: [] },
+  inProgress = { data: [] },
+  risApproved = { data: [] },
+  risCompleted = { data: [] },
+  risTransactions = [],
+  forSigning = { data: [] },
   drnPrefixes = [],
   workspaceSummary = null,
   reliefAssessmentGate = null,
   highlightRequestId = null,
+  workspaceMode = "drrs",
+  risSync = null,
+  stfSync = null,
+  stfRecords = [],
 }) {
   const currentUser = usePage().props.auth.user;
   const permissions = currentUser?.permissions ?? [];
   const canEncode = permissions.includes("encode requests");
   const canProcess = permissions.includes("process requests");
-  const currentStockAvailability = (itemName) =>
-    warehouseStock
-      .filter((row) => stockItemKey(row.item) === stockItemKey(itemName))
-      .reduce((total, row) => total + Number(row.available || 0), 0);
+  const isRrosWorkspace = workspaceMode === "rros";
+  const canAssignRisDrn = currentUser?.roles?.some((role) => ["RROS", "RROS AA", "Super Admin"].includes(role))
+    || permissions.includes("assign ris drn");
+  // Prefer new inProgress prop; fall back to legacy forSigning alias.
+  const inProgressRows = Array.isArray(inProgress?.data) ? inProgress : forSigning;
+  const pageUrl = usePage().url || "";
+  const sectionFromUrl = (() => {
+    try {
+      const query = pageUrl.includes("?") ? new URLSearchParams(pageUrl.split("?")[1]) : null;
+      const value = query?.get("section");
+      return value === "stf" ? "stf" : "fni";
+    } catch {
+      return "fni";
+    }
+  })();
+  const [workspaceSection, setWorkspaceSection] = useState(sectionFromUrl);
+  useEffect(() => {
+    setWorkspaceSection(sectionFromUrl);
+  }, [sectionFromUrl]);
+  const currentStockAvailability = (itemName) => {
+    const key = stockItemKey(itemName);
+    if (!key) return 0;
+    const physicalByWarehouse = warehouseStock
+      .filter((row) => stockItemKey(row.item) === key)
+      .reduce((map, row) => {
+        const warehouseKey = String(row.warehouse_id ?? "");
+        map.set(warehouseKey, (map.get(warehouseKey) || 0) + Math.max(0, Number(row.available) || 0));
+        return map;
+      }, new Map());
+    const reservedByWarehouse = warehouseReservations
+      .filter((row) => (row.item_key || stockItemKey(row.item_name)) === key)
+      .reduce((map, row) => {
+        const warehouseKey = String(row.warehouse_id ?? "");
+        map.set(warehouseKey, (map.get(warehouseKey) || 0) + Math.max(0, Number(row.quantity) || 0));
+        return map;
+      }, new Map());
+    let total = 0;
+    physicalByWarehouse.forEach((physical, warehouseKey) => {
+      total += Math.max(0, physical - (reservedByWarehouse.get(warehouseKey) || 0));
+    });
+    return total;
+  };
   const assessmentDrnDefaults = currentDrnParts(drnPrefixes.find((row) => row.context === "assessment")?.value);
   const [provinceCode, setProvinceCode] = useState("");
   const [municipalityCode, setMunicipalityCode] = useState("");
@@ -140,11 +290,167 @@ export default function Index({
   );
   const [assessmentRecord, setAssessmentRecord] = useState(null);
   const [readyRecord, setReadyRecord] = useState(null);
-  const [responsePrompt, setResponsePrompt] = useState(null);
-  const [epirmaStatusError, setEpirmaStatusError] = useState(null);
   const [documentPreview, setDocumentPreview] = useState(null);
   const [documentPreviewTab, setDocumentPreviewTab] = useState("request");
+  const [pdfPreview, setPdfPreview] = useState({
+    open: false,
+    title: "",
+    subtitle: null,
+    src: null,
+    tabs: null,
+    initialTab: null,
+    kind: null,
+    trackRequestId: null,
+    wide: false,
+  });
+  const [trackDocuments, setTrackDocuments] = useState([]);
+  const [trackBusy, setTrackBusy] = useState(false);
+  const [trackError, setTrackError] = useState(null);
+  const [epirmaStatusError, setEpirmaStatusError] = useState(null);
+  const [risRequest, setRisRequest] = useState(null);
+  const [risFormMode, setRisFormMode] = useState("create");
+  const [risDrnEditor, setRisDrnEditor] = useState({ open: false, slip: null, sequence: "", error: "", saving: false });
+  const [risSyncing, setRisSyncing] = useState(false);
+  const [risSyncNotice, setRisSyncNotice] = useState(null);
+  const [risSyncHistory, setRisSyncHistory] = useState({ open: false, loading: false, rows: [] });
+  const [stfSyncing, setStfSyncing] = useState(false);
+  const [stfSyncNotice, setStfSyncNotice] = useState(null);
+  const [stfSyncHistory, setStfSyncHistory] = useState({ open: false, loading: false, rows: [] });
   const editAssessmentOpenedRef = useRef(false);
+  const realtimeReloadTimer = useRef(null);
+  const risDrnEditorPrefix = risDrnEditor.slip
+    ? risDrnPrefixForDate(risDrnEditor.slip.ris_date)
+    : risDrnPrefixForDate();
+  const openRisDrnEditor = (slip) => {
+    const prefix = risDrnPrefixForDate(slip?.ris_date);
+    setRisDrnEditor({
+      open: true,
+      slip,
+      sequence: risDrnSequenceFromValue(slip?.ris_drn || "", prefix),
+      error: "",
+      saving: false,
+    });
+  };
+  const saveRisDrn = async (event) => {
+    event.preventDefault();
+    const prefix = risDrnPrefixForDate(risDrnEditor.slip?.ris_date);
+    const sequence = String(risDrnEditor.sequence || "").replace(/^-+/, "").trim();
+    if (!sequence) {
+      setRisDrnEditor((current) => ({
+        ...current,
+        saving: false,
+        error: `Enter the final RIS / DR DRN sequence after ${prefix}`,
+      }));
+      return;
+    }
+    const ris_drn = composeRisDrn(prefix, sequence);
+    setRisDrnEditor((current) => ({ ...current, saving: true, error: "" }));
+    const csrf = document.querySelector('meta[name="csrf-token"]')?.content || "";
+    const response = await fetch(`/rros/ris/${risDrnEditor.slip.id}/drn`, { method: "PATCH", credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRF-TOKEN": csrf }, body: JSON.stringify({ ris_drn }) });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const validation = payload.errors?.ris_drn;
+      setRisDrnEditor((current) => ({ ...current, saving: false, error: validation?.[0] || validation || payload.message || "Unable to save RIS DRN." }));
+      return;
+    }
+    setRisDrnEditor({ open: false, slip: null, sequence: "", error: "", saving: false });
+    refreshRisWorkspaceData();
+  };
+
+  const refreshRisWorkspaceData = () => {
+    window.__drmdSilentWorkspaceRefresh = true;
+    router.reload({
+      only: ["requests", "approved", "inProgress", "risApproved", "risCompleted", "risTransactions", "forSigning", "workspaceSummary", "risSync", "stfSync", "stfRecords"],
+      preserveScroll: true,
+      preserveState: true,
+      onFinish: () => {
+        window.__drmdSilentWorkspaceRefresh = false;
+      },
+    });
+  };
+
+  const syncRisDr = async () => {
+    setRisSyncing(true);
+    setRisSyncNotice(null);
+
+    try {
+      const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
+      const response = await fetch("/rros/ris/sync", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-CSRF-TOKEN": csrf,
+        },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(payload.message || (response.status === 419
+          ? "Your session expired. Refresh the page and try again."
+          : "RIS/DR synchronization failed. No data was changed."));
+      }
+
+      setRisSyncNotice({ type: "success", message: payload.message });
+      refreshRisWorkspaceData();
+    } catch (error) {
+      setRisSyncNotice({
+        type: "error",
+        message: error?.message || "RIS/DR synchronization failed. No data was changed.",
+      });
+    } finally {
+      setRisSyncing(false);
+    }
+  };
+
+  const syncStf = async () => {
+    setStfSyncing(true);
+    setStfSyncNotice(null);
+
+    try {
+      const csrf = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content") || "";
+      const response = await fetch("/rros/stf/sync", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-CSRF-TOKEN": csrf,
+        },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(payload.message || (response.status === 419
+          ? "Your session expired. Refresh the page and try again."
+          : "STF synchronization failed. No data was changed."));
+      }
+
+      setStfSyncNotice({ type: "success", message: payload.message });
+      refreshRisWorkspaceData();
+    } catch (error) {
+      setStfSyncNotice({
+        type: "error",
+        message: error?.message || "STF synchronization failed. No data was changed.",
+      });
+    } finally {
+      setStfSyncing(false);
+    }
+  };
+
+  const openStfHistory = async () => {
+    setStfSyncHistory({ open: true, loading: true, rows: [] });
+    try {
+      const response = await fetch("/rros/stf/sync-history", { headers: { Accept: "application/json" } });
+      const payload = await response.json();
+      setStfSyncHistory({ open: true, loading: false, rows: payload.data || [] });
+    } catch {
+      setStfSyncHistory({ open: true, loading: false, rows: [] });
+    }
+  };
 
   useEffect(() => {
     const id = highlightRequestId ? Number(highlightRequestId) : null;
@@ -178,6 +484,40 @@ export default function Index({
       window.clearTimeout(clearTimer);
     };
   }, [highlightRequestId]);
+
+  useEffect(() => {
+    const reloadLists = () => {
+      window.clearTimeout(realtimeReloadTimer.current);
+      realtimeReloadTimer.current = window.setTimeout(() => {
+        router.reload({
+          only: ["requests", "assessments", "approved", "inProgress", "risApproved", "risCompleted", "risTransactions", "forSigning", "workspaceSummary", "risSync"],
+          preserveScroll: true,
+          preserveState: true,
+        });
+      }, 350);
+    };
+
+    const stopRequestUpdated = listenRealtime("request.updated", reloadLists);
+    const stopEpirmaChanged = listenRealtime("epirma.status.changed", reloadLists);
+    const stopRisEpirmaChanged = listenRealtime("ris.epirma.status.changed", reloadLists);
+    const stopRisSync = listenRealtime("ris.sync.completed", () => {
+      if (isRrosWorkspace) {
+        refreshRisWorkspaceData();
+        return;
+      }
+      reloadLists();
+    });
+    const stopRisUpdated = listenRealtime("ris.updated", reloadLists);
+
+    return () => {
+      stopRequestUpdated();
+      stopEpirmaChanged();
+      stopRisEpirmaChanged();
+      stopRisSync();
+      stopRisUpdated();
+      window.clearTimeout(realtimeReloadTimer.current);
+    };
+  }, []);
 
   const form = useForm({
     request_party_id: "",
@@ -226,6 +566,7 @@ export default function Index({
       prepared_by_designation: currentUser?.designation ?? "",
       prepared_at: localDateTimeValue(),
       assessment_date: localDateValue(),
+      incidents: [],
       reviewed_at: "",
       approved_at: "",
       reviewed_by: drrsSignatories.find((row) => row.context === "reviewed_by")?.value ?? "",
@@ -374,18 +715,49 @@ export default function Index({
     const sourceResponseActions = (Array.isArray(sourcePayload.response_action_rows) ? sourcePayload.response_action_rows : [])
       .map((row) => String(row?.action_intervention ?? row?.action ?? "").trim())
       .filter(Boolean);
+    const existingPurpose = allowedPurposes.includes(existingMeta.response_purpose || request.purpose) ? (existingMeta.response_purpose || request.purpose) : "Relief Augmentation";
+    const sourceIncidentEntries = (() => {
+      if (Array.isArray(existingMeta.incidents) && existingMeta.incidents.length) {
+        return existingMeta.incidents;
+      }
+      if (existingPurpose !== "Relief Augmentation") return [];
+      const primary = {
+        incident_type: sourceIncidentName || request.incident?.name || "",
+        incident_details: sourceIncidentDetails,
+        occurrence_at: String(sourceOccurrence || "").slice(0, 16),
+        city_municipality: request.municipality ?? sourceReport?.municipality ?? "",
+        barangay: request.barangay ?? sourceReport?.barangay ?? sourceAffectedAreas[0] ?? "",
+        affected_families: request.affected_families ?? sourcePayload.affected_families ?? sourceReport?.affected_families ?? "",
+        affected_persons: sourcePayload.affected_persons ?? "",
+        description: sourcePayload.incident_summary ?? "",
+        source_reference: sourceReport?.reference_number ?? request.request_drn ?? "",
+      };
+      const related = (Array.isArray(sourcePayload.related_incident_rows) ? sourcePayload.related_incident_rows : [])
+        .filter((row) => row && Object.values(row).some((value) => String(value ?? "").trim()))
+        .map((row) => ({
+          incident_type: row.incident_type === "Others" ? row.incident_type_other : row.incident_type,
+          incident_details: row.description ?? "",
+          occurrence_at: String(row.occurrence_at || row.occurrence_date || "").slice(0, 16),
+          city_municipality: row.city_municipality ?? request.municipality ?? sourceReport?.municipality ?? "",
+          barangay: row.barangay ?? "",
+          affected_families: row.affected_families ?? "",
+          affected_persons: row.affected_persons ?? "",
+          description: row.description ?? "",
+          source_reference: sourceReport?.reference_number ?? request.request_drn ?? "",
+        }));
+      return [primary, ...related];
+    })();
     const displayedRequestingParty = sourceReport
       ? uniformLguName(request)
       : (request.requesting_agency ?? party?.requesting_party ?? "");
-    const existingPurpose = allowedPurposes.includes(existingMeta.response_purpose || request.purpose) ? (existingMeta.response_purpose || request.purpose) : "Relief Augmentation";
     const existingItems = (request.items ?? []).map((item) => ({
       inventory_item_id: item.inventory_item_id ?? "",
       fni_library_item_id: String(item.fni_library_item_id ?? ""),
       source_warehouse_id: item.source_warehouse_id ?? "",
       source_warehouse_name: item.source_warehouse_name ?? "",
-      available_quantity: currentStockAvailability(item.item_name),
+      available_quantity: Math.trunc(Number(currentStockAvailability(item.item_name) || 0)),
       item_name: item.item_name ?? "",
-      requested_quantity: Math.max(1, Math.round(Number(item.requested_quantity ?? 1))),
+      requested_quantity: Math.max(1, Math.trunc(Number(item.requested_quantity ?? 1)) || 1),
       unit: item.unit ?? "",
       priority: item.priority ?? "normal",
       remarks: item.remarks ?? "",
@@ -442,6 +814,7 @@ export default function Index({
         assessment_date: !request.assessment_status || request.assessment_status === "draft"
           ? localDateValue()
           : (existingMeta.assessment_date ?? localDateValue()),
+        incidents: sourceIncidentEntries,
         incident_type: existingMeta.incident_type ?? sourcePayload.incident_type ?? "",
         incident_specific_details: sourceIncidentDetails,
         occurrence_started_at: existingMeta.occurrence_started_at ?? sourceOccurrence,
@@ -471,8 +844,14 @@ export default function Index({
         assessment_drn_year: existingMeta.assessment_drn_year ?? assessmentDrnDefaults.year,
         assessment_drn_month: existingMeta.assessment_drn_month ?? assessmentDrnDefaults.month,
         assessment_drn_specified: existingMeta.assessment_drn_specified ?? "",
-        previous_augmentations: existingMeta.previous_augmentations ?? Array.from({ length: 3 }, () => ({ unit: "", description: "", quantity: "", remarks: "" })),
-        delivery_batches: existingMeta.delivery_batches ?? Array.from({ length: 5 }, () => ({ quantity: "", date: "", available: "", details: "" })),
+        previous_augmentations: (existingMeta.previous_augmentations ?? Array.from({ length: 3 }, () => ({ unit: "", description: "", quantity: "", remarks: "" }))).map((row) => ({
+          ...row,
+          quantity: row?.quantity === "" || row?.quantity == null ? "" : coerceWholeQuantity(row.quantity, { min: 0 }),
+        })),
+        delivery_batches: (existingMeta.delivery_batches ?? Array.from({ length: 5 }, () => ({ quantity: "", date: "", available: "", details: "" }))).map((row) => ({
+          ...row,
+          quantity: row?.quantity === "" || row?.quantity == null ? "" : coerceWholeQuantity(row.quantity, { min: 0 }),
+        })),
       },
       items: existingItems.length ? existingItems : [{ inventory_item_id: "", fni_library_item_id: "", source_warehouse_id: "", source_warehouse_name: "", available_quantity: "", item_name: "", requested_quantity: 1, unit: "", priority: "normal", remarks: "" }],
     });
@@ -507,6 +886,40 @@ export default function Index({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assessments.data, requests.data]);
 
+  // Keep open RIS / DR workspace in sync after draft/prepare/post saves (Inertia back()).
+  useEffect(() => {
+    if (!risRequest?.id) return;
+    const pools = [
+      ...(approved.data ?? []),
+      ...(inProgressRows.data ?? []),
+      ...(risApproved.data ?? []),
+      ...(risCompleted.data ?? []),
+      ...(requests.data ?? []),
+    ];
+    const fresh = pools.find(
+      (row) => Number(row.id) === Number(risRequest.id),
+    );
+    if (!fresh) return;
+    const prevSlip = risRequest.requisition_issuance_slip;
+    const nextSlip = fresh.requisition_issuance_slip;
+    if (
+      Number(prevSlip?.id || 0) !== Number(nextSlip?.id || 0) ||
+      String(prevSlip?.status || "") !== String(nextSlip?.status || "") ||
+      String(prevSlip?.updated_at || "") !== String(nextSlip?.updated_at || "")
+    ) {
+      setRisRequest(fresh);
+    }
+  }, [approved.data, inProgressRows.data, risApproved.data, risCompleted.data, requests.data, risRequest]);
+
+  const openRisForm = (request, mode = "create") => {
+    setRisFormMode(mode);
+    setRisRequest(request);
+  };
+
+  const closeRisForm = () => {
+    setRisRequest(null);
+    setRisFormMode("create");
+  };
   const setItem = (index, key, value) => {
     const items = [...form.data.items];
     items[index] = { ...items[index], [key]: value };
@@ -537,56 +950,298 @@ export default function Index({
 
   const performResponseAction = (request, action) => {
     if (action === "preview") window.location.assign(`/requests/${request.id}/assessment-form?document=response&confirmed=1`);
-    else if (action === "print") window.open(`/requests/${request.id}/response-letter-pdf?inline=1`, "_blank", "noopener,noreferrer");
+    else if (action === "print") {
+      setPdfPreview({
+        open: true,
+        title: "Response Letter",
+        subtitle: request.reference_number,
+        src: `/requests/${request.id}/response-letter-pdf?inline=1`,
+      });
+    }
     else if (action === "word") window.location.assign(`/requests/${request.id}/response-letter`);
     else window.location.assign(`/requests/${request.id}/response-letter-pdf`);
   };
 
   const openResponseAction = (request, action) => {
-    if (hasCompleteDrn(request.response_drn)) performResponseAction(request, action);
-    else setResponsePrompt({ request, action });
+    performResponseAction(request, action);
   };
 
+  const refreshTrackDocuments = async (requestId, { sync = false } = {}) => {
+    if (!requestId) return;
+    setTrackBusy(true);
+    setTrackError(null);
+    try {
+      const response = await fetch(`/requests/${requestId}/epirma/documents${sync ? "?sync=1" : ""}`, {
+        headers: { Accept: "application/json", "X-Requested-With": "XMLHttpRequest" },
+        credentials: "same-origin",
+      });
+      const payload = await response.json().catch(() => null);
+      if (payload?.success && Array.isArray(payload.data)) {
+        setTrackDocuments(payload.data);
+        return;
+      }
+      setTrackError(payload?.message || "Unable to load e-PIRMA track status.");
+    } catch {
+      setTrackError("Unable to load e-PIRMA track status.");
+    } finally {
+      setTrackBusy(false);
+    }
+  };
+
+  const openApprovedDocuments = (request) => {
+    setTrackDocuments([]);
+    setTrackError(null);
+
+    // RROS: LGU Request | Assessment | Response Letter | RIS | DR | RDS | CSMR
+    if (isRrosWorkspace) {
+      const built = buildRrosDocumentPreviewTabs(request, {
+        includeResponseLetter: true,
+        includeRdsCsmr: true,
+      });
+      setPdfPreview({
+        open: true,
+        title: displayRequestReference(request),
+        subtitle: request.requesting_agency || null,
+        src: null,
+        kind: null,
+        message: null,
+        initialTab: built.initialTab,
+        trackRequestId: request.id,
+        wide: true,
+        tabs: built.tabs,
+      });
+      return;
+    }
+
+    const assessmentUrl = signedAssessmentViewUrl(request);
+    const sourceRequest = request.source_lgu_dromic_report;
+    const signedRequestUrl = sourceRequest?.id && sourceRequest?.lgu_signed_request_path
+      ? `/lgu/dromic-sitrep/${sourceRequest.id}/signed-copy/request`
+      : null;
+    setPdfPreview({
+      open: true,
+      title: displayRequestReference(request),
+      subtitle: request.requesting_agency || null,
+      src: null,
+      kind: "signed",
+      initialTab: signedRequestUrl ? "request" : assessmentUrl ? "assessment" : request.signed_response_letter_view_url ? "response" : "track",
+      trackRequestId: request.id,
+      wide: false,
+      tabs: [
+        {
+          key: "request",
+          label: "Signed LGU Request Letter",
+          src: signedRequestUrl,
+          kind: "signed",
+          message: signedRequestUrl ? null : "Signed LGU request letter unavailable for this FNI request.",
+        },
+        {
+          key: "assessment",
+          label: "Signed Assessment",
+          src: assessmentUrl,
+          kind: "signed",
+          message: assessmentUrl ? null : "Signed file unavailable from e-PIRMA",
+        },
+        {
+          key: "response",
+          label: "Signed Response Letter",
+          src: request.signed_response_letter_view_url || null,
+          kind: "signed",
+          message: request.signed_response_letter_view_url ? null : "Signed file unavailable from e-PIRMA",
+        },
+        {
+          key: "track",
+          label: "Track e-PIRMA Status",
+          icon: Route,
+          panel: true,
+        },
+      ],
+    });
+    refreshTrackDocuments(request.id, { sync: true });
+  };
+
+  const openRisTransaction = (transaction) => {
+    const tabs = [
+      {
+        key: "ris",
+        label: "RIS",
+        src: transaction.ris_preview_url,
+        kind: "advance",
+        message: transaction.ris_preview_url ? null : "RIS preview is unavailable.",
+      },
+      {
+        key: "dr",
+        label: "DR",
+        src: transaction.dr_preview_url,
+        kind: "advance",
+        message: transaction.dr_preview_url ? null : "No Delivery Receipt is recorded for this transaction.",
+      },
+    ];
+    setPdfPreview({
+      open: true,
+      title: transaction.ris_number || "RIS / DR transaction",
+      subtitle: [transaction.dr_number, transaction.recipient].filter(Boolean).join(" • ") || null,
+      src: null,
+      kind: null,
+      message: null,
+      initialTab: "ris",
+      trackRequestId: null,
+      wide: true,
+      tabs,
+    });
+  };
+
+  const openStfTransaction = (transaction) => {
+    setPdfPreview({
+      open: true,
+      title: transaction.stf_reference || "STF transaction",
+      subtitle: [formatDate(transaction.transaction_date), transaction.recipient].filter(Boolean).join(" • "),
+      src: transaction.preview_url,
+      kind: "advance",
+      message: transaction.preview_url ? null : "STF preview is unavailable.",
+      initialTab: null,
+      trackRequestId: null,
+      wide: true,
+      tabs: null,
+    });
+  };
+
+  const closePdfPreview = () => {
+    setPdfPreview({
+      open: false,
+      title: "",
+      subtitle: null,
+      src: null,
+      tabs: null,
+      initialTab: null,
+      kind: null,
+      trackRequestId: null,
+      message: null,
+      wide: false,
+    });
+    setTrackDocuments([]);
+    setTrackError(null);
+    setTrackBusy(false);
+  };
+
+  const previewTabs = useMemo(() => {
+    if (!pdfPreview.tabs) return null;
+    return pdfPreview.tabs.map((tab) => {
+      if (tab.key !== "track" || !tab.panel) return tab;
+      return {
+        ...tab,
+        panel: (
+          <EpirmaTrackStatusPanel
+            documents={trackDocuments}
+            busy={trackBusy}
+            error={trackError}
+            canRetry={false}
+            onRefresh={() => refreshTrackDocuments(pdfPreview.trackRequestId, { sync: true })}
+            onView={(doc) => {
+              const isResponse = (doc.document_type || "") === "response_letter";
+              const appViewUrl = doc.app_view_url
+                || (pdfPreview.trackRequestId && doc.id
+                  ? `/requests/${pdfPreview.trackRequestId}/epirma/documents/${doc.id}/view`
+                  : null);
+              const draftUrl = isResponse
+                ? `/requests/${pdfPreview.trackRequestId}/response-letter-pdf?inline=1`
+                : `/requests/${pdfPreview.trackRequestId}/assessment-pdf?inline=1`;
+              const isSigned = Boolean(doc.is_signed || doc.routing_status === "signed");
+              const signedSrc = isSigned ? appViewUrl : null;
+              setPdfPreview((current) => ({
+                ...current,
+                open: true,
+                title: isResponse ? "Response Letter" : "Assessment",
+                subtitle: doc.document_name || current.subtitle,
+                src: isSigned ? signedSrc : (doc.local_view_url || draftUrl),
+                kind: isSigned ? "signed" : "draft",
+                message: isSigned && !signedSrc
+                  ? "Signed file unavailable from e-PIRMA"
+                  : (isSigned ? null : "Draft / local preview — this is not the e-PIRMA signed PDF yet."),
+                tabs: null,
+                initialTab: null,
+                trackRequestId: null,
+                wide: false,
+              }));
+            }}
+          />
+        ),
+      };
+    });
+  }, [pdfPreview.tabs, pdfPreview.trackRequestId, trackDocuments, trackBusy, trackError]);
+
+  const stillForActionCount = Number(workspaceSummary?.ris_still_for_action ?? 0);
+  const stillForActionTip = stillForActionCount === 0
+    ? "No requests for action."
+    : stillForActionCount === 1
+      ? "1 request for action."
+      : `${stillForActionCount} requests for action.`;
+  const inProgressCount = Number(workspaceSummary?.ris_in_progress ?? workspaceSummary?.ris_for_signing ?? 0);
+  const inProgressTip = inProgressCount === 0
+    ? "No RIS/DR awaiting approval."
+    : inProgressCount === 1
+      ? "1 RIS/DR awaiting approval."
+      : `${inProgressCount} RIS/DR awaiting approval.`;
+  const risApprovedCount = Number(workspaceSummary?.ris_approved ?? 0);
+  const risApprovedTip = risApprovedCount === 0
+    ? "No approved RIS/DR. Ensure completion of supporting documents."
+    : risApprovedCount === 1
+      ? "1 approved RIS/DR. Ensure completion of supporting documents."
+      : `${risApprovedCount} approved RIS/DR. Ensure completion of supporting documents.`;
+  const risCompletedCount = Number(workspaceSummary?.ris_completed ?? 0);
+  const risCompletedTip = risCompletedCount === 0
+    ? "No RIS/DR transaction has been completed yet."
+    : risCompletedCount === 1
+      ? "1 RIS/DR has been completed with attached documents."
+      : `${risCompletedCount} RIS/DR have been completed with attached documents.`;
+
   return (
-    <AppLayout title="FNI Requests">
-      <Head title="FNI Requests" />
-      <DrrsRequestsWorkspaceTabs active="fni" />
-      <ReliefAssessmentGateBanner
+    <AppLayout title={isRrosWorkspace ? "RIS/DR/STF Workspace" : "FNI Requests"}>
+      <Head title={isRrosWorkspace ? "RIS/DR/STF Workspace" : "FNI Requests"} />
+      <DrrsRequestsWorkspaceTabs
+        active={isRrosWorkspace ? workspaceSection : "fni"}
+        onChange={isRrosWorkspace ? setWorkspaceSection : undefined}
+        mode={isRrosWorkspace ? "rros" : "drrs"}
+      />
+      {!isRrosWorkspace && <ReliefAssessmentGateBanner
         awaitingValidation={reliefAssessmentGate?.awaiting_validation}
         needsLguAction={reliefAssessmentGate?.needs_lgu_action}
         context="fni"
-      />
-      {workspaceSummary && (
+      />}
+      {workspaceSummary && (!isRrosWorkspace || workspaceSection === "fni") && (
         <div className="grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3 border-x border-b border-slate-200 bg-slate-50/70 p-4 dark:border-zinc-800 dark:bg-zinc-950/30">
-          {[
+          {(isRrosWorkspace ? [
+            [ListChecks, "Total", workspaceSummary.approved, "indigo", [], "Signed FNI requests in the RIS/DR workspace."],
+            [ClipboardList, "Still for Action", stillForActionCount, "amber", [], stillForActionTip],
+            [FileSpreadsheet, "In Progress", inProgressCount, "blue", [], inProgressTip],
+            [BadgeCheck, "Approved", workspaceSummary.ris_approved ?? 0, "emerald", [], risApprovedTip],
+            [CheckCircle2, "Completed", workspaceSummary.ris_completed ?? 0, "violet", [], risCompletedTip],
+          ] : [
             [
               ListChecks,
-              "Requests",
+              "Total Requests",
               workspaceSummary.requests,
               "indigo",
             ],
             [
               Clock3,
-              "Still for action",
+              "Still for Action",
               workspaceSummary.still_for_action,
               "amber",
-              [
-                ["Awaiting", workspaceSummary.breakdown?.awaiting_assessment],
-                ["Draft", workspaceSummary.breakdown?.draft_under_review],
-              ],
             ],
             [
-              CheckCircle2,
-              "Acted",
-              workspaceSummary.acted,
-              "emerald",
-              [
-                ["Final", workspaceSummary.breakdown?.final],
-                ["Submitted", workspaceSummary.breakdown?.submitted],
-                ["Approved", workspaceSummary.breakdown?.approved],
-              ],
+              FileSpreadsheet,
+              "In Progress",
+              workspaceSummary.created_assessments,
+              "blue",
             ],
-          ].map(([Icon, label, value, tone, breakdown]) => (
+            [
+              BadgeCheck,
+              "Approved",
+              workspaceSummary.approved,
+              "emerald",
+            ],
+          ]).map(([Icon, label, value, tone, breakdown, tip]) => (
             <WorkspaceMetricCard
               key={label}
               icon={Icon}
@@ -594,33 +1249,158 @@ export default function Index({
               value={value}
               tone={tone}
               breakdown={breakdown || []}
+              tip={tip}
             />
           ))}
         </div>
       )}
-      <div className="border-x border-b border-slate-200 bg-white px-4 pt-3 dark:border-zinc-800 dark:bg-zinc-900">
-        <p className="mb-2 text-[10px] font-black uppercase tracking-widest text-slate-400">FNI Request Views</p>
-        <SystemTabs
-          active={activeTab}
-          ariaLabel="FNI request views"
-          subtle
-          className="rounded-b-none border-b-0"
-          items={[
-            {
-              key: "tracker",
-              label: "Requests & Action Status",
-              icon: ClipboardList,
-              onClick: () => setActiveTab("tracker"),
-            },
-            {
-              key: "assessments",
-              label: "Created Assessments",
-              icon: FileSpreadsheet,
-              onClick: () => setActiveTab("assessments"),
-            },
-          ]}
-        />
-      </div>
+      {isRrosWorkspace && workspaceSection === "fni" && <div className="flex flex-wrap items-center justify-between gap-3 border-x border-b border-slate-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950">
+        <div><p className="text-xs font-black uppercase text-slate-500">RIS/DR Tracking Sheet</p><p className="text-xs text-slate-500">{risSync?.completed_at ? `Last ${risSync.status} RIS/DR import: ${formatDateTime(risSync.completed_at)}` : "No RIS/DR import recorded yet"}</p></div>
+        <div className="flex gap-2">
+          <button type="button" title="View RIS sync history" onClick={async () => { setRisSyncHistory({ open: true, loading: true, rows: [] }); try { const response = await fetch('/rros/ris/sync-history', { headers: { Accept: 'application/json' } }); const payload = await response.json(); setRisSyncHistory({ open: true, loading: false, rows: payload.data || [] }); } catch { setRisSyncHistory({ open: true, loading: false, rows: [] }); } }} className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-xs font-black"><History className="h-4 w-4" /> History</button>
+          <button type="button" disabled={risSyncing} title="Import RIS/DR tracking records and FNI allocations only; this does not synchronize WIT inventory" onClick={syncRisDr} className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-2 text-xs font-black text-white disabled:opacity-60"><RefreshCw className={`h-4 w-4 ${risSyncing ? 'animate-spin' : ''}`} /> {risSyncing ? 'Importing RIS/DR...' : 'Sync RIS/DR'}</button>
+        </div>
+      </div>}
+      {isRrosWorkspace && workspaceSection === "fni" && risSyncNotice && (
+        <div
+          role={risSyncNotice.type === "error" ? "alert" : "status"}
+          className={`border-x border-b px-4 py-3 text-sm font-semibold ${risSyncNotice.type === "error"
+            ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200"
+            : "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200"}`}
+        >
+          {risSyncNotice.message}
+        </div>
+      )}
+      {isRrosWorkspace && workspaceSection === "stf" && (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-x border-b border-slate-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950">
+            <div>
+              <p className="text-xs font-black uppercase text-slate-500">Googlesheet STF Transactions</p>
+              <p className="text-xs text-slate-500">
+                {stfSync?.completed_at
+                  ? `Last ${stfSync.status} STF sync: ${formatDateTime(stfSync.completed_at)}`
+                  : "No STF sync recorded yet"}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                title="View STF sync history"
+                onClick={openStfHistory}
+                className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-xs font-black"
+              >
+                <History className="h-4 w-4" /> History
+              </button>
+              <button
+                type="button"
+                disabled={stfSyncing}
+                title="Refresh STF tracking from operational inventory releases (and optional Google Sheet when configured)"
+                onClick={syncStf}
+                className="inline-flex items-center gap-2 rounded-md bg-emerald-700 px-3 py-2 text-xs font-black text-white disabled:opacity-60"
+              >
+                <RefreshCw className={`h-4 w-4 ${stfSyncing ? "animate-spin" : ""}`} />
+                {stfSyncing ? "Syncing STF..." : "Sync STF"}
+              </button>
+            </div>
+          </div>
+          {stfSyncNotice && (
+            <div
+              role={stfSyncNotice.type === "error" ? "alert" : "status"}
+              className={`border-x border-b px-4 py-3 text-sm font-semibold ${stfSyncNotice.type === "error"
+                ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200"
+                : "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200"}`}
+            >
+              {stfSyncNotice.message}
+            </div>
+          )}
+          <ExportableCard
+            id="stf-transactions"
+            title="STF Transaction Archive"
+            className="scroll-mt-28 rounded-t-none border-t-0 shadow-none"
+            showExportButtons={false}
+          >
+            <div className="max-h-[calc(100dvh-24rem)] min-h-48 overflow-auto overscroll-contain">
+              <DataTable
+                stickyHeader
+                columns={["#", "STF Number", "STF Date", "Recipient / Delivery Site", "Items", "Source", "Status", "Action"]}
+                numbered={false}
+                rows={(stfRecords ?? []).map((row, index) => (
+                  <tr key={row.id}>
+                    <td className="px-4 py-3 text-center text-xs font-black text-slate-500">{index + 1}</td>
+                    <td className="px-4 py-3 font-black text-slate-900 dark:text-white">{row.stf_reference || "—"}</td>
+                    <td className="whitespace-nowrap px-4 py-3">{formatDate(row.transaction_date)}</td>
+                    <td className="px-4 py-3"><p className="font-bold">{row.recipient || "—"}</p><p className="mt-0.5 text-xs text-slate-500">{row.delivery_site || "Delivery site not encoded"}</p></td>
+                    <td className="px-4 py-3"><span className="rounded-full bg-sky-50 px-2 py-1 text-xs font-black text-sky-700">{row.item_count} line{row.item_count === 1 ? "" : "s"}</span></td>
+                    <td className="px-4 py-3"><span className="rounded-full bg-blue-50 px-2 py-1 text-[10px] font-black uppercase text-blue-700">Google Sheet</span></td>
+                    <td className="px-4 py-3"><span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-black uppercase text-emerald-700">{row.status || "Recorded"}</span></td>
+                    <td className="px-4 py-3 text-center">
+                      <button type="button" onClick={() => openStfTransaction(row)} title="Preview STF form" aria-label={`Preview STF form ${row.stf_reference}`} className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100">
+                        <Eye className="h-4 w-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              />
+            </div>
+            {(stfRecords ?? []).length === 0 && (
+              <p className="px-4 py-8 text-center text-sm text-slate-500">
+                No STF transactions yet. Sync STF to refresh transactions with RIS/IF/STF references.
+              </p>
+            )}
+          </ExportableCard>
+        </>
+      )}
+      {(!isRrosWorkspace || workspaceSection === "fni") && (
+      <SectionTabs
+        label={isRrosWorkspace ? "RIS/DR Views" : "FNI Request Views"}
+        appearance="stack"
+        value={activeTab}
+        onChange={setActiveTab}
+        ariaLabel={isRrosWorkspace ? "RIS/DR views" : "FNI request views"}
+        tabs={isRrosWorkspace ? [
+          {
+            id: "still_for_action",
+            label: "Still for Action",
+            icon: ClipboardList,
+            count: stillForActionCount,
+            title: stillForActionTip,
+          },
+          {
+            id: "in_progress",
+            label: "In Progress",
+            icon: FileSpreadsheet,
+            count: inProgressCount,
+            title: inProgressTip,
+          },
+          {
+            id: "ris_approved",
+            label: "Approved",
+            icon: BadgeCheck,
+            count: workspaceSummary?.ris_approved,
+            title: risApprovedTip,
+          },
+          {
+            id: "ris_completed",
+            label: "Completed",
+            icon: CheckCircle2,
+            count: workspaceSummary?.ris_completed,
+            title: risCompletedTip,
+          },
+          {
+            id: "ris_transactions",
+            label: "Googlesheet RIS/DR Transactions",
+            icon: FileSpreadsheet,
+            count: risTransactions.length,
+            title: "Created RIS/DR transactions synchronized with the Google Sheet register.",
+          },
+        ] : [
+          { id: "tracker", label: "Still for Action", icon: ClipboardList },
+          { id: "assessments", label: "In Progress", icon: FileSpreadsheet },
+          { id: "approved", label: "Approved", icon: BadgeCheck },
+        ]}
+      />
+      )}
+      {(!isRrosWorkspace || workspaceSection === "fni") && (
       <div>
         {activeTab === "assessment" && canEncode && (
           <AssessmentExcelForm
@@ -634,6 +1414,9 @@ export default function Index({
             fniLibraryItems={fniLibraryItems}
             incidentOptions={incidentOptions}
             drrsSignatories={drrsSignatories}
+            warehouseStock={warehouseStock}
+            warehouseReservations={warehouseReservations}
+            drnPrefixes={drnPrefixes}
           />
         )}
         {false && activeTab === "assessment" && canEncode && (
@@ -964,12 +1747,18 @@ export default function Index({
                     />
                     <LabeledInput
                       label="Quantity"
-                      type="number"
-                      min="0.01"
-                      value={item.requested_quantity}
-                      onChange={(value) =>
-                        setItem(index, "requested_quantity", value)
-                      }
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      min={1}
+                      value={wholeQuantityInputValue(item.requested_quantity)}
+                      onChange={(value) => {
+                        setItem(
+                          index,
+                          "requested_quantity",
+                          coerceWholeQuantity(value, { min: 1 }),
+                        );
+                      }}
                     />
                   </div>
                 ))}
@@ -1053,7 +1842,9 @@ export default function Index({
                       <button
                         type="button"
                         onClick={() => openResponseAction(request, "word")}
-                        className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-xs font-black text-white"
+                        disabled={!hasCompleteDrn(request.response_drn)}
+                        title={!hasCompleteDrn(request.response_drn) ? "DRRS AA must assign both document DRNs first" : "Download response letter"}
+                        className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500"
                       >
                         <Mail className="h-4 w-4" />
                         Generate Letter
@@ -1068,7 +1859,7 @@ export default function Index({
         {activeTab === "tracker" && (
           <ExportableCard
             id="request-list"
-            title="Request List"
+            title="Still for Action"
             className="scroll-mt-28 rounded-t-none border-t-0"
             showExportButtons={false}
           >
@@ -1196,85 +1987,310 @@ export default function Index({
         {activeTab === "assessments" && (
           <ExportableCard
             id="created-assessments"
-            title="Created Assessments"
+            title="In Progress"
             className="scroll-mt-28 rounded-t-none border-t-0 shadow-none"
             showExportButtons={false}
           >
-            <DataTable columns={["#", "Reference", "Proposing Party", "Incident", "Assessment Status", "Updated", { label: "Actions", align: "right", actionColumn: true }]} numbered={false} rows={(assessments.data ?? []).map((request, index) => (
-              <tr key={request.id}>
-                <td className="px-4 py-3 text-center text-xs font-black text-slate-500">{index + 1}</td>
-                <td className="px-4 py-3 font-black">
-                  <p>{displayRequestReference(request)}</p>
-                  {request.source_lgu_dromic_report?.lgu_relief_request_reference
-                    && request.reference_number
-                    && request.source_lgu_dromic_report.lgu_relief_request_reference !== request.reference_number && (
-                    <p className="mt-1 text-[10px] font-semibold text-slate-400">Legacy system code {request.reference_number}</p>
-                  )}
-                </td>
-                <td className="px-4 py-3">{request.requesting_agency}</td>
-                <td className="px-4 py-3">{request.incident?.name || "-"}</td>
-                <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs font-black uppercase ${request.assessment_status === "submitted" ? "bg-emerald-100 text-emerald-700" : request.assessment_status === "final" ? "bg-blue-100 text-blue-700" : "bg-amber-100 text-amber-700"}`}>{request.assessment_status}</span></td>
-                <td className="whitespace-nowrap px-4 py-3">{formatDateTime(request.updated_at)}</td>
-                <td className="px-4 py-3 text-right"><div className="inline-flex flex-wrap items-center justify-end gap-2">
-                  {request.assessment_access?.can_access_documents ? (
-                    <>
-                      <Link href={`/requests/${request.id}/assessment-form`} className="rounded-md border px-3 py-1.5 text-xs font-bold">View Documents</Link>
-                      {request.assessment_status === "draft" && <button type="button" onClick={() => openEndorsedAssessment(request)} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Edit Draft</button>}
-                    </>
-                  ) : (
-                    <span className="max-w-[12rem] text-left text-[11px] font-black leading-tight text-slate-600 dark:text-zinc-300">
-                      Acted by {request.assessment_access?.acted_by?.name || request.assessment_actor?.name || request.assigned_social_worker || "another DRRS PDRC"}
-                    </span>
-                  )}
-                  {request.assessment_access?.can_access_documents && request.assessment_status === "draft" && (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const viewable = ["completed", "signed"].includes(request.epirma_status);
-                        if (viewable) {
-                          const response = await fetch(`/requests/${request.id}/epirma/status`, {
-                            headers: {
-                              Accept: "application/json",
-                              "X-Requested-With": "XMLHttpRequest",
-                            },
-                            credentials: "same-origin",
-                          });
-                          const payload = await response.json();
-                          if (payload?.success) {
-                            if (payload?.data?.view_url) {
-                              window.open(payload.data.view_url, "_blank", "noopener,noreferrer");
+            <DataTable
+              columns={[
+                "#",
+                "Request Details",
+                "Request DRN",
+                "Requesting Party / Office",
+                "Purpose / Disaster Incident",
+                "Assessment Status",
+                "Updated",
+                { label: "Actions", align: "right", actionColumn: true },
+              ]}
+              numbered={false}
+              rows={(assessments.data ?? []).map((request, index) => (
+                <tr key={request.id}>
+                  <td className="px-4 py-3 text-center text-xs font-black text-slate-500">{index + 1}</td>
+                  <ApprovedRequestDetailCells request={request} />
+                  <td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs font-black uppercase ${request.assessment_status === "submitted" ? "bg-emerald-100 text-emerald-700" : request.assessment_status === "final" ? "bg-blue-100 text-blue-700" : "bg-amber-100 text-amber-700"}`}>{request.assessment_status}</span></td>
+                  <td className="whitespace-nowrap px-4 py-3">{formatDateTime(request.updated_at)}</td>
+                  <td className="px-4 py-3 text-right"><div className="inline-flex flex-wrap items-center justify-end gap-2">
+                    {signedAssessmentViewUrl(request) && (
+                      <button
+                        type="button"
+                        aria-label="Track e-PIRMA Status"
+                        title="Track e-PIRMA Status"
+                        onClick={() => openApprovedDocuments(request)}
+                        className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white p-2 text-slate-700 hover:bg-slate-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
+                      >
+                        <Eye className="h-4 w-4" />
+                      </button>
+                    )}
+                    {request.assessment_access?.can_access_documents ? (
+                      <>
+                        <Link href={`/requests/${request.id}/assessment-form`} className="rounded-md border px-3 py-1.5 text-xs font-bold">View Documents</Link>
+                        {request.assessment_status === "draft" && !request.epirma_forwarded_to_drrs_aa_at && (
+                          <button type="button" onClick={() => openEndorsedAssessment(request)} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Edit Draft</button>
+                        )}
+                      </>
+                    ) : (
+                      <span className="max-w-[12rem] text-left text-[11px] font-black leading-tight text-slate-600 dark:text-zinc-300">
+                        Acted by {request.assessment_access?.acted_by?.name || request.assessment_actor?.name || request.assigned_social_worker || "another DRRS PDRC"}
+                      </span>
+                    )}
+                    {request.assessment_access?.can_access_documents && request.assessment_status === "draft" && !request.epirma_forwarded_to_drrs_aa_at && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const viewable = ["completed", "signed"].includes(request.epirma_status);
+                          if (viewable) {
+                            const response = await fetch(`/requests/${request.id}/epirma/status`, {
+                              headers: {
+                                Accept: "application/json",
+                                "X-Requested-With": "XMLHttpRequest",
+                              },
+                              credentials: "same-origin",
+                            });
+                            const payload = await response.json();
+                            if (payload?.success) {
+                              if (payload?.data?.view_url) {
+                                window.open(payload.data.view_url, "_blank", "noopener,noreferrer");
+                              }
+                              router.reload({ only: ["assessments", "requests", "workspaceSummary"] });
+                              return;
                             }
-                            router.reload({ only: ["assessments", "requests"] });
+
+                            if (String(payload?.message || "").toLowerCase().includes("uuid")) {
+                              router.post(`/requests/${request.id}/epirma/sign`);
+                              return;
+                            }
+
+                            setEpirmaStatusError({
+                              requestId: request.id,
+                              message: payload?.message || "Failed to fetch signed document status.",
+                            });
                             return;
                           }
 
-                          if (String(payload?.message || "").toLowerCase().includes("uuid")) {
-                            router.post(`/requests/${request.id}/epirma/sign`);
-                            return;
-                          }
+                          router.post(`/requests/${request.id}/epirma/sign`);
+                        }}
+                        title={["completed", "signed"].includes(request.epirma_status) ? "Open the signed e-PIRMA document" : request.epirma_status === "pending" ? "Continue sending this draft to e-PIRMA" : "Send this draft assessment to e-PIRMA for signing"}
+                        className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-black text-white"
+                      >
+                        {["completed", "signed"].includes(request.epirma_status) ? "View Document" : request.epirma_status === "pending" ? "Continue e-PIRMA" : "Sign with e-PIRMA"}
+                      </button>
+                    )}
+                    {request.assessment_access?.can_access_documents && request.assessment_status === "final" && !request.epirma_forwarded_to_drrs_aa_at && (
+                      <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "draft" })} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Reopen Draft</button>
+                    )}
+                    {request.assessment_access?.can_access_documents && request.assessment_status === "final" && !request.epirma_forwarded_to_drrs_aa_at && (
+                      <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "submitted" })} className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-black text-white">Submit</button>
+                    )}
+                    {request.assessment_access?.can_access_documents && request.status === "submitted" && request.assessment_status === "submitted" && !request.epirma_forwarded_to_drrs_aa_at && (
+                      <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "draft" })} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Recall to Draft</button>
+                    )}
+                    {request.assessment_access?.can_access_documents && request.status === "rejected" && request.assessment_status === "submitted" && !request.epirma_forwarded_to_drrs_aa_at && (
+                      <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "draft" })} className="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-black text-white">Revise Disapproved Assessment</button>
+                    )}
+                  </div></td>
+                </tr>
+              ))}
+            />
+          </ExportableCard>
+        )}
 
-                          setEpirmaStatusError({
-                            requestId: request.id,
-                            message: payload?.message || "Failed to fetch signed document status.",
-                          });
-                          return;
-                        }
+        {isRrosWorkspace && activeTab === "ris_transactions" && (
+          <ExportableCard
+            id="ris-google-sheet-transactions"
+            title="Googlesheet RIS/DR Transaction Archive"
+            className="scroll-mt-28 rounded-t-none border-t-0 shadow-none"
+            showExportButtons={false}
+          >
+            <div className="border-b border-slate-100 bg-gradient-to-r from-emerald-50 to-sky-50 px-4 py-3 text-xs font-semibold text-slate-600">
+              A document-first archive of created RIS/DR records. Select View to inspect RIS and DR together without leaving the workspace.
+            </div>
+            <div className="max-h-[calc(100dvh-24rem)] min-h-48 overflow-auto overscroll-contain">
+              <DataTable
+                stickyHeader
+                numbered={false}
+                columns={["#", "RIS Number", "DR Number", "RIS Date", "Recipient / Delivery Site", "Items", "Source", "Status", "Action"]}
+                rows={risTransactions.map((row, index) => (
+                  <tr key={row.id}>
+                    <td className="px-4 py-3 text-center text-xs font-black text-slate-500">{index + 1}</td>
+                    <td className="whitespace-nowrap px-4 py-3 font-black text-slate-900 dark:text-white">{row.ris_number || "—"}</td>
+                    <td className="whitespace-nowrap px-4 py-3 font-semibold">{row.dr_number || "Pending"}</td>
+                    <td className="whitespace-nowrap px-4 py-3">{formatDate(row.ris_date)}</td>
+                    <td className="px-4 py-3"><p className="font-bold">{row.recipient || "—"}</p><p className="mt-0.5 text-xs text-slate-500">{row.delivery_site || "Delivery site not encoded"}</p></td>
+                    <td className="px-4 py-3 text-center font-bold">{row.item_count ?? 0}</td>
+                    <td className="px-4 py-3"><span className="rounded-full bg-blue-50 px-2 py-1 text-[10px] font-black uppercase text-blue-700">{row.source === "google_sheet" ? "Google Sheet" : "System"}</span></td>
+                    <td className="px-4 py-3"><span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-black uppercase text-emerald-700">{row.status || "Recorded"}</span></td>
+                    <td className="px-4 py-3 text-center">
+                      <button type="button" onClick={() => openRisTransaction(row)} title="Preview RIS and DR" aria-label={`Preview ${row.ris_number}`} className="inline-flex items-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-800 hover:bg-emerald-100">
+                        <Eye className="h-4 w-4" /> View
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              />
+            </div>
+            {risTransactions.length === 0 && <p className="px-4 py-10 text-center text-sm text-slate-500">No created RIS/DR transactions are available yet. Use Sync RIS/DR to import the Google Sheet register.</p>}
+          </ExportableCard>
+        )}
 
-                        router.post(`/requests/${request.id}/epirma/sign`);
-                      }}
-                      title={["completed", "signed"].includes(request.epirma_status) ? "Open the signed e-PIRMA document" : request.epirma_status === "pending" ? "Continue sending this draft to e-PIRMA" : "Send this draft assessment to e-PIRMA for signing"}
-                      className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-black text-white"
-                    >
-                      {["completed", "signed"].includes(request.epirma_status) ? "View Document" : request.epirma_status === "pending" ? "Continue e-PIRMA" : "Sign with e-PIRMA"}
-                    </button>
-                  )}
-                  {request.assessment_access?.can_access_documents && request.assessment_status === "final" && <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "draft" })} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Reopen Draft</button>}
-                  {request.assessment_access?.can_access_documents && request.assessment_status === "final" && <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "submitted" })} className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-black text-white">Submit</button>}
-                  {request.assessment_access?.can_access_documents && request.status === "submitted" && request.assessment_status === "submitted" && <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "draft" })} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Recall to Draft</button>}
-                  {request.assessment_access?.can_access_documents && request.status === "rejected" && request.assessment_status === "submitted" && <button type="button" onClick={() => router.patch(`/requests/${request.id}/assessment-status`, { assessment_status: "draft" })} className="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-black text-white">Revise Disapproved Assessment</button>}
-                </div></td>
-              </tr>
-            ))} />
+        {((isRrosWorkspace && ["still_for_action", "in_progress", "ris_approved", "ris_completed"].includes(activeTab))
+          || (!isRrosWorkspace && activeTab === "approved")) && (
+          <ExportableCard
+            id={
+              isRrosWorkspace
+                ? ({
+                    still_for_action: "ris-still-for-action",
+                    in_progress: "ris-in-progress",
+                    ris_approved: "ris-approved",
+                    ris_completed: "ris-completed",
+                  }[activeTab] || "ris-requests")
+                : "approved-requests"
+            }
+            title={
+              isRrosWorkspace
+                ? ({
+                    still_for_action: "Still for Action",
+                    in_progress: "In Progress",
+                    ris_approved: "Approved",
+                    ris_completed: "Completed",
+                  }[activeTab] || "RIS / DR")
+                : "Approved"
+            }
+            className="scroll-mt-28 rounded-t-none border-t-0 shadow-none"
+            showExportButtons={false}
+          >
+            <DataTable
+              columns={approvedRequestColumns}
+              numbered={false}
+              rows={((() => {
+                if (!isRrosWorkspace) return approved.data ?? [];
+                if (activeTab === "in_progress") return inProgressRows?.data ?? [];
+                if (activeTab === "ris_approved") return risApproved?.data ?? [];
+                if (activeTab === "ris_completed") return risCompleted?.data ?? [];
+                return approved.data ?? [];
+              })()).map((request, index) => {
+                const slipStatus = request.requisition_issuance_slip
+                  ? risSlipStatusDisplay(request.requisition_issuance_slip.status)
+                  : null;
+                const isStillForActionTab = !isRrosWorkspace || activeTab === "still_for_action";
+                const isInProgressTab = isRrosWorkspace && activeTab === "in_progress";
+                const isApprovedTab = isRrosWorkspace && activeTab === "ris_approved";
+                const isViewOnlyTab = isRrosWorkspace && activeTab === "ris_completed";
+                const slipRawStatus = String(request.requisition_issuance_slip?.status || "").toLowerCase();
+                const isDraftSlip = slipRawStatus === "draft";
+                const isPreparedSlip = slipRawStatus === "prepared";
+                return (
+                <tr key={request.id}>
+                  <td className="px-4 py-3 text-center text-xs font-black text-slate-500">{index + 1}</td>
+                  <ApprovedRequestDetailCells request={request} />
+                  <td className="px-4 py-3 text-center">
+                    <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-black uppercase ${assessmentDisplayStatus(request).className}`}>
+                      {assessmentDisplayStatus(request).label}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-center">
+                    <div className="inline-flex flex-wrap items-center justify-center gap-2">
+                      {(request.source_lgu_dromic_report?.lgu_signed_request_path || signedAssessmentViewUrl(request) || request.signed_response_letter_view_url || request.ris_preview?.form || request.requisition_issuance_slip || request.ris_view_url || request.rds_view_url || request.csmr_view_url) ? (
+                        <button
+                          type="button"
+                          aria-label="View Documents"
+                          title="View Documents"
+                          onClick={() => openApprovedDocuments(request)}
+                          className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white p-2 text-slate-700 hover:bg-slate-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:hover:bg-zinc-800"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </button>
+                      ) : (
+                        <span className="text-[11px] font-semibold text-slate-500">Signed copies pending sync</span>
+                      )}
+                      {isRrosWorkspace && isStillForActionTab && (
+                        <button
+                          type="button"
+                          onClick={() => openRisForm(request, "create")}
+                          aria-label="Create RIS / DR"
+                          title="Create RIS / DR"
+                          className="inline-flex items-center justify-center rounded-md bg-emerald-700 p-2 text-white hover:bg-emerald-800"
+                        >
+                          <ClipboardList className="h-4 w-4" />
+                        </button>
+                      )}
+                      {isInProgressTab && isDraftSlip && (
+                        <button
+                          type="button"
+                          onClick={() => openRisForm(request, "create")}
+                          aria-label="Edit RIS / DR draft"
+                          title="Edit RIS / DR draft"
+                          className="inline-flex items-center justify-center rounded-md bg-emerald-700 p-2 text-white hover:bg-emerald-800"
+                        >
+                          <ClipboardList className="h-4 w-4" />
+                        </button>
+                      )}
+                      {isInProgressTab && isDraftSlip && canAssignRisDrn && request.requisition_issuance_slip && (
+                        <button
+                          type="button"
+                          onClick={() => openRisDrnEditor(request.requisition_issuance_slip)}
+                          aria-label="Assign RIS / DR DRN"
+                          title="Assign RIS / DR DRN"
+                          className="inline-flex items-center justify-center rounded-md border border-amber-300 bg-amber-50 p-2 text-amber-800 hover:bg-amber-100"
+                        >
+                          <FileText className="h-4 w-4" />
+                        </button>
+                      )}
+                      {isInProgressTab && isPreparedSlip && (
+                        <button
+                          type="button"
+                          onClick={() => openRisForm(request, "post")}
+                          aria-label="Complete post RIS / DR"
+                          title="Complete post RIS / DR"
+                          className="inline-flex items-center justify-center rounded-md bg-sky-700 p-2 text-white hover:bg-sky-800"
+                        >
+                          <Truck className="h-4 w-4" />
+                        </button>
+                      )}
+                      {isApprovedTab && slipRawStatus === "approved" && (
+                        <button
+                          type="button"
+                          onClick={() => openRisForm(request, "post")}
+                          aria-label="Update accounting handoff and document uploads"
+                          title="Update Accounting Handoff & Uploads"
+                          className="inline-flex items-center justify-center rounded-md bg-sky-700 p-2 text-white hover:bg-sky-800"
+                        >
+                          <Truck className="h-4 w-4" />
+                        </button>
+                      )}
+                      {isViewOnlyTab && !request.source_lgu_dromic_report?.lgu_signed_request_path && !signedAssessmentViewUrl(request) && !request.signed_response_letter_view_url && !request.ris_preview?.form && !request.requisition_issuance_slip && !request.ris_view_url && !request.rds_view_url && !request.csmr_view_url && (
+                        <span className="text-[11px] font-semibold text-slate-500">View only</span>
+                      )}
+                    </div>
+                    {isRrosWorkspace && slipStatus && (
+                      <p className={`mt-1 text-[10px] font-bold uppercase ${slipStatus.className}`}>
+                        {slipStatus.label}
+                      </p>
+                    )}
+                  </td>
+                </tr>
+                );
+              })}
+            />
+            {isRrosWorkspace && activeTab === "still_for_action" && ((approved.data ?? []).length === 0) && (
+              <p className="px-4 py-8 text-center text-sm text-slate-500">
+                No signed FNI requests waiting for RIS / DR creation.
+              </p>
+            )}
+            {isRrosWorkspace && activeTab === "in_progress" && ((inProgressRows?.data ?? []).length === 0) && (
+              <p className="px-4 py-8 text-center text-sm text-slate-500">
+                No draft or prepared RIS / DR awaiting generation, signing, or post updates.
+              </p>
+            )}
+            {isRrosWorkspace && activeTab === "ris_approved" && ((risApproved?.data ?? []).length === 0) && (
+              <p className="px-4 py-8 text-center text-sm text-slate-500">
+                No approved RIS / DR records yet.
+              </p>
+            )}
+            {isRrosWorkspace && activeTab === "ris_completed" && ((risCompleted?.data ?? []).length === 0) && (
+              <p className="px-4 py-8 text-center text-sm text-slate-500">
+                No completed RIS / DR records with post requirements satisfied yet.
+              </p>
+            )}
           </ExportableCard>
         )}
 
@@ -1332,6 +2348,73 @@ export default function Index({
             </div>
           </div>
         )}
+
+        {risRequest && (
+          <RisFormModal
+            request={risRequest}
+            currentUser={currentUser}
+            warehouseStock={warehouseStock}
+            warehouseReservations={warehouseReservations}
+            rrosSignatories={rrosSignatories}
+            libraryOptions={libraryOptions}
+            showPostRisSections={risFormMode === "post"}
+            onClose={closeRisForm}
+            onGenerated={() => {
+              closeRisForm();
+              setActiveTab("in_progress");
+              refreshRisWorkspaceData();
+            }}
+          />
+        )}
+        {risSyncHistory.open && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/70 p-4"><div className="max-h-[80vh] w-full max-w-3xl overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-950"><div className="flex items-center justify-between border-b p-4"><div><p className="text-xs font-black uppercase text-emerald-700">RIS/DR Synchronization</p><h2 className="text-lg font-black">Sync History</h2></div><button type="button" onClick={() => setRisSyncHistory({ open: false, loading: false, rows: [] })} className="rounded-md border p-2"><X className="h-4 w-4" /></button></div><div className="max-h-[65vh] overflow-y-auto p-4">{risSyncHistory.loading ? <p className="py-8 text-center text-sm font-bold">Loading history…</p> : risSyncHistory.rows.length ? <div className="space-y-2">{risSyncHistory.rows.map((row) => <div key={row.id} className="grid gap-2 rounded-lg border p-3 text-xs sm:grid-cols-5"><span className="font-black uppercase">{row.status}</span><span>{row.trigger}</span><span>{row.records_created} created</span><span>{row.records_updated} updated</span><span>{row.items_synced} FNI rows</span><span className="sm:col-span-5 text-slate-500">{formatDateTime(row.completed_at || row.started_at)}{row.error_message ? ` · ${row.error_message}` : ''}</span></div>)}</div> : <p className="py-8 text-center text-sm text-slate-500">No sync runs recorded.</p>}</div></div></div>}
+        {risDrnEditor.open && (
+          <div className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm">
+            <form onSubmit={saveRisDrn} className="w-full max-w-2xl overflow-hidden rounded-xl bg-white shadow-2xl">
+              <div className="flex items-start justify-between border-b bg-amber-50 px-6 py-5">
+                <div>
+                  <p className="text-xs font-black uppercase tracking-wide text-amber-700">RROS document control</p>
+                  <h2 className="text-xl font-black">Assign RIS / DR DRN</h2>
+                  <p className="mt-1 text-sm text-slate-600">Print is available after Generate RIS / DR (prepared save). Drafts cannot be printed. Assign the DRN for complete document control and tracking.</p>
+                </div>
+                <button type="button" onClick={() => setRisDrnEditor((current) => ({ ...current, open: false }))} className="rounded-md border bg-white p-2">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="p-6">
+                <label className="block text-xs font-black uppercase text-slate-600">
+                  RIS / DR DRN *
+                  <div className="mt-2 flex w-full min-w-0 items-stretch overflow-hidden rounded-md border border-slate-300 bg-white focus-within:border-emerald-600 focus-within:ring-1 focus-within:ring-emerald-600">
+                    <span
+                      title={risDrnEditorPrefix}
+                      className="min-w-0 flex-[3] break-all border-r border-slate-200 bg-slate-100 px-2 py-2 text-[1.00em] font-black leading-snug tracking-tight text-slate-500 normal-case"
+                    >
+                      {risDrnEditorPrefix}
+                    </span>
+                    <input
+                      autoFocus
+                      value={risDrnEditor.sequence}
+                      onChange={(event) => setRisDrnEditor((current) => ({ ...current, sequence: event.target.value, error: "" }))}
+                      placeholder="0001"
+                      aria-label="RIS / DR DRN final sequence"
+                      className="min-w-0 w-auto flex-1 border-0 bg-white px-2 py-2 text-sm font-black tracking-tight text-slate-900 outline-none focus:ring-0 normal-case"
+                    />
+                  </div>
+                </label>
+                <p className="mt-2 text-xs font-semibold normal-case text-slate-500">
+                  The year/month prefix is generated. Add the final sequence to generate the RIS / DR.
+                </p>
+                {risDrnEditor.error && <p className="mt-2 text-sm font-bold text-rose-600">{risDrnEditor.error}</p>}
+              </div>
+              <div className="flex justify-end gap-2 border-t bg-slate-50 px-6 py-4">
+                <button type="button" onClick={() => setRisDrnEditor((current) => ({ ...current, open: false }))} className="rounded-md border bg-white px-4 py-2 text-sm font-bold">Cancel</button>
+                <button disabled={risDrnEditor.saving} className="rounded-md bg-amber-600 px-5 py-2 text-sm font-black text-white disabled:opacity-60">
+                  {risDrnEditor.saving ? "Saving..." : "Save RIS / DR DRN"}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
         {documentPreview && (
           <RequestDocumentPreview
             request={documentPreview}
@@ -1372,7 +2455,7 @@ export default function Index({
                 </div>
               )}
               <div className="max-h-[calc(96vh-64px)] overflow-auto p-3">
-                <AssessmentExcelForm form={form} currentUser={currentUser} partyOptions={partyOptions} selectRequestParty={selectRequestParty} requestParties={requestParties} psgc={psgc} inventoryItems={inventoryItems} fniLibraryItems={fniLibraryItems} incidentOptions={incidentOptions} drrsSignatories={drrsSignatories} warehouseStock={warehouseStock} drnPrefixes={drnPrefixes} requestId={assessmentRecord.id} action={`/requests/${assessmentRecord.id}/complete-assessment`} method="patch" submitLabel="Save Draft & Generate Documents" onSuccess={() => { setAssessmentRecord(null); }} />
+                <AssessmentExcelForm form={form} currentUser={currentUser} partyOptions={partyOptions} selectRequestParty={selectRequestParty} requestParties={requestParties} psgc={psgc} inventoryItems={inventoryItems} fniLibraryItems={fniLibraryItems} incidentOptions={incidentOptions} drrsSignatories={drrsSignatories} warehouseStock={warehouseStock} warehouseReservations={warehouseReservations} drnPrefixes={drnPrefixes} requestId={assessmentRecord.id} action={`/requests/${assessmentRecord.id}/complete-assessment`} method="patch" submitLabel="Save Draft & Generate Documents" onSuccess={() => { setAssessmentRecord(null); }} />
               </div>
             </div>
           </div>
@@ -1384,26 +2467,91 @@ export default function Index({
               <div className="flex items-start justify-between"><div><p className="text-xs font-black uppercase text-emerald-700">Documents ready</p><h2 className="mt-1 text-xl font-black">Assessment saved successfully</h2><p className="mt-2 text-sm text-slate-500">Assessment PDF and response letters in Word and PDF are ready for {readyRecord.reference_number}.</p></div><button type="button" onClick={() => setReadyRecord(null)} className="rounded-md p-2 hover:bg-slate-100 dark:hover:bg-zinc-800"><X className="h-5 w-5" /></button></div>
               <div className="mt-5 grid gap-3 sm:grid-cols-3">
                 <a href={`/requests/${readyRecord.id}/assessment-pdf?margin=18`} className="inline-flex items-center justify-center gap-2 rounded-md bg-emerald-700 px-4 py-3 text-sm font-black text-white"><Download className="h-4 w-4" />Assessment PDF</a>
-                <button type="button" onClick={() => openResponseAction(readyRecord, "print")} className="inline-flex items-center justify-center gap-2 rounded-md bg-brand-700 px-4 py-3 text-sm font-black text-white"><Printer className="h-4 w-4" />Print Response Letter</button>
-                <button type="button" onClick={() => openResponseAction(readyRecord, "pdf")} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-800 px-4 py-3 text-sm font-black text-white"><Download className="h-4 w-4" />Download Response Letter</button>
+                <button type="button" disabled={!hasCompleteDrn(readyRecord.response_drn)} title="DRRS AA must assign both document DRNs first" onClick={() => openResponseAction(readyRecord, "print")} className="inline-flex items-center justify-center gap-2 rounded-md bg-brand-700 px-4 py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500"><Printer className="h-4 w-4" />Print Response Letter</button>
+                <button type="button" disabled={!hasCompleteDrn(readyRecord.response_drn)} title="DRRS AA must assign both document DRNs first" onClick={() => openResponseAction(readyRecord, "pdf")} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-800 px-4 py-3 text-sm font-black text-white disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500"><Download className="h-4 w-4" />Download Response Letter</button>
               </div>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2"><a target="_blank" rel="noreferrer" href={`/requests/${readyRecord.id}/assessment-pdf?margin=18&inline=1`} className="block rounded-md border px-4 py-2 text-center text-sm font-bold">Preview Assessment</a><button type="button" onClick={() => openResponseAction(readyRecord, "preview")} className="block rounded-md border px-4 py-2 text-center text-sm font-bold">Preview Response Letter</button></div>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setPdfPreview({
+                    open: true,
+                    title: "Assessment",
+                    subtitle: readyRecord.reference_number,
+                    src: `/requests/${readyRecord.id}/assessment-pdf?margin=18&inline=1`,
+                  })}
+                  className="block rounded-md border px-4 py-2 text-center text-sm font-bold"
+                >
+                  Preview Assessment
+                </button>
+                <button type="button" onClick={() => openResponseAction(readyRecord, "preview")} className="block rounded-md border px-4 py-2 text-center text-sm font-bold">Preview Response Letter</button>
+              </div>
             </div>
           </div>
         )}
-        {responsePrompt && <ResponseDrnModal
-          requestId={responsePrompt.request.id}
-          existingDrn={responsePrompt.request.response_drn || ""}
-          prefixOptions={drnPrefixes.filter((row) => row.context === "response_letter").map((row) => row.value)}
-          actionLabel={responsePrompt.action === "preview" ? "Save DRN & Preview" : responsePrompt.action === "print" ? "Save DRN & Print Response Letter" : "Save DRN & Download Response Letter"}
-          onClose={() => setResponsePrompt(null)}
-          onSaved={() => {
-            const { request, action } = responsePrompt;
-            setResponsePrompt(null);
-            performResponseAction(request, action);
-          }}
-        />}
+        <PdfPreviewModal
+          open={pdfPreview.open}
+          title={pdfPreview.title}
+          subtitle={pdfPreview.subtitle}
+          src={pdfPreview.src}
+          kind={pdfPreview.kind}
+          message={pdfPreview.message}
+          tabs={previewTabs}
+          initialTab={pdfPreview.initialTab}
+          wide={Boolean(pdfPreview.wide)}
+          onClose={closePdfPreview}
+        />
       </div>
+      )}
+      {stfSyncHistory.open && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/70 p-4">
+          <div className="max-h-[80vh] w-full max-w-3xl overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-950">
+            <div className="flex items-center justify-between border-b p-4">
+              <div>
+                <p className="text-xs font-black uppercase text-emerald-700">STF Synchronization</p>
+                <h2 className="text-lg font-black">Sync History</h2>
+              </div>
+              <button type="button" onClick={() => setStfSyncHistory({ open: false, loading: false, rows: [] })} className="rounded-md border p-2">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="max-h-[65vh] overflow-y-auto p-4">
+              {stfSyncHistory.loading ? (
+                <p className="py-8 text-center text-sm font-bold">Loading history…</p>
+              ) : stfSyncHistory.rows.length ? (
+                <div className="space-y-2">
+                  {stfSyncHistory.rows.map((row) => (
+                    <div key={row.id} className="grid gap-2 rounded-lg border p-3 text-xs sm:grid-cols-5">
+                      <span className="font-black uppercase">{row.status}</span>
+                      <span>{row.trigger}</span>
+                      <span>{row.records_created} created</span>
+                      <span>{row.records_updated} updated</span>
+                      <span>{row.items_synced} rows</span>
+                      <span className="sm:col-span-5 text-slate-500">
+                        {formatDateTime(row.completed_at || row.started_at)}
+                        {row.error_message ? ` · ${row.error_message}` : ""}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="py-8 text-center text-sm text-slate-500">No sync runs recorded.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {isRrosWorkspace && workspaceSection === "stf" && (
+        <PdfPreviewModal
+          open={pdfPreview.open}
+          title={pdfPreview.title}
+          subtitle={pdfPreview.subtitle}
+          src={pdfPreview.src}
+          kind={pdfPreview.kind}
+          message={pdfPreview.message}
+          wide={Boolean(pdfPreview.wide)}
+          onClose={closePdfPreview}
+        />
+      )}
     </AppLayout>
   );
 }
@@ -1421,20 +2569,19 @@ function RequestDocumentPreview({ request, tab, setTab, onClose }) {
     : `/requests/${request.id}/source-document`;
   const tabs = [
     ...(isLguRequest ? [
-      { key: "request", label: "Request Letter", icon: FileText, onClick: () => setTab("request") },
-      { key: "report", label: "Supporting DROMIC / SitRep", icon: FileText, onClick: () => setTab("report") },
+      { id: "request", label: "Request Letter", icon: FileText },
+      { id: "report", label: "Supporting DROMIC / SitRep", icon: FileText },
     ] : request.source_document_url ? [
-      { key: "request", label: "Uploaded Document", icon: FileText, onClick: () => setTab("request") },
+      { id: "request", label: "Uploaded Document", icon: FileText },
     ] : []),
     ...(photos.length ? [
-      { key: "photos", label: `Captured Photos (${photos.length})`, icon: Images, onClick: () => setTab("photos") },
+      { id: "photos", label: `Captured Photos (${photos.length})`, icon: Images },
     ] : []),
   ];
 
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
     >
       <div
         role="dialog"
@@ -1464,10 +2611,12 @@ function RequestDocumentPreview({ request, tab, setTab, onClose }) {
         </div>
         {tabs.length > 1 && (
           <div className="border-b bg-white p-3 dark:bg-zinc-900">
-            <SystemTabs
-              active={tab}
+            <SectionTabs
+              appearance="plain"
+              value={tab}
+              onChange={setTab}
               ariaLabel="Request documents"
-              items={tabs}
+              tabs={tabs}
             />
           </div>
         )}
@@ -1500,6 +2649,9 @@ function LabeledInput({
   type = "text",
   placeholder = "",
   min,
+  step,
+  inputMode,
+  pattern,
 }) {
   return (
     <label className="block text-sm font-bold">
@@ -1507,16 +2659,20 @@ function LabeledInput({
       <input
         type={type}
         min={min}
+        step={step}
+        inputMode={inputMode}
+        pattern={pattern}
         className="mt-1 w-full"
         placeholder={placeholder}
         value={value}
+        onInput={(event) => onChange(event.target.value)}
         onChange={(event) => onChange(event.target.value)}
       />
     </label>
   );
 }
 
-function WorkspaceMetricCard({ icon: Icon, label, value = 0, tone = "blue", breakdown = [] }) {
+function WorkspaceMetricCard({ icon: Icon, label, value = 0, tone = "blue", breakdown = [], tip = "" }) {
   const tones = {
     blue: "border-sky-200 bg-sky-50 text-sky-800",
     amber: "border-amber-200 bg-amber-50 text-amber-800",
@@ -1527,7 +2683,12 @@ function WorkspaceMetricCard({ icon: Icon, label, value = 0, tone = "blue", brea
   };
 
   return (
-    <div className={`relative h-[88px] overflow-hidden rounded-xl border p-3 shadow-sm ${tones[tone] || tones.blue}`}>
+    <div
+      className={`dromis-tip relative h-[88px] overflow-hidden rounded-xl border p-3 shadow-sm ${tones[tone] || tones.blue}`}
+      data-tip={tip || label}
+      data-tip-side="bottom"
+      title={tip || label}
+    >
       <div className="absolute -right-5 -top-5 h-16 w-16 rounded-full bg-current opacity-[0.07]" />
       <div className="relative flex h-full items-center justify-between gap-2">
         <div>

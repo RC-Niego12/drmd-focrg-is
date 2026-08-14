@@ -363,6 +363,8 @@ it('loads the DRRS request and assessment registries', function (): void {
             ->component('Requests/Index')
             ->has('requests')
             ->has('assessments')
+            ->has('approved')
+            ->has('workspaceSummary')
             ->has('warehouseStock'));
 });
 
@@ -471,6 +473,43 @@ it('keeps assessment generation and polishing as distinct Groq operations', func
         ->and(data_get($requests[1][0]->data(), 'messages.0.content'))->toContain('Perform a conservative polish');
 });
 
+it('passes separate incident occurrences to Groq without collapsing them', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    config()->set('services.groq.api_key', 'test-key');
+    config()->set('services.groq.base_url', 'https://api.groq.test/openai/v1');
+    config()->set('services.groq.model', 'test-model');
+    Http::fake(fn () => Http::response([
+        'choices' => [['message' => ['content' => 'Consolidated multi-incident assessment.']]],
+    ]));
+    $user = User::where('email', 'drrs@example.test')->firstOrFail();
+
+    $this->actingAs($user)->postJson('/requests/polish-assessment', [
+        'mode' => 'generate',
+        'requesting_agency' => 'MLGU - Tubod, SDN',
+        'affected_families' => 5,
+        'form_context' => [
+            'lgu_level' => 'MLGU',
+            'municipality' => 'TUBOD',
+            'province' => 'Surigao del Norte',
+            'incidents' => [
+                ['incident_type' => 'Fire Incident', 'occurrence_at' => '2026-08-01', 'barangay' => 'Marga', 'affected_families' => 2],
+                ['incident_type' => 'Fire Incident', 'occurrence_at' => '2026-08-09', 'barangay' => 'San Pablo', 'affected_families' => 3],
+            ],
+        ],
+    ])->assertOk()->assertJsonPath('polished', 'Consolidated multi-incident assessment.');
+
+    Http::assertSent(function ($request): bool {
+        $payload = $request->data();
+        $system = (string) data_get($payload, 'messages.0.content');
+        $facts = (string) data_get($payload, 'messages.1.content');
+
+        return str_contains($system, 'multiple separate incidents')
+            && str_contains($facts, 'Number of separate incidents: 2')
+            && str_contains($facts, 'Marga')
+            && str_contains($facts, 'San Pablo');
+    });
+});
+
 it('generates human LGU situation overviews with distinct paragraphs from relevant encoded facts', function (): void {
     $this->seed(DatabaseSeeder::class);
     config()->set('services.groq.api_key', 'test-key');
@@ -483,8 +522,14 @@ it('generates human LGU situation overviews with distinct paragraphs from releva
     $facts = [
         'reporting_lgu' => 'Municipality of Test',
         'report_as_of' => '2026-07-27T10:30',
+        'incident' => [
+            'type' => 'Effects of Thunderstorms',
+            'location' => 'Municipality of Test',
+            'affected_barangay_count' => 3,
+        ],
         'affected_population_totals' => ['families' => 1250, 'persons' => 4875],
         'lgu_response_actions' => [['action_intervention' => 'Conducted local validation']],
+        'official_agency_advisories_status' => 'supplied',
         'official_agency_advisories' => [[
             'agency' => 'PAGASA',
             'summary' => 'PAGASA identified a weather system affecting Mindanao.',
@@ -519,7 +564,7 @@ it('generates human LGU situation overviews with distinct paragraphs from releva
         ->toContain('Paragraph 2 — Summarized LGU-validated effects')
         ->toContain('Never name, list, or enumerate the affected barangays')
         ->toContain('Paragraph 3 — Challenges, gaps, and response')
-        ->toContain('Paragraph 4 — Continuing LGU commitment')
+        ->toContain('Paragraph 4 — Report conclusion')
         ->toContain('Never mix PAGASA/PHIVOLCS figures with LGU-validated affected-population figures')
         ->toContain('complete official term followed by the acronym in parentheses')
         ->toContain('Never write "as reported by the local government unit,"')
@@ -530,6 +575,59 @@ it('generates human LGU situation overviews with distinct paragraphs from releva
         ->and(data_get($generatePayload, 'messages.1.content'))->toContain('exactly four distinct paragraphs')
         ->and(data_get($polishPayload, 'messages.1.content'))->toContain('Existing draft')
         ->and(data_get($polishPayload, 'messages.1.content'))->toContain('exactly four distinct paragraphs');
+});
+
+it('builds fire Situation Overview prompts with fireout, named barangays, and no PAGASA when advisories are N/A', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    config()->set('services.groq.api_key', 'test-key');
+    config()->set('services.groq.base_url', 'https://api.groq.test/openai/v1');
+    config()->set('services.groq.model', 'test-model');
+    Http::fake(fn () => Http::response([
+        'choices' => [['message' => ['content' => "A fire affected Barangay San Juan.\n\nFive families were affected in Barangay San Juan.\n\nThe LGU conducted local validation and assisted the affected families.\n\nThe report presents the final validated situation."]]],
+    ]));
+    $user = User::where('email', 'superadmin@example.test')->firstOrFail();
+
+    $this->actingAs($user)
+        ->postJson('/lgu/dromic-sitrep/polish', [
+            'mode' => 'generate',
+            'facts' => [
+                'reporting_lgu' => 'Municipality of Test',
+                'report_classification' => 'first_and_final',
+                'incident' => [
+                    'type' => 'Fire Incident',
+                    'specific_details' => 'Residential house fire',
+                    'location' => 'Test, Surigao del Norte',
+                    'affected_barangays' => ['San Juan'],
+                    'affected_barangay_count' => 1,
+                    'occurrence_datetime' => '2 August 2026, 1:15 PM',
+                    'status' => 'Ended',
+                    'fireout' => '2 August 2026, 3:40 PM',
+                    'ended_datetime' => '2 August 2026, 3:40 PM',
+                ],
+                'affected_population_totals' => ['families' => 5, 'persons' => 18],
+                'official_agency_advisories_not_applicable' => true,
+                'official_agency_advisories_status' => 'not_applicable',
+                'official_agency_advisories' => [],
+                'lgu_response_actions' => [['action_intervention' => 'Conducted local validation']],
+            ],
+        ])
+        ->assertOk();
+
+    $payload = Http::recorded()[0][0]->data();
+    $systemPrompt = (string) data_get($payload, 'messages.0.content');
+    $userPrompt = (string) data_get($payload, 'messages.1.content');
+
+    expect($systemPrompt)
+        ->toContain('This is a fire incident')
+        ->toContain('fireout')
+        ->toContain('actual name(s) of the affected barangay')
+        ->toContain('never mention PAGASA or PHIVOLCS')
+        ->toContain('never write that those agencies are not relevant')
+        ->not->toContain('Never name, list, or enumerate the affected barangays')
+        ->and($userPrompt)->toContain('San Juan')
+        ->and($userPrompt)->toContain('fireout')
+        ->and($userPrompt)->toContain('not_applicable')
+        ->and($userPrompt)->toContain('Do not mention PAGASA, PHIVOLCS');
 });
 
 it('removes irrelevant weather geography and effects meta-commentary from the situation overview', function (): void {
@@ -1021,8 +1119,9 @@ it('downloads the response letter as a Word document generated from the official
         ->and($documentXml)->toContain('ATTENTION:')
         ->and($documentXml)->toContain('CSWDO')
         ->and($documentXml)->toContain('10 boxes of Family Food Pack')
-        ->and($documentXml)->toContain('After a thorough assessment conducted by our Social Worker Alex Rivera Worker')
-        ->and($documentXml)->toContain('Alex Rivera Worker will be coordinating with you through this mobile number 0917 123 4567')
+        ->and($documentXml)->toContain('requesting family food packs intended for')
+        ->and($documentXml)->toContain('After a thorough assessment conducted by our Social Worker Mr. Alex Rivera Worker')
+        ->and($documentXml)->toContain('Mr. Worker will be coordinating with you through this mobile number 0917 123 4567')
         ->and($documentXml)->toContain('Regional Resource Operations Section (RROS) personnel will prepare the Requisition and Issuance Slip (RIS) of the said items')
         ->and($documentXml)->toContain('This is in reference to your letter requesting')
         ->and($documentXml)->toContain('disaster-affected')
@@ -1061,7 +1160,7 @@ it('downloads the response letter as a Word document generated from the official
         ->and($followingPageFooter)->toBe($pageOneFooter)
         ->and($pageOneFooter)->toContain('PAGE 1of 1')
         ->and($pageOneFooter)->toContain('DSWD Field Office Caraga')
-        ->and($dateBreakCount)->toBe(2)
+        ->and($dateBreakCount)->toBe(0)
         ->and($xpath->query('//w:p[contains(., "HON. MARIA TEST SANTOS") and not(contains(., "ATTENTION:"))]//w:br')->length)->toBeGreaterThanOrEqual(2)
         ->and($xpath->query('//w:p[contains(., "ATTENTION:")]//w:br')->length)->toBeGreaterThanOrEqual(2)
         ->and($xpath->query('//w:p[contains(., "ATTENTION:")]/w:pPr/w:tabs/w:tab[@w:pos="1380"]')->length)->toBeGreaterThanOrEqual(1)
@@ -1131,8 +1230,123 @@ it('renders empty assessment rows with fixed-height placeholders so the form kee
 
     expect($html)
         ->toContain('&nbsp;')
-        ->and(preg_match_all('/<tr class="blank-data">/', $html))->toBe(3)
-        ->and(preg_match_all('/<tr class="batch-row">/', $html))->toBe(5);
+        ->and(preg_match_all('/<tr class="blank-data">/', $html))->toBe(1)
+        ->and(preg_match_all('/<tr class="batch-row">/', $html))->toBe(2);
+});
+
+it('renders affected persons from DROMIC payload when assessment meta omitted them', function (): void {
+    $source = AssistanceRequest::create([
+        'reference_number' => 'LGU-DROMIC-PERSONS-SRC',
+        'submission_type' => 'lgu_dromic_report',
+        'requesting_agency' => 'MLGU Tubod',
+        'requester' => 'MSWDO',
+        'date_requested' => now()->toDateString(),
+        'affected_families' => 2,
+        'lgu_dromic_payload' => [
+            'affected_families' => 2,
+            'affected_persons' => 10,
+            'area_rows' => [
+                ['area' => 'Marga', 'affected_families' => 2, 'affected_persons' => 10],
+            ],
+        ],
+        'status' => 'submitted',
+    ]);
+
+    $request = AssistanceRequest::create([
+        'reference_number' => 'REQ-PDF-PERSONS-FALLBACK',
+        'source_lgu_dromic_request_id' => $source->id,
+        'requesting_agency' => 'MLGU Tubod',
+        'requester' => 'MSWDO',
+        'date_requested' => now()->toDateString(),
+        'date_received_by_drmd' => now()->toDateString(),
+        'affected_families' => 2,
+        'recommendations' => 'The fire incident affected 2 families, comprising 10 persons, in Barangay Marga.',
+        'assessment_status' => 'draft',
+        'status' => 'under_review',
+        'assessment_form_data' => [
+            'request_type' => 'Disaster',
+            'response_purpose' => 'Relief Augmentation',
+            'has_previous_augmentation' => false,
+            'provide_augmentation' => true,
+            'prepared_by' => 'Test Social Worker',
+            'prepared_by_position' => 'Social Welfare Officer II',
+            'reviewed_by' => 'Reviewing Officer|OIC - DRMD Chief',
+            'approved_by' => 'Approving Officer|Assistant Regional Director for Operations',
+        ],
+    ]);
+
+    $html = view('documents.assessment', [
+        'request' => $request->load(['items', 'incident', 'sourceLguDromicReport']),
+        'pageMargin' => 18,
+    ])->render();
+
+    expect($request->resolvedAffectedPersons())->toBe(10)
+        ->and($html)->toContain('Actual Affected Families: 2 families (10 persons)');
+});
+
+it('fits a multi-item assessment on one A4 page and keeps recommendation rows compact', function (): void {
+    $request = AssistanceRequest::create([
+        'reference_number' => 'REQ-PDF-MULTI-FNI',
+        'requesting_agency' => 'MLGU Tubod',
+        'requester' => 'MSWDO',
+        'date_requested' => now()->toDateString(),
+        'date_received_by_drmd' => now()->toDateString(),
+        'affected_families' => 2,
+        'recommendations' => 'A fire incident affected 2 families, comprising 10 persons, in Barangay Marga. The Municipal Local Government Unit of Tubod responded promptly. Augmentation of the requested FNI is recommended based on validated effects and current stock availability. DRMD continues monitoring and coordinating with the LGU.',
+        'assessment_status' => 'draft',
+        'status' => 'under_review',
+        'assessment_form_data' => [
+            'request_type' => 'Disaster',
+            'response_purpose' => 'Relief Augmentation',
+            'affected_persons' => 10,
+            'has_previous_augmentation' => false,
+            'previous_augmentations' => [
+                ['unit' => null, 'description' => null, 'quantity' => null, 'remarks' => null],
+                ['unit' => null, 'description' => null, 'quantity' => null, 'remarks' => null],
+                ['unit' => null, 'description' => null, 'quantity' => null, 'remarks' => null],
+            ],
+            'delivery_batches' => [],
+            'provide_augmentation' => true,
+            'prepared_by' => 'Test Social Worker',
+            'prepared_by_position' => 'Social Welfare Officer II',
+            'reviewed_by' => 'Reviewing Officer|OIC - DRMD Chief',
+            'approved_by' => 'Approving Officer|Assistant Regional Director for Operations',
+        ],
+    ]);
+
+    foreach ([
+        ['Family Food Pack', 10, 'box'],
+        ['Sleeping Kit', 10, 'set'],
+        ['Kitchen Kit', 5, 'set'],
+        ['Hygiene Kit', 10, 'set'],
+        ['Malong', 20, 'pc'],
+        ['Family Tent', 2, 'unit'],
+    ] as [$name, $qty, $unit]) {
+        $request->items()->create([
+            'item_name' => $name,
+            'requested_quantity' => $qty,
+            'available_quantity' => 100,
+            'unit' => $unit,
+            'priority' => 'normal',
+        ]);
+    }
+
+    $viewData = [
+        'request' => $request->load(['items.sourceWarehouse', 'assessmentType', 'incident', 'encoder']),
+        'pageMargin' => 18,
+    ];
+    $html = view('documents.assessment', $viewData)->render();
+
+    expect($html)
+        ->toContain('Actual Affected Families: 2 families (10 persons)')
+        ->and(preg_match_all('/<tr class="blank-data">/', $html))->toBe(1)
+        ->and(preg_match_all('/<tr class="batch-row">/', $html))->toBe(2)
+        ->and($html)->toMatch('/\.recommendation-items td \{ height: 9\.5pt;/');
+
+    $pdf = Pdf::loadView('documents.assessment', $viewData)->setPaper('a4', 'portrait');
+    $pdf->render();
+
+    expect($pdf->getDomPDF()->getCanvas()->get_page_count())->toBe(1);
 });
 
 it('renders the default fit assessment on one A4 page with a substantial narrative', function (): void {

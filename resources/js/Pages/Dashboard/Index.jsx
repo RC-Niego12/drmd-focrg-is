@@ -1,10 +1,11 @@
-import { Head } from '@inertiajs/react';
-import { useRef, useState } from 'react';
+import { Head, router } from '@inertiajs/react';
+import { useEffect, useRef, useState } from 'react';
 import { Boxes, PackageMinus, PackagePlus, Warehouse } from 'lucide-react';
 import AppLayout, { Card, DataTable, ExportableCard } from '@/Layouts/AppLayout';
 import NearExpiryMonthSummary from '@/Components/NearExpiryMonthSummary';
 import ExportButtons, { exportFilename } from '@/Components/ExportButtons';
 import { formatDateTime } from '@/Utils/dateFormat';
+import { listenRealtime } from '@/realtime';
 
 const chartColors = ['#3b82f6', '#f97316', '#a855f7', '#9dbb4f', '#2db6c4'];
 const chartHoverColors = ['#2563eb', '#ea580c', '#9333ea', '#82983f', '#0891b2'];
@@ -24,6 +25,10 @@ export default function Index({
     warehouseSummary,
     nearExpirySummary = [],
 }) {
+    useEffect(() => {
+        const stop = listenRealtime('wit.sync.completed', () => router.reload({ preserveScroll: true }));
+        return stop;
+    }, []);
     const warehouseTypeRows = objectRows(warehouseBreakdown?.type);
     const provinceRows = objectRows(warehouseBreakdown?.province);
     const partnershipRows = objectRows(warehouseBreakdown?.partnership);

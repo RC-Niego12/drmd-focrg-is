@@ -126,6 +126,106 @@ textarea {
     position: relative;
 }
 
+/* Portaled tooltips (AppLayout) live on document.body above every modal. */
+.dromis-tip-portal {
+    position: fixed;
+    z-index: 2147483000;
+    width: max-content;
+    max-width: 16rem;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 0.3rem;
+    background: #0f766e;
+    color: #ffffff;
+    padding: 0.35rem 0.55rem;
+    font-size: 0.72rem;
+    font-weight: 800;
+    line-height: 1.05rem;
+    letter-spacing: 0.01em;
+    text-transform: none;
+    text-align: center;
+    white-space: normal;
+    box-shadow: 0 7px 16px rgba(15, 23, 42, 0.22);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 150ms ease;
+}
+
+.dromis-tip-portal.is-visible {
+    opacity: 1;
+}
+
+.dromis-tip-portal::before {
+    content: "";
+    position: absolute;
+    width: 0.58rem;
+    height: 0.58rem;
+    background: #0f766e;
+    transform: rotate(45deg);
+}
+
+.dromis-tip-portal[data-side="top"]::before,
+.dromis-tip-portal:not([data-side])::before {
+    bottom: -0.22rem;
+    left: 50%;
+    margin-left: -0.29rem;
+}
+
+.dromis-tip-portal[data-side="bottom"]::before {
+    top: -0.22rem;
+    left: 50%;
+    margin-left: -0.29rem;
+}
+
+.dromis-tip-portal[data-side="left"]::before {
+    top: 50%;
+    right: -0.22rem;
+    margin-top: -0.29rem;
+}
+
+.dromis-tip-portal[data-side="right"]::before {
+    top: 50%;
+    left: -0.22rem;
+    margin-top: -0.29rem;
+}
+
+.dromis-tip-portal[data-align="left"]::before {
+    left: 0.8rem;
+    margin-left: 0;
+}
+
+.dromis-tip-portal[data-align="right"]::before {
+    left: auto;
+    right: 0.8rem;
+    margin-left: 0;
+}
+
+@media (max-width: 640px) {
+    .dromis-tip-portal {
+        max-width: 12rem;
+    }
+}
+
+/* When the portal layer is active, suppress CSS pseudo-element tips so they
+   cannot be clipped by overflow-hidden modal panels. */
+body.dromis-tooltips-portaled .dromis-tip[data-tip]::before,
+body.dromis-tooltips-portaled .dromis-tip[data-tip]::after,
+body.dromis-tooltips-portaled button[title]:not(.dromis-tip)::before,
+body.dromis-tooltips-portaled button[title]:not(.dromis-tip)::after,
+body.dromis-tooltips-portaled a[title]:not(.dromis-tip)::before,
+body.dromis-tooltips-portaled a[title]:not(.dromis-tip)::after,
+body.dromis-tooltips-portaled :is(button, a)[aria-label]:not([title]):not(.dromis-tip)::before,
+body.dromis-tooltips-portaled :is(button, a)[aria-label]:not([title]):not(.dromis-tip)::after {
+    display: none !important;
+    content: none !important;
+}
+
+/* Legacy: unused once portal tooltips are installed. */
+.native-modal-close-tooltip::before,
+.native-modal-close-tooltip::after {
+    display: none !important;
+    content: none !important;
+}
+
 .dromis-tip[data-tip]::after,
 button[title]:not(.dromis-tip)::after,
 a[title]:not(.dromis-tip)::after,
@@ -384,4 +484,28 @@ a[title]:not(.dromis-tip):focus-visible::before,
 .dromis-table a[title]::before,
 .dromis-table a[title]::after {
     display: none !important;
+}
+
+/*
+ * Stacking contract:
+ * - App chrome (sidebar/header): z-40
+ * - Page sticky/tooltips within content: z-10–30
+ * - Toasts / floating chrome widgets: z-50–60
+ * - Modals: z-50+ in components, floored to 240 here when marked as dialogs
+ *
+ * Many modals put role="dialog" on the inner panel (not the fixed backdrop).
+ * Raise the backdrop in both patterns so chrome never paints over overlays.
+ */
+body:has([role="dialog"][aria-modal="true"]) [data-app-sidebar],
+body:has([role="dialog"][aria-modal="true"]) [data-app-header],
+body:has([role="alertdialog"][aria-modal="true"]) [data-app-sidebar],
+body:has([role="alertdialog"][aria-modal="true"]) [data-app-header] {
+    z-index: 30 !important;
+}
+
+[role="dialog"][aria-modal="true"].fixed.inset-0,
+[role="alertdialog"][aria-modal="true"].fixed.inset-0,
+.fixed.inset-0:has([role="dialog"][aria-modal="true"]),
+.fixed.inset-0:has([role="alertdialog"][aria-modal="true"]) {
+    z-index: 240;
 }

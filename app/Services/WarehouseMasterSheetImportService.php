@@ -4,8 +4,6 @@ namespace App\Services;
 
 use App\Models\Warehouse;
 use Carbon\Carbon;
-use Illuminate\Http\Client\ConnectionException;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use RuntimeException;
 
@@ -13,23 +11,19 @@ class WarehouseMasterSheetImportService
 {
     private array $columnIndexes = [];
 
+    public function __construct(private GoogleSheetCsvService $sheetCsv) {}
+
     public function import(string $sheetUrl, ?string $worksheetName = null): array
     {
         [$sheetId, $gid] = $this->extractSheetParts($sheetUrl);
-        $csvUrl = "https://docs.google.com/spreadsheets/d/{$sheetId}/export?format=csv&gid={$gid}";
-
         try {
-            $response = Http::timeout(60)->get($csvUrl);
-        } catch (ConnectionException $exception) {
+            $csv = $this->sheetCsv->fetch($sheetId, $gid);
+        } catch (RuntimeException $exception) {
             throw new RuntimeException('Could not connect to the warehouse master Google Sheet. Please check the internet connection or DNS settings, then try syncing again.', previous: $exception);
         }
 
-        if (! $response->successful()) {
-            throw new RuntimeException("Warehouse master export failed with HTTP {$response->status()}.");
-        }
-
         $handle = fopen('php://temp', 'r+');
-        fwrite($handle, $response->body());
+        fwrite($handle, $csv);
         rewind($handle);
 
         $headers = fgetcsv($handle);
@@ -53,6 +47,7 @@ class WarehouseMasterSheetImportService
 
             if (! Str::startsWith($warehouseId, 'PH') || $warehouseName === '') {
                 $summary['rows_skipped']++;
+
                 continue;
             }
 

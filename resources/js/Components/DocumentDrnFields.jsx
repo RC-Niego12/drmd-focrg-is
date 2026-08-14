@@ -23,7 +23,7 @@ export const parseDocumentDrn = (value, prefixOptions = []) => {
   return { prefix: knownPrefix || match[1], year: match[2], month: match[3], specified: match[4] };
 };
 
-export function DocumentDrnFields({ parts, onChange, prefixOptions = [], compact = false, errors = {} }) {
+export function DocumentDrnFields({ parts, onChange, prefixOptions = [], compact = false, errors = {}, disabled = false }) {
   const listId = useId();
   const update = (key, value) => {
     const next = { ...parts, [key]: value };
@@ -45,7 +45,8 @@ export function DocumentDrnFields({ parts, onChange, prefixOptions = [], compact
           {label} *
         </span>
         <input
-          required
+          required={!disabled}
+          disabled={disabled}
           aria-label={label}
           title={label}
           list={key === "prefix" ? listId : undefined}
@@ -54,7 +55,7 @@ export function DocumentDrnFields({ parts, onChange, prefixOptions = [], compact
           value={parts[key] ?? ""}
           placeholder={compact && key === "specified" ? "Enter specified DRN" : undefined}
           onChange={(event) => update(key, event.target.value)}
-          className={`w-full rounded border border-slate-300 bg-white px-2 py-2 text-xs font-bold normal-case tracking-normal text-slate-950 focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 ${compact ? "h-9" : "mt-1 h-10"}`}
+          className={`w-full rounded border border-slate-300 px-2 py-2 text-xs font-bold normal-case tracking-normal focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500 ${compact ? "h-9" : "mt-1 h-10"}`}
         />
         {errors[key] && <span className="mt-1 block normal-case text-rose-600">{errors[key]}</span>}
       </label>)}
@@ -87,7 +88,7 @@ export function ResponseDrnModal({ requestId, existingDrn = "", prefixOptions = 
     }
   };
 
-  return <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+  return <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="Response Letter DRN">
     <form onSubmit={submit} className="w-full max-w-3xl overflow-hidden rounded-lg bg-white shadow-2xl dark:bg-zinc-950">
       <div className="flex items-start justify-between border-b border-slate-200 bg-slate-50 px-6 py-5 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="flex gap-3"><span className="rounded-md bg-emerald-100 p-2 text-emerald-700"><FileText className="h-5 w-5" /></span><div><p className="text-xs font-black uppercase tracking-wide text-emerald-700">Required document reference</p><h2 className="text-xl font-black">Response Letter DRN</h2><p className="mt-1 text-sm text-slate-500">Confirm or edit every component before generating the response letter.</p></div></div>

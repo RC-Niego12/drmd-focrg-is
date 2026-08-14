@@ -7,11 +7,12 @@ use App\Models\DromicReport;
 use App\Models\RegionalAlertRecipient;
 use App\Models\User;
 use Illuminate\Notifications\DatabaseNotification;
+use Illuminate\Support\Carbon;
 use Spatie\Permission\Models\Role;
 
 class AccessNotificationCenter
 {
-    public const REQUESTABLE_ROLES = ['RROS', 'DRRS', 'DRIMS', 'DRMD AA', 'DRMD Financial Analyst'];
+    public const REQUESTABLE_ROLES = ['RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Financial Analyst'];
 
     public function forUser(User $user): array
     {
@@ -88,7 +89,7 @@ class AccessNotificationCenter
 
         return Role::query()
             ->whereIn('name', $roles)
-            ->orderByRaw("case name when 'Super Admin' then 0 when 'RROS' then 1 when 'DRRS' then 2 when 'DRIMS' then 3 when 'DRMD AA' then 4 when 'DRMD Financial Analyst' then 5 else 6 end")
+            ->orderByRaw("case name when 'Super Admin' then 0 when 'RROS' then 1 when 'RROS AA' then 2 when 'DRRS' then 3 when 'DRRS AA' then 4 when 'DRIMS' then 5 when 'DRMD AA' then 6 when 'DRMD Financial Analyst' then 7 else 8 end")
             ->pluck('name')
             ->map(fn (string $role): array => ['value' => $role, 'label' => $role])
             ->values()
@@ -115,6 +116,10 @@ class AccessNotificationCenter
     {
         $data = $notification->data;
         $acted = $this->notificationHasBeenActed($data);
+        // Manual RIS / DR signing has no system completion flag — treat as acted once read.
+        if (! $acted && data_get($data, 'action_key') === 'ris_ready_for_signing' && filled($notification->read_at)) {
+            $acted = true;
+        }
         $regionalAlertAcknowledgedAt = null;
         if (data_get($data, 'action_key') === 'ocd_alert_changed') {
             $regionalAlertAcknowledgedAt = RegionalAlertRecipient::query()
@@ -132,7 +137,7 @@ class AccessNotificationCenter
             'read_at' => $notification->read_at?->toDateTimeString(),
             'created_at' => $notification->created_at?->toDateTimeString(),
             'regional_alert_acknowledged_at' => $regionalAlertAcknowledgedAt
-                ? \Illuminate\Support\Carbon::parse($regionalAlertAcknowledgedAt)->toDateTimeString()
+                ? Carbon::parse($regionalAlertAcknowledgedAt)->toDateTimeString()
                 : null,
         ];
     }
@@ -182,7 +187,23 @@ class AccessNotificationCenter
 
         return match (data_get($data, 'action_key')) {
             'drrs_assessment_required' => filled($request->assessment_status) || $request->status !== 'endorsed',
+            'drrs_aa_epirma_required' => in_array((string) $request->epirma_aa_status, ['in_progress', 'completed'], true)
+                || filled($request->epirma_assessment_signed_at),
             'rros_decision_required' => in_array($request->status, ['approved', 'partially_approved', 'rejected', 'released', 'completed'], true),
+            'rros_epirma_document_ready' => true,
+            'ris_post_monitoring_required' => (function () use ($request): bool {
+                $slip = $request->requisitionIssuanceSlip;
+
+                return (bool) ($slip?->hasCompletePostRisData());
+            })(),
+            // Offline print/sign — stays actionable until the officer has opened (read) the notice.
+            // Completion is not tied to Dispatch Plan create (that is a later logistics phase).
+            'ris_ready_for_signing' => false,
+            'drrs_pdrc_epirma_document_signed' => true,
+            'lgu_response_letter_advance_ack_required' => filled($request->lgu_response_letter_advance_acked_at),
+            'lgu_response_letter_ack_required' => filled($request->lgu_response_letter_acked_at),
+            'drims_dromic_ack_required' => filled($request->lgu_dromic_acked_at),
+            'drrs_relief_request_ack_required' => filled($request->lgu_relief_acked_at),
             'drims_dromic_required' => DromicReport::query()->where('request_id', $request->id)->exists(),
             'lgu_dromic_aa_review' => $request->lgu_routing_status !== 'for_drmd_aa_review',
             'lgu_dromic_chief_directive' => $request->lgu_routing_status !== 'for_drmd_chief_directive',

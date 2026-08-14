@@ -29,6 +29,8 @@ class InventoryTransaction extends Model
         'expected_delivery_date',
         'transport_details',
         'external_status',
+        'reconciliation_status',
+        'reconciled_at',
         'encoded_by_email',
         'encoded_at',
         'edited_by_email',
@@ -50,6 +52,7 @@ class InventoryTransaction extends Model
             'transport_details' => 'array',
             'encoded_at' => 'datetime',
             'edited_at' => 'datetime',
+            'reconciled_at' => 'datetime',
         ];
     }
 

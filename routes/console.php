@@ -15,3 +15,22 @@ Schedule::command('lgu-dromic:remind-signed-copies --days=3')
 Schedule::command('lgu-dromic:remind-alert-deadlines --hours=2')
     ->everyFifteenMinutes()
     ->withoutOverlapping();
+
+Schedule::command('epirma:sync-document-status --cache-signed')
+    ->everyMinute()
+    ->withoutOverlapping();
+
+Schedule::command('wit:sync --trigger=automatic')
+    ->everyFiveMinutes()
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('ris:sync --trigger=automatic')
+    ->everyFiveMinutes()
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('dispatch:sync-contacts')
+    ->hourly()
+    ->withoutOverlapping()
+    ->runInBackground();

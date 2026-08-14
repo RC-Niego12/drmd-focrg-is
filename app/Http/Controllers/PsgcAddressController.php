@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\PsgcAddress;
 use App\Models\SystemSetting;
+use App\Models\User;
 use App\Services\AuditLogger;
 use App\Services\PsgcDistrictService;
 use App\Services\PsgcSyncService;
@@ -96,7 +97,7 @@ class PsgcAddressController extends Controller
 
     public function updateSettings(Request $request, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage users') || $request->user()?->can('manage psgc addresses'), 403);
+        abort_unless($this->canManagePsgcAddresses($request->user()), 403);
 
         $validated = $request->validate([
             'field_office_label' => [
@@ -119,7 +120,7 @@ class PsgcAddressController extends Controller
 
     public function syncDistricts(PsgcDistrictService $districtService, AuditLogger $audit): RedirectResponse
     {
-        abort_unless(request()->user()?->can('manage users') || request()->user()?->can('manage psgc addresses'), 403);
+        abort_unless($this->canManagePsgcAddresses(request()->user()), 403);
 
         $summary = $districtService->syncFromWarehouses();
         $audit->log('psgc_districts.synced_from_warehouses', null, [], $summary);
@@ -129,7 +130,7 @@ class PsgcAddressController extends Controller
 
     public function syncDistrictReferenceSheet(PsgcDistrictService $districtService, AuditLogger $audit): RedirectResponse
     {
-        abort_unless(request()->user()?->can('manage users') || request()->user()?->can('manage psgc addresses'), 403);
+        abort_unless($this->canManagePsgcAddresses(request()->user()), 403);
 
         try {
             $summary = $districtService->syncFromReferenceSheet();
@@ -145,7 +146,7 @@ class PsgcAddressController extends Controller
 
     public function storeDistrict(Request $request, PsgcDistrictService $districtService, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage users') || $request->user()?->can('manage psgc addresses'), 403);
+        abort_unless($this->canManagePsgcAddresses($request->user()), 403);
 
         $validated = $request->validate([
             'province_code' => [
@@ -180,7 +181,7 @@ class PsgcAddressController extends Controller
 
     public function updateDistrict(Request $request, PsgcAddress $district, PsgcDistrictService $districtService, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage users') || $request->user()?->can('manage psgc addresses'), 403);
+        abort_unless($this->canManagePsgcAddresses($request->user()), 403);
         abort_unless($district->level === 'district', 404);
 
         $validated = $request->validate([
@@ -212,7 +213,7 @@ class PsgcAddressController extends Controller
 
     public function assignCityDistrict(Request $request, PsgcAddress $city, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage users') || $request->user()?->can('manage psgc addresses'), 403);
+        abort_unless($this->canManagePsgcAddresses($request->user()), 403);
         abort_unless($city->level === 'city_municipality', 404);
 
         $validated = $request->validate([
@@ -240,7 +241,7 @@ class PsgcAddressController extends Controller
 
     public function sync(Request $request, PsgcSyncService $syncService, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage users') || $request->user()?->can('manage psgc addresses'), 403);
+        abort_unless($this->canManagePsgcAddresses($request->user()), 403);
 
         $validated = $request->validate([
             'include_barangays' => ['nullable', 'boolean'],
@@ -260,7 +261,7 @@ class PsgcAddressController extends Controller
 
     public function upload(Request $request, PsgcSyncService $syncService, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage users') || $request->user()?->can('manage psgc addresses'), 403);
+        abort_unless($this->canManagePsgcAddresses($request->user()), 403);
 
         $validated = $request->validate([
             'publication_file' => ['required', 'file', 'mimes:xlsx,xls', 'max:10240'],
@@ -284,5 +285,16 @@ class PsgcAddressController extends Controller
         }
 
         return back()->with('success', "Uploaded PSGC file imported: {$summary['regions']} regions, {$summary['provinces']} provinces, {$summary['cities_municipalities']} cities/municipalities, {$summary['barangays']} barangays.");
+    }
+
+    private function canManagePsgcAddresses(?User $user): bool
+    {
+        if (! $user) {
+            return false;
+        }
+
+        return $user->hasRole('Super Admin')
+            || $user->can('manage users')
+            || $user->can('manage psgc addresses');
     }
 }

@@ -1,6 +1,7 @@
 import { router } from '@inertiajs/react';
 import { CheckCircle2, ShieldCheck, X, XCircle } from 'lucide-react';
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import SearchableSelect from '@/Components/SearchableSelect';
 import { formatDateTime } from '@/Utils/dateFormat';
 
@@ -28,8 +29,8 @@ export default function AccessDecisionModal({ user, roleOptions, onClose, onSucc
         });
     };
 
-    return (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="access-decision-title">
+    return createPortal(
+        <div className="fixed inset-0 z-[240] flex items-center justify-center overflow-y-auto bg-slate-950/65 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="access-decision-title">
             <div className="w-full max-w-xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
                 <div className="flex items-start justify-between border-b border-slate-200 bg-slate-50 p-5 dark:border-zinc-800 dark:bg-zinc-900">
                     <div>
@@ -37,7 +38,7 @@ export default function AccessDecisionModal({ user, roleOptions, onClose, onSucc
                         <h2 id="access-decision-title" className="mt-1 text-xl font-black">{user.name}</h2>
                         <p className="text-sm text-slate-500 dark:text-zinc-400">{user.email}</p>
                     </div>
-                    <button type="button" onClick={onClose} aria-label="Close access request" className="rounded-md p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-800 dark:hover:bg-zinc-800 dark:hover:text-white">
+                    <button type="button" onClick={onClose} aria-label="Close access request" data-tip="Close access request" data-tip-side="bottom" data-tip-preferred-side="bottom" data-tip-locked="true" className="dromis-tip rounded-md p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-800 dark:hover:bg-zinc-800 dark:hover:text-white">
                         <X className="h-5 w-5" />
                     </button>
                 </div>
@@ -75,6 +76,7 @@ export default function AccessDecisionModal({ user, roleOptions, onClose, onSucc
                     </button>
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body,
     );
 }

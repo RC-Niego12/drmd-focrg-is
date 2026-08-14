@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -43,9 +45,21 @@ class SSOAuthService
 
     public function authorizationProblem(string $authorizeUrl): ?string
     {
-        $response = Http::when(! config('services.cc_idp.verify_ssl'), fn ($http) => $http->withoutVerifying())
-            ->withOptions(['allow_redirects' => false])
-            ->get($authorizeUrl);
+        try {
+            $response = Http::when(! config('services.cc_idp.verify_ssl'), fn ($http) => $http->withoutVerifying())
+                ->timeout(10)
+                ->withOptions(['allow_redirects' => false])
+                ->get($authorizeUrl);
+        } catch (ConnectionException $exception) {
+            Log::warning('Caraga Connect authorization preflight could not reach host.', [
+                'authorizeUrl' => $authorizeUrl,
+                'message' => $exception->getMessage(),
+            ]);
+
+            $host = parse_url($authorizeUrl, PHP_URL_HOST) ?: 'the configured Caraga Connect host';
+
+            return 'Caraga Connect could not be reached ('.$host.'). Connect to the DSWD/VPN network and try again, or use your local account.';
+        }
 
         $body = $response->body();
 
@@ -320,12 +334,67 @@ class SSOAuthService
         return null;
     }
 
-    private function myPortalJsonRequest(string $token): \Illuminate\Http\Client\PendingRequest
+    /**
+     * Search the MyPortal employee directory for application selectors.
+     */
+    public function searchMyPortalEmployees(string $query, ?string $userAccessToken = null): array
+    {
+        $url = (string) config('services.cc_idp.myportal_employee_search_url');
+
+        if (blank($url)) {
+            return [];
+        }
+
+        $tokens = collect([$userAccessToken])->filter()->values();
+        try {
+            $tokens->push($this->myPortalToken());
+        } catch (\Throwable $exception) {
+            if ($tokens->isEmpty()) {
+                throw $exception;
+            }
+        }
+
+        $response = null;
+        foreach ($tokens->unique() as $token) {
+            $response = $this->myPortalJsonRequest($token)->get($url, ['q' => trim($query)]);
+            if ($response->ok() && is_array($response->json())) {
+                break;
+            }
+        }
+        if (! $response?->ok() || ! is_array($response->json())) {
+            throw new RuntimeException('MyPortal employee directory rejected the available authentication token.');
+        }
+
+        return collect($this->extractEmployeeRecords($response->json()))
+            ->filter(fn (array $record): bool => ! isset($record['status']) || strcasecmp(trim((string) $record['status']), 'Active') === 0)
+            ->map(function (array $record): array {
+                $employee = $this->mapProfileToUserFields(['data' => $record]);
+                $employee['first_name'] = $record['first_name'] ?? null;
+                $employee['middle_name'] = $record['middle_name'] ?? null;
+                $employee['last_name'] = $record['last_name'] ?? null;
+                $employee['section_unit_program'] = collect([
+                    $record['section'] ?? null,
+                    $record['unit'] ?? null,
+                    $record['program'] ?? null,
+                    $record['project'] ?? null,
+                ])->first(fn ($value) => filled($value));
+                $employee['division'] = $record['division'] ?? null;
+
+                return $employee;
+            })
+            ->filter(fn (array $employee): bool => filled($employee['name'] ?? null))
+            ->unique(fn (array $employee): string => mb_strtolower(($employee['id_number'] ?? '').'|'.$employee['name']))
+            ->values()
+            ->all();
+    }
+
+    private function myPortalJsonRequest(string $token): PendingRequest
     {
         return Http::acceptJson()
             ->withToken($token)
-            ->connectTimeout(3)
-            ->timeout(6)
+            ->connectTimeout(5)
+            ->timeout(15)
+            ->retry(2, 400, throw: false)
             ->when(! config('services.cc_idp.verify_ssl'), fn ($http) => $http->withoutVerifying());
     }
 
@@ -456,23 +525,46 @@ class SSOAuthService
         return 'sso:pkce:'.$state;
     }
 
-    private function myPortalToken(): string
+    /**
+     * Resolve a Caraga Connect staff Bearer (MYPORTAL_ACCESS_TOKEN or staff login).
+     * Shared by MyPortal profile lookups and e-PIRMA forwarded-documents enrichment.
+     *
+     * When $forceRefresh is true, ignore a static MYPORTAL_ACCESS_TOKEN and cached login
+     * token and obtain a fresh token via staff login (needed after Connect 401s).
+     */
+    public function resolveStaffAccessToken(bool $forceRefresh = false): string
     {
-        $configuredToken = trim((string) config('services.cc_idp.myportal_access_token'));
+        return $this->myPortalToken($forceRefresh);
+    }
 
-        if (filled($configuredToken)) {
-            return $configuredToken;
+    private function myPortalToken(bool $forceRefresh = false): string
+    {
+        if (! $forceRefresh) {
+            $configuredToken = trim((string) config('services.cc_idp.myportal_access_token'));
+
+            if (filled($configuredToken)) {
+                return $configuredToken;
+            }
         }
 
         $username = (string) config('services.cc_idp.myportal_username');
         $password = (string) config('services.cc_idp.myportal_password');
         $url = (string) config('services.cc_idp.myportal_login_url');
 
+        // Prefer an explicit Connect staff login URL aligned with EPIRMA_CONNECT_BASE_URL.
+        $connectLogin = trim((string) config('services.epirma.connect_login_url', ''));
+        if ($connectLogin !== '') {
+            $url = $connectLogin;
+        }
+
         if (blank($username) || blank($password) || blank($url)) {
             throw new RuntimeException('MyPortal credentials are not configured.');
         }
 
         $cacheKey = 'myportal:staff-token:'.sha1($url.'|'.$username);
+        if ($forceRefresh) {
+            Cache::forget($cacheKey);
+        }
 
         return Cache::remember($cacheKey, max(60, (int) config('services.cc_idp.myportal_token_cache_seconds')), function () use ($username, $password, $url): string {
             $response = Http::acceptJson()

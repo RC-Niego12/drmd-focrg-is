@@ -3,7 +3,7 @@ import { ArrowDownToLine, ArrowUpFromLine, Boxes, Coins, Eye, Filter, Search, X 
 import { useMemo, useState } from 'react';
 import AppLayout, { Card, DataTable, ExportableCard, TableActionButton } from '@/Layouts/AppLayout';
 import LookerMultiSelect from '@/Components/LookerMultiSelect';
-import SystemTabs from '@/Components/SystemTabs';
+import SectionTabs from '@/Components/SectionTabs';
 
 const formatNumber = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const formatDate = (value) => value ? new Date(`${value}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '-';
@@ -226,14 +226,17 @@ export default function EStockCard({ filters, warehouses, items, filterOptions =
                         </div>
                     </div>
                 )}>
-                <SystemTabs
-                    active={activeTab}
-                    ariaLabel="E-Stock Card views"
+                <SectionTabs
+                    label="E-Stock Card Views"
+                    appearance="framed"
                     className="mt-4"
-                    items={[
-                        { key: 'all', label: 'Complete E-Stock Card', onClick: () => changeTab('all') },
-                        { key: 'receipts', label: 'Receipts', onClick: () => changeTab('receipts') },
-                        { key: 'issuances', label: 'Issuances / Releases', onClick: () => changeTab('issuances') },
+                    value={activeTab}
+                    onChange={changeTab}
+                    ariaLabel="E-Stock Card views"
+                    tabs={[
+                        { id: 'all', label: 'Complete E-Stock Card' },
+                        { id: 'receipts', label: 'Receipts' },
+                        { id: 'issuances', label: 'Issuances / Releases' },
                     ]}
                 />
                 {hasRequiredLedgerFilters ? (

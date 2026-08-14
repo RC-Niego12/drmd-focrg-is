@@ -1,8 +1,19 @@
 import SearchableSelect from "@/Components/SearchableSelect";
 import { composeDocumentDrn, currentDrnParts, DocumentDrnFields } from "@/Components/DocumentDrnFields";
+import { DEFAULT_DOCUMENT_PREVIEW_ZOOM } from "@/Components/DocumentPreviewCanvas";
+import DocumentPreviewModal from "@/Components/DocumentPreviewModal";
+import {
+  PrintableAssessmentDocument,
+  PrintableResponseLetterDocument,
+} from "@/Components/PrintableAssessmentDocuments";
 import axios from "axios";
-import { Sparkles, Trash2 } from "lucide-react";
+import { Eye, Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
+import {
+  coerceWholeQuantity,
+  formatWholeQuantity,
+  wholeQuantityInputValue,
+} from "@/Utils/wholeQuantity";
 
 const stripNarrativeSignoff = (value = "") => String(value)
   .split(/\r?\n/)
@@ -20,6 +31,7 @@ const CellInput = ({
   <input
     type={type}
     value={value ?? ""}
+    onInput={(e) => onChange(e.target.value)}
     onChange={(e) => onChange(e.target.value)}
     className={`h-full min-h-9 w-full border-0 bg-transparent px-2 py-1 text-xs font-semibold outline-none focus:bg-amber-50 focus:ring-2 focus:ring-inset focus:ring-emerald-600 ${className}`}
     {...props}
@@ -53,14 +65,33 @@ export default function AssessmentExcelForm({
   onSuccess,
   submitLabel = "Save Assessment",
   warehouseStock = [],
+  warehouseReservations = [],
   drnPrefixes = [],
   requestId = null,
 }) {
   const [aiAction, setAiAction] = useState(null);
   const [aiError, setAiError] = useState("");
+  const [submitError, setSubmitError] = useState("");
   const [reliefSuggestionsActive, setReliefSuggestionsActive] = useState(false);
   const [previousAugmentationHint, setPreviousAugmentationHint] = useState("");
+  const [draftPreviewOpen, setDraftPreviewOpen] = useState(false);
+  const [previewDocument, setPreviewDocument] = useState("assessment");
+  const [previewZoom, setPreviewZoom] = useState(DEFAULT_DOCUMENT_PREVIEW_ZOOM);
   const meta = form.data.assessment_form_data ?? {};
+  const responseApproverOption = (drrsSignatories || []).find(
+    (row) => row.context === "approved_by" && (row.metadata?.document_type === "response_letter" || row.document_type === "response_letter"),
+  ) || (drrsSignatories || []).find((row) => row.context === "approved_by");
+  const responseApprover = responseApproverOption
+    ? {
+        name: String(responseApproverOption.value || "").split("|")[0]?.trim()
+          || responseApproverOption.metadata?.employee_name
+          || responseApproverOption.label,
+        designation: String(responseApproverOption.value || "").split("|")[1]?.trim()
+          || responseApproverOption.metadata?.designation
+          || responseApproverOption.metadata?.position
+          || "",
+      }
+    : null;
   const hasFieldError = (...fields) => {
     const errorKeys = Object.keys(form.errors);
     return fields.some((field) =>
@@ -72,6 +103,48 @@ export default function AssessmentExcelForm({
   const isDisaster = meta.request_type === "Disaster" && form.data.purpose === "Relief Augmentation";
   const setMeta = (key, value) =>
     form.setData("assessment_form_data", { ...meta, [key]: value });
+  const incidents = Array.isArray(meta.incidents) ? meta.incidents : [];
+  const incidentFamilySubtotal = incidents.reduce((sum, row) => sum + (Number(row?.affected_families) || 0), 0);
+  const incidentPersonSubtotal = incidents.reduce((sum, row) => sum + (Number(row?.affected_persons) || 0), 0);
+  const setIncident = (index, key, value) => {
+    const next = incidents.map((row, rowIndex) => rowIndex === index ? { ...row, [key]: value } : row);
+    form.setData((current) => ({
+      ...current,
+      incident_name: index === 0 && key === "incident_type" ? value : current.incident_name,
+      incident_date: index === 0 && key === "occurrence_at" ? String(value).slice(0, 10) : current.incident_date,
+      incident_count: next.length,
+      assessment_form_data: { ...(current.assessment_form_data ?? {}), incidents: next },
+    }));
+  };
+  const addIncident = () => form.setData((current) => ({
+    ...current,
+    incident_count: incidents.length + 1,
+    assessment_form_data: {
+      ...(current.assessment_form_data ?? {}),
+      incidents: [...incidents, {
+        incident_type: current.incident_name || "",
+        incident_details: "",
+        occurrence_at: "",
+        city_municipality: current.municipality || "",
+        barangay: "",
+        affected_families: "",
+        affected_persons: "",
+        description: "",
+        source_reference: "",
+      }],
+    },
+  }));
+  const removeIncident = (index) => {
+    if (incidents.length <= 1) return;
+    const next = incidents.filter((_, rowIndex) => rowIndex !== index);
+    form.setData((current) => ({
+      ...current,
+      incident_name: next[0]?.incident_type || current.incident_name,
+      incident_date: String(next[0]?.occurrence_at || current.incident_date).slice(0, 10),
+      incident_count: next.length,
+      assessment_form_data: { ...(current.assessment_form_data ?? {}), incidents: next },
+    }));
+  };
   const assessmentPrefixOptions = drnPrefixes.filter((row) => row.context === "assessment").map((row) => row.value);
   const assessmentDrnParts = {
     ...currentDrnParts(assessmentPrefixOptions[0]),
@@ -155,7 +228,34 @@ export default function AssessmentExcelForm({
     if (!current || (rowHasNoBrand && currentHasBrand)) items[key] = row;
     return items;
   }, {}));
-  const totalAvailability = (itemName) => warehouseStock.filter((row) => normalized(row.item) === normalized(itemName)).reduce((total, row) => total + Number(row.available || 0), 0);
+  // Match RROS available-to-plan: physical available_balance minus active RIS reservations (per warehouse, then summed).
+  const totalAvailability = (itemName) => {
+    const key = normalized(itemName);
+    if (!key) return 0;
+    const physicalByWarehouse = warehouseStock
+      .filter((row) => normalized(row.item) === key)
+      .reduce((map, row) => {
+        const warehouseKey = String(row.warehouse_id ?? "");
+        map.set(warehouseKey, (map.get(warehouseKey) || 0) + Math.max(0, Number(row.available) || 0));
+        return map;
+      }, new Map());
+    const reservedByWarehouse = warehouseReservations
+      .filter((row) => (row.item_key || normalized(row.item_name)) === key)
+      .reduce((map, row) => {
+        const warehouseKey = String(row.warehouse_id ?? "");
+        map.set(warehouseKey, (map.get(warehouseKey) || 0) + Math.max(0, Number(row.quantity) || 0));
+        return map;
+      }, new Map());
+    let total = 0;
+    physicalByWarehouse.forEach((physical, warehouseKey) => {
+      total += Math.max(0, physical - (reservedByWarehouse.get(warehouseKey) || 0));
+    });
+    return Math.trunc(total);
+  };
+  const unavailableItems = form.data.items.filter((item) =>
+    item.fni_library_item_id && Number(item.requested_quantity || 0) > Number(totalAvailability(item.item_name) || 0)
+  );
+  const hasUnavailableItems = unavailableItems.length > 0;
 
   useEffect(() => {
     if (!requestId || !isDisaster) {
@@ -196,9 +296,19 @@ export default function AssessmentExcelForm({
             ? `Loaded ${rows.filter((row) => String(row.description || "").trim()).length} prior augmentation line(s) for this same incident and LGU.`
             : "No prior augmentation found for this same incident type, date, and LGU.",
         );
-      } catch {
+      } catch (error) {
         if (!cancelled) {
-          setPreviousAugmentationHint("Could not look up previous augmentations automatically.");
+          const payload = error?.response?.data;
+          const serverMessage = typeof payload?.message === "string" && payload.message.trim()
+            ? payload.message.trim()
+            : null;
+          const status = error?.response?.status;
+          setPreviousAugmentationHint(
+            serverMessage
+              || (status === 403
+                ? "Previous augmentations could not be loaded (access denied). You can still encode them manually."
+                : "Could not look up previous augmentations automatically."),
+          );
         }
       }
     })();
@@ -265,7 +375,58 @@ export default function AssessmentExcelForm({
     }
     setAiAction(mode); setAiError("");
     try {
-      const { data: payload } = await axios.post("/requests/polish-assessment", { mode, text: form.data.recommendations, requesting_agency: form.data.requesting_agency, incident_name: form.data.incident_name, incident_details: form.data.incident_details, purpose: form.data.purpose, affected_families: form.data.affected_families, items: form.data.items.map((item) => ({ item_name: item.item_name, requested_quantity: item.requested_quantity, unit: item.unit, available_quantity: item.available_quantity })), form_context: { date_received_by_drmd: form.data.date_received_by_drmd, assessment_date: meta.assessment_date, assessment_drn: form.data.assessment_drn, office_agency_details: form.data.office_agency_details, lgu_level: form.data.lgu_level, province: form.data.province, municipality: form.data.municipality, barangay: form.data.barangay, affected_areas: meta.affected_areas, affected_persons: meta.affected_persons, date_requested: form.data.date_requested, incident_date: form.data.incident_date, incident_status: meta.incident_status, incident_ended_at: meta.incident_ended_at, source_report_classification: meta.source_report_classification, assessment_summary: form.data.assessment_summary, source_dromic_narrative: meta.source_dromic_narrative, source_official_advisories: meta.source_official_advisories, source_lgu_response_actions: meta.source_lgu_response_actions, source_displacement: meta.source_displacement, identified_needs: meta.identified_needs, lgu_report_remarks: meta.lgu_report_remarks, requester: form.data.requester, requester_position: form.data.requester_position, contact_number: form.data.contact_number, information_source: meta.information_source, information_date: meta.information_date, families_served: meta.families_served, has_previous_augmentation: meta.has_previous_augmentation, previous_augmentations: meta.previous_augmentations, delivery_batches: meta.delivery_batches, provide_augmentation: meta.provide_augmentation, response_purpose: meta.response_purpose } }, { headers: { Accept: "application/json" }, withXSRFToken: true });
+      const aiFormContext = {
+        incidents: meta.incidents,
+        date_received_by_drmd: form.data.date_received_by_drmd,
+        assessment_date: meta.assessment_date,
+        assessment_drn: form.data.assessment_drn,
+        office_agency_details: form.data.office_agency_details,
+        lgu_level: form.data.lgu_level,
+        province: form.data.province,
+        municipality: form.data.municipality,
+        barangay: form.data.barangay,
+        affected_areas: meta.affected_areas,
+        affected_persons: meta.affected_persons,
+        date_requested: form.data.date_requested,
+        incident_date: form.data.incident_date,
+        incident_status: meta.incident_status,
+        incident_ended_at: meta.incident_ended_at,
+        source_report_classification: meta.source_report_classification,
+        assessment_summary: form.data.assessment_summary,
+        source_dromic_narrative: meta.source_dromic_narrative,
+        source_official_advisories: meta.source_official_advisories,
+        source_lgu_response_actions: meta.source_lgu_response_actions,
+        source_displacement: meta.source_displacement,
+        identified_needs: meta.identified_needs,
+        lgu_report_remarks: meta.lgu_report_remarks,
+        requester: form.data.requester,
+        requester_position: form.data.requester_position,
+        contact_number: form.data.contact_number,
+        information_source: meta.information_source,
+        information_date: meta.information_date,
+        families_served: meta.families_served,
+        has_previous_augmentation: meta.has_previous_augmentation,
+        previous_augmentations: meta.previous_augmentations,
+        delivery_batches: meta.delivery_batches,
+        provide_augmentation: meta.provide_augmentation,
+        response_purpose: meta.response_purpose,
+      };
+      const { data: payload } = await axios.post("/requests/polish-assessment", {
+        mode,
+        text: form.data.recommendations,
+        requesting_agency: form.data.requesting_agency,
+        incident_name: form.data.incident_name,
+        incident_details: form.data.incident_details,
+        purpose: form.data.purpose,
+        affected_families: form.data.affected_families,
+        items: form.data.items.map((item) => ({
+          item_name: item.item_name,
+          requested_quantity: item.requested_quantity,
+          unit: item.unit,
+          available_quantity: totalAvailability(item.item_name),
+        })),
+        form_context: aiFormContext,
+      }, { headers: { Accept: "application/json" }, withXSRFToken: true });
       form.setData("recommendations", stripNarrativeSignoff(payload.polished));
     } catch (error) { setAiError(error.response?.data?.message || error.message || "Unable to process the assessment."); } finally { setAiAction(null); }
   };
@@ -304,13 +465,34 @@ export default function AssessmentExcelForm({
   ].join(" / ");
   const submit = (e) => {
     e.preventDefault();
-    form[method](action, {
+    setSubmitError("");
+    if (hasUnavailableItems) {
+      setSubmitError(`Assessment cannot be submitted. Insufficient available-to-plan stock for: ${unavailableItems.map((item) => item.item_name).join(", ")}.`);
+      document.getElementById("assessment-items")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    form.transform((data) => ({
+      ...data,
+      items: data.items.map((item) => ({
+        ...item,
+        available_quantity: item.item_name ? totalAvailability(item.item_name) : 0,
+      })),
+    }))[method](action, {
       preserveScroll: true,
-      onSuccess,
-      onError: () =>
+      onSuccess: (...args) => {
+        setSubmitError("");
+        onSuccess?.(...args);
+      },
+      onError: (errors) => {
+        if (!errors || Object.keys(errors).length === 0) {
+          setSubmitError(
+            "Unable to save this assessment. You may not have permission, or the request is locked.",
+          );
+        }
         document
           .getElementById("assessment-validation")
-          ?.scrollIntoView({ behavior: "smooth", block: "center" }),
+          ?.scrollIntoView({ behavior: "smooth", block: "center" });
+      },
     });
   };
 
@@ -328,13 +510,28 @@ export default function AssessmentExcelForm({
             DSWD-DRMG-GF-001 · Rev 00 · 21 March 2022
           </p>
         </div>
-        <button
-          disabled={form.processing}
-          className="rounded-md bg-emerald-700 px-5 py-2 text-sm font-black text-white disabled:opacity-50"
-        >
-          {form.processing ? "Saving..." : submitLabel}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setPreviewDocument("assessment");
+              setPreviewZoom(DEFAULT_DOCUMENT_PREVIEW_ZOOM);
+              setDraftPreviewOpen(true);
+            }}
+            className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-black text-slate-700"
+            title="Preview assessment and response letter from the values currently encoded"
+          >
+            <Eye className="h-4 w-4" /> Preview Documents
+          </button>
+          <button
+            disabled={form.processing || hasUnavailableItems}
+            className="rounded-md bg-emerald-700 px-5 py-2 text-sm font-black text-white disabled:opacity-50"
+          >
+            {form.processing ? "Saving..." : submitLabel}
+          </button>
+        </div>
       </div>
+      {hasUnavailableItems && <div className="border-b border-rose-300 bg-rose-50 px-4 py-3 text-sm font-bold text-rose-800 print:hidden">Submission is blocked because the requested stock is unavailable or insufficient: {unavailableItems.map((item) => item.item_name).join(", ")}.</div>}
       <div className="max-h-[calc(100vh-14rem)] overflow-auto p-3">
         {meta.source_data_prefilled && (
           <div className="mx-auto mb-3 max-w-[1280px] rounded-md border border-blue-300 bg-blue-50 p-4 font-sans text-sm text-blue-950 print:hidden">
@@ -355,23 +552,30 @@ export default function AssessmentExcelForm({
             <p className="mt-2 text-xs text-blue-800">Verify the LGU-supplied facts and requested quantities against the attached documents, then complete DRRS availability, assessment, and recommendation fields.</p>
           </div>
         )}
-        {Object.keys(form.errors).length > 0 && (
+        {(Object.keys(form.errors).length > 0 || submitError) && (
           <div
             id="assessment-validation"
             className="mx-auto mb-3 max-w-[1280px] rounded-md border-2 border-rose-500 bg-rose-50 p-4 font-sans text-sm text-rose-800"
           >
             <p className="font-black">
-              Complete the required worksheet cells before submitting:
+              {submitError && Object.keys(form.errors).length === 0
+                ? "Unable to save this assessment"
+                : "Complete the required worksheet cells before submitting:"}
             </p>
-            <ul className="mt-2 grid list-disc gap-x-8 pl-5 md:grid-cols-2">
-              {Object.entries(form.errors).map(([field, message]) => (
-                <li key={field}>{message}</li>
-              ))}
-            </ul>
+            {submitError && (
+              <p className="mt-2 font-semibold">{submitError}</p>
+            )}
+            {Object.keys(form.errors).length > 0 && (
+              <ul className="mt-2 grid list-disc gap-x-8 pl-5 md:grid-cols-2">
+                {Object.entries(form.errors).map(([field, message]) => (
+                  <li key={field}>{message}</li>
+                ))}
+              </ul>
+            )}
             <p className="mt-2 text-xs font-semibold">
-              RIS Number, incident specification, delivery batches, families
-              served, and remarks may remain blank when not applicable. All DRN
-              components are required.
+              RIS Number, document DRNs, incident specification, delivery batches,
+              families served, and remarks may remain blank when not applicable.
+              DRRS AA assigns the Assessment and Response Letter DRNs after forwarding.
             </p>
           </div>
         )}
@@ -405,8 +609,8 @@ export default function AssessmentExcelForm({
                 "assessment_form_data.assessment_drn_month",
                 "assessment_form_data.assessment_drn_specified",
               )}`}>
-                <span className="mb-1 block font-serif text-xs">DRN:</span>
-                <DocumentDrnFields compact parts={assessmentDrnParts} onChange={setAssessmentDrn} prefixOptions={assessmentPrefixOptions} />
+                <span className="mb-1 block font-serif text-xs">DRN: <em className="font-sans text-[10px] text-slate-500">Assigned by DRRS AA after forwarding</em></span>
+                <DocumentDrnFields compact disabled parts={assessmentDrnParts} onChange={setAssessmentDrn} prefixOptions={assessmentPrefixOptions} />
               </div>
             </div>
           </div>
@@ -459,8 +663,8 @@ export default function AssessmentExcelForm({
               </label>
             </div>
             <div className={`col-span-4 grid grid-cols-[minmax(0,2fr)_minmax(118px,0.9fr)] border-b border-r border-black p-1 ${errorCell("incident_name", "incident_date")}`}>
-              <SearchableSelect disabled={!isDisaster} options={incidentOptions} value={isDisaster ? form.data.incident_name : ""} onChange={(v) => form.setData("incident_name", v)} placeholder={isDisaster ? "Type of disaster" : ""} />
-              <CellInput disabled={!isDisaster} type="date" value={isDisaster ? form.data.incident_date : ""} onChange={(v) => form.setData("incident_date", v)} aria-label="Date of disaster" className="ml-1 border-l border-slate-300 print:hidden disabled:cursor-not-allowed disabled:bg-slate-100" />
+              <SearchableSelect disabled={!isDisaster} options={incidentOptions} value={isDisaster ? form.data.incident_name : ""} onChange={(v) => incidents.length ? setIncident(0, "incident_type", v) : form.setData("incident_name", v)} placeholder={isDisaster ? "Type of disaster" : ""} />
+              <CellInput disabled={!isDisaster} type="date" value={isDisaster ? form.data.incident_date : ""} onChange={(v) => incidents.length ? setIncident(0, "occurrence_at", v) : form.setData("incident_date", v)} aria-label="Date of disaster" className="ml-1 border-l border-slate-300 print:hidden disabled:cursor-not-allowed disabled:bg-slate-100" />
             </div>
             <div className="col-span-3 border-b border-r border-black">
               <CellInput
@@ -487,7 +691,44 @@ export default function AssessmentExcelForm({
               />
             </div>
           </div>
-          <div className="grid grid-cols-[4fr_3.7fr_52px] border-b border-black bg-slate-200 text-center text-xs font-black">
+          {isDisaster && (
+            <section className={`border-b border-black bg-white p-3 print:hidden ${errorCell("assessment_form_data.incidents")}`}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-xs font-black uppercase tracking-wide text-emerald-800">Incident breakdown</h3>
+                  <p className="mt-1 text-[11px] text-slate-600">One request, assessment, and RIS may cover multiple separate incidents. Encode each occurrence here; population subtotals must reconcile with the assessment totals.</p>
+                </div>
+                <button type="button" onClick={addIncident} className="rounded-lg border border-emerald-600 px-3 py-1.5 text-xs font-black text-emerald-700 hover:bg-emerald-50">+ Add incident</button>
+              </div>
+              <div className="mt-3 space-y-3">
+                {incidents.length === 0 && <p className="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-3 text-xs font-semibold text-amber-800">No structured occurrence is encoded yet. Add the first incident before completing the assessment.</p>}
+                {incidents.map((incident, incidentIndex) => (
+                  <div key={`incident-${incidentIndex}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="mb-2 flex items-center justify-between">
+                      <strong className="text-xs text-slate-800">Incident {incidentIndex + 1}</strong>
+                      {incidents.length > 1 && <button type="button" onClick={() => removeIncident(incidentIndex)} className="text-xs font-bold text-rose-600">Remove</button>}
+                    </div>
+                    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                      <SearchableSelect options={incidentOptions} value={incident.incident_type || ""} onChange={(value) => setIncident(incidentIndex, "incident_type", value)} placeholder="Incident type" />
+                      <input type="datetime-local" value={incident.occurrence_at || ""} onChange={(event) => setIncident(incidentIndex, "occurrence_at", event.target.value)} className="rounded-lg border-slate-300 text-xs" aria-label={`Incident ${incidentIndex + 1} occurrence`} />
+                      <input value={incident.city_municipality || ""} onChange={(event) => setIncident(incidentIndex, "city_municipality", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="City / municipality" />
+                      <input value={incident.barangay || ""} onChange={(event) => setIncident(incidentIndex, "barangay", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="Barangay / affected site" />
+                      <input type="number" min="1" value={incident.affected_families ?? ""} onChange={(event) => setIncident(incidentIndex, "affected_families", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="Affected families" />
+                      <input type="number" min="0" value={incident.affected_persons ?? ""} onChange={(event) => setIncident(incidentIndex, "affected_persons", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="Affected persons" />
+                      <input value={incident.source_reference || ""} onChange={(event) => setIncident(incidentIndex, "source_reference", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="Report / source reference" />
+                      <input value={incident.incident_details || ""} onChange={(event) => setIncident(incidentIndex, "incident_details", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="Incident details" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className={`mt-3 grid gap-2 rounded-lg px-3 py-2 text-xs font-bold sm:grid-cols-2 ${incidentFamilySubtotal === Number(form.data.affected_families || 0) && (!String(meta.affected_persons ?? "").trim() || incidentPersonSubtotal === Number(meta.affected_persons || 0)) ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-800"}`}>
+                <span>Families: {incidentFamilySubtotal.toLocaleString()} / {Number(form.data.affected_families || 0).toLocaleString()}</span>
+                <span>Persons: {incidentPersonSubtotal.toLocaleString()} / {Number(meta.affected_persons || 0).toLocaleString()}</span>
+              </div>
+              {form.errors["assessment_form_data.incidents"] && <p className="mt-2 text-xs font-bold text-rose-600">{form.errors["assessment_form_data.incidents"]}</p>}
+            </section>
+          )}
+          <div id="assessment-items" className="grid scroll-mt-6 grid-cols-[4fr_3.7fr_52px] border-b border-black bg-slate-200 text-center text-xs font-black">
             <div className="border-r border-black py-1">DETAILS OF REQUEST</div>
             <div className="border-r border-black py-1">
               AVAILABILITY OF STOCKPILE
@@ -536,11 +777,18 @@ export default function AssessmentExcelForm({
               </div>
               <div className={`border-r border-black ${errorCell(`items.${index}.requested_quantity`)}`}>
                 <CellInput
-                  type="number"
-                  min="1"
-                  step="1"
-                  value={item.requested_quantity}
-                  onChange={(v) => setItem(index, "requested_quantity", v === "" ? "" : Math.max(1, Math.round(Number(v))))}
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  min={1}
+                  value={wholeQuantityInputValue(item.requested_quantity)}
+                  onChange={(v) => {
+                    setItem(
+                      index,
+                      "requested_quantity",
+                      coerceWholeQuantity(v, { min: 1 }),
+                    );
+                  }}
                 />
               </div>
               <div className="border-r border-black bg-slate-50 p-2 text-center">
@@ -549,8 +797,8 @@ export default function AssessmentExcelForm({
               <div className="border-r border-black bg-slate-50 p-2 text-center">
                 {item.donated_quantity ?? "—"}
               </div>
-              <div className={`border-r border-black p-2 text-center font-black print:bg-white print:text-black ${item.fni_library_item_id ? (Number(item.requested_quantity || 0) > Number(item.available_quantity || 0) ? "bg-rose-200 text-rose-900" : "bg-emerald-200 text-emerald-900") : "bg-slate-50"}`}>
-                {item.fni_library_item_id ? Number(item.available_quantity || 0).toLocaleString() : "—"}
+              <div className={`border-r border-black p-2 text-center font-black print:bg-white print:text-black ${item.fni_library_item_id ? (Number(item.requested_quantity || 0) > Number(totalAvailability(item.item_name) || 0) ? "bg-rose-200 text-rose-900" : "bg-emerald-200 text-emerald-900") : "bg-slate-50"}`}>
+                {item.fni_library_item_id ? formatWholeQuantity(totalAvailability(item.item_name), "0") : "—"}
               </div>
               <button
                 type="button"
@@ -577,7 +825,7 @@ export default function AssessmentExcelForm({
               <CellInput
                 type="date"
                 value={form.data.incident_date}
-                onChange={(v) => form.setData("incident_date", v)}
+                onChange={(v) => incidents.length ? setIncident(0, "occurrence_at", v) : form.setData("incident_date", v)}
               />
             </label>
             <label className={`grid grid-cols-[11rem_minmax(5rem,1fr)_auto] items-center border-b border-r border-black px-2 font-bold ${errorCell("affected_families")}`}>
@@ -682,12 +930,17 @@ export default function AssessmentExcelForm({
               </div>
               <div className="border-r border-black">
                 <CellInput
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  value={row.quantity}
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  min={0}
+                  value={wholeQuantityInputValue(row.quantity)}
                   onChange={(v) =>
-                    setPreviousAugmentation(index, "quantity", v)
+                    setPreviousAugmentation(
+                      index,
+                      "quantity",
+                      coerceWholeQuantity(v, { min: 0 }),
+                    )
                   }
                 />
               </div>
@@ -731,11 +984,14 @@ export default function AssessmentExcelForm({
               </div>
               <div className="border-r border-black">
                 <CellInput
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  value={row.quantity}
-                  onChange={(v) => setBatch(index, "quantity", v)}
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  min={0}
+                  value={wholeQuantityInputValue(row.quantity)}
+                  onChange={(v) =>
+                    setBatch(index, "quantity", coerceWholeQuantity(v, { min: 0 }))
+                  }
                 />
               </div>
               <div className="border-r border-black">
@@ -813,7 +1069,7 @@ export default function AssessmentExcelForm({
                     {item.item_name || "Select an FNI above"}
                   </div>
                   <div className="px-2 py-1 text-center font-bold">
-                    {Math.round(Number(item.requested_quantity || 0)).toLocaleString()}
+                    {formatWholeQuantity(item.requested_quantity, "0")}
                   </div>
                 </div>
               ))}
@@ -949,6 +1205,34 @@ export default function AssessmentExcelForm({
           </div>
         </div>
       </div>
+
+      <DocumentPreviewModal
+        open={draftPreviewOpen}
+        onClose={() => setDraftPreviewOpen(false)}
+        eyebrow="Document preview"
+        badge="Draft / local preview"
+        title={previewDocument === "response" ? "Response Letter" : "FNI Assessment and Delivery Form"}
+        subtitle="A4 paper preview · live values from this worksheet (not a signed PDF)"
+        notice="Draft preview only — save the assessment to generate downloadable PDFs and enable e-PIRMA routing."
+        tabs={[
+          { id: "assessment", label: "Assessment" },
+          { id: "response", label: "Response Letter" },
+        ]}
+        activeTab={previewDocument}
+        onTabChange={setPreviewDocument}
+        zoom={previewZoom}
+        onZoomChange={setPreviewZoom}
+        paperWidth="210mm"
+      >
+        {previewDocument === "response" ? (
+          <PrintableResponseLetterDocument
+            formData={form.data}
+            responseApprover={responseApprover}
+          />
+        ) : (
+          <PrintableAssessmentDocument formData={form.data} />
+        )}
+      </DocumentPreviewModal>
     </form>
   );
 }

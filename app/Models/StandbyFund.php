@@ -37,7 +37,7 @@ class StandbyFund extends Model
             [
                 'amount' => 3000000,
                 'source' => 'Initial system value',
-                'cell_reference' => 'L2',
+                'cell_reference' => 'M2',
             ],
         );
     }

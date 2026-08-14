@@ -36,6 +36,8 @@ export default function FniIssuances({ rows = [], years = [], generatedAt }) {
         expiry_month: [],
         province: [],
         category: [],
+        reconciliation_status: [],
+        crossmatch_status: [],
     });
     const [detailRow, setDetailRow] = useState(null);
     const [sort, setSort] = useState({ key: 'sort_date', direction: 'desc' });
@@ -97,6 +99,8 @@ export default function FniIssuances({ rows = [], years = [], generatedAt }) {
             expiry_month: [],
             province: [],
             category: [],
+            reconciliation_status: [],
+            crossmatch_status: [],
         });
     };
 
@@ -185,6 +189,8 @@ export default function FniIssuances({ rows = [], years = [], generatedAt }) {
                         <LookerMultiSelect label="Remarks" options={optionsFor('remarks')} value={filters.remarks} onApply={(value) => changeFilter('remarks', value)} placeholder="Search remarks..." />
                         <LookerMultiSelect label="Expiry Month" options={optionsFor('expiry_month')} value={filters.expiry_month} onApply={(value) => changeFilter('expiry_month', value)} placeholder="Search expiry..." />
                         <LookerMultiSelect label="Category" options={optionsFor('category').map(opt => ({ ...opt, label: formatCategoryName(opt.label) }))} value={filters.category} onApply={(value) => changeFilter('category', value)} placeholder="Search category..." />
+                        <LookerMultiSelect label="WIT Reconciliation" options={optionsFor('reconciliation_status').map((opt) => ({ ...opt, label: reconciliationLabel(opt.label) }))} value={filters.reconciliation_status} onApply={(value) => changeFilter('reconciliation_status', value)} placeholder="Search status..." />
+                        <LookerMultiSelect label="System–WIT Crossmatch" options={optionsFor('crossmatch_status').map((opt) => ({ ...opt, label: crossmatchLabel(opt.label) }))} value={filters.crossmatch_status} onApply={(value) => changeFilter('crossmatch_status', value)} placeholder="Search crossmatch..." />
                     </div>
                 )}
             </Card>
@@ -239,7 +245,6 @@ export default function FniIssuances({ rows = [], years = [], generatedAt }) {
                     stickyHeader
                     className="mt-4 max-h-[calc(100vh-250px)] overflow-auto"
                     columns={[
-                        { label: 'Action', actionColumn: true },
                         { label: 'Transaction Date', sortKey: 'sort_date' },
                         { label: 'Source of Goods', sortKey: 'source_of_goods' },
                         { label: 'Warehouse Name', sortKey: 'warehouse' },
@@ -252,9 +257,11 @@ export default function FniIssuances({ rows = [], years = [], generatedAt }) {
                         { label: 'Recipient', sortKey: 'recipient' },
                         { label: 'Delivery Site', sortKey: 'delivery_site' },
                         { label: 'Expected Delivery Date', sortKey: 'expected_delivery_date' },
+                        { label: 'WIT Reconciliation', sortKey: 'reconciliation_status' },
                         { label: 'Remarks', sortKey: 'remarks' },
                         { label: 'Time Stamp Encoded', sortKey: 'encoded_at' },
                         { label: 'Time Stamp Edited', sortKey: 'edited_at' },
+                        { label: 'Action', actionColumn: true },
                     ]}
                     sort={sort}
                     onSort={changeSort}
@@ -381,6 +388,15 @@ function renderLedgerRow(row, setDetailRow) {
             <td className="max-w-44 px-4 py-3 text-sm">{row.recipient}</td>
             <td className="max-w-52 px-4 py-3 text-sm">{row.delivery_site}</td>
             <td className="whitespace-nowrap px-4 py-3 text-sm">{row.expected_delivery_date}</td>
+            <td className="whitespace-nowrap px-4 py-3">
+                <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase ${reconciliationTone(row.reconciliation_status)}`}>
+                    {reconciliationLabel(row.reconciliation_status)}
+                </span>
+                <p className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[9px] font-black uppercase ${crossmatchTone(row.crossmatch_status)}`}>
+                    {crossmatchLabel(row.crossmatch_status)}
+                </p>
+                <p className="mt-1 text-[10px] font-semibold text-slate-500">{row.record_source}</p>
+            </td>
             <td className="max-w-72 px-4 py-3 text-sm leading-tight">{row.remarks}</td>
             <td className="whitespace-nowrap px-4 py-3 text-sm">{row.encoded_at}</td>
             <td className="whitespace-nowrap px-4 py-3 text-sm">{row.edited_at}</td>
@@ -410,6 +426,7 @@ function IssuanceDetailModal({ row, onClose }) {
     const details = [
         ['Transaction Date', row.date],
         ['Reference No.', row.reference],
+        ['Vehicle DR', row.dr_number],
         ['RIS / TF / STF', row.ris_if_stf],
         ['Source of Goods', row.source_of_goods],
         ['Warehouse Name', row.warehouse],
@@ -433,6 +450,9 @@ function IssuanceDetailModal({ row, onClose }) {
         ['Time Stamp Encoded', row.encoded_at],
         ['Time Stamp Edited', row.edited_at],
         ['Responsible Personnel', row.personnel],
+        ['Record Source', row.record_source],
+        ['WIT Reconciliation', reconciliationLabel(row.reconciliation_status)],
+        ['Reconciled At', row.reconciled_at || '-'],
         ['Remarks', row.remarks],
     ];
 
@@ -456,9 +476,53 @@ function IssuanceDetailModal({ row, onClose }) {
                         </div>
                     ))}
                 </div>
+                <div className="border-t border-slate-200 p-6 dark:border-zinc-800">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                            <h3 className="text-base font-black">System and WIT crossmatch</h3>
+                            <p className="mt-1 text-sm font-semibold text-slate-500">{row.crossmatch?.summary}</p>
+                        </div>
+                        <span className={`rounded-full px-3 py-1 text-xs font-black uppercase ${crossmatchTone(row.crossmatch_status)}`}>{row.crossmatch?.label || crossmatchLabel(row.crossmatch_status)}</span>
+                    </div>
+                    {row.crossmatch?.wit_row && <p className="mt-2 text-xs font-bold text-slate-500">Candidate WIT row: {row.crossmatch.wit_row}{row.crossmatch.candidate ? ' (likely counterpart)' : ''}</p>}
+                    {row.crossmatch?.fields?.length > 0 && (
+                        <div className="mt-4 overflow-x-auto rounded-lg border border-slate-200 dark:border-zinc-800">
+                            <table className="min-w-full text-sm">
+                                <thead className="bg-slate-50 text-left text-xs font-black uppercase text-slate-500 dark:bg-zinc-900"><tr><th className="px-3 py-2">Field</th><th className="px-3 py-2">System</th><th className="px-3 py-2">WIT</th><th className="px-3 py-2">Result</th></tr></thead>
+                                <tbody>{row.crossmatch.fields.map((field) => <tr key={field.label} className={`border-t border-slate-100 dark:border-zinc-800 ${field.match ? '' : 'bg-rose-50 dark:bg-rose-950/20'}`}><td className="px-3 py-2 font-black">{field.label}</td><td className="px-3 py-2">{String(field.system)}</td><td className="px-3 py-2">{String(field.wit)}</td><td className={`px-3 py-2 font-black ${field.match ? 'text-emerald-700' : 'text-rose-700'}`}>{field.match ? 'Matched' : 'Mismatch'}</td></tr>)}</tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
             </div>
         </div>
     );
+}
+
+function reconciliationLabel(value) {
+    return ({
+        pending_wit: 'Pending WIT entry',
+        reconciled: 'Reconciled',
+        wit_only: 'WIT only',
+        not_required: 'Not required',
+    })[value] || String(value || 'Not set').replaceAll('_', ' ');
+}
+
+function reconciliationTone(value) {
+    if (value === 'reconciled') return 'bg-emerald-100 text-emerald-800';
+    if (value === 'pending_wit') return 'bg-amber-100 text-amber-800';
+    return 'bg-slate-100 text-slate-700';
+}
+
+function crossmatchLabel(value) {
+    return ({ matched: 'Matched', mismatch: 'Mismatch found', no_wit_record: 'No WIT record', wit_only: 'WIT only' })[value] || String(value || 'Not checked').replaceAll('_', ' ');
+}
+
+function crossmatchTone(value) {
+    if (value === 'matched') return 'bg-emerald-100 text-emerald-800';
+    if (value === 'mismatch') return 'bg-rose-100 text-rose-800';
+    if (value === 'no_wit_record') return 'bg-amber-100 text-amber-800';
+    return 'bg-slate-100 text-slate-700';
 }
 
 function summarize(rows) {

@@ -52,8 +52,8 @@ class AccessManagementController extends Controller
             'users' => $users,
             'filters' => $filters,
             'roleOptions' => Role::query()
-                ->whereIn('name', ['Super Admin', 'RROS', 'DRRS', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst', 'LGU'])
-                ->orderByRaw("case name when 'Super Admin' then 0 when 'RROS' then 1 when 'DRRS' then 2 when 'DRIMS' then 3 when 'DRMD AA' then 4 when 'DRMD Chief' then 5 when 'DRMD Financial Analyst' then 6 when 'LGU' then 7 else 8 end")
+                ->whereIn('name', ['Super Admin', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst', 'LGU'])
+                ->orderByRaw("case name when 'Super Admin' then 0 when 'RROS' then 1 when 'RROS AA' then 2 when 'DRRS' then 3 when 'DRRS AA' then 4 when 'DRIMS' then 5 when 'DRMD AA' then 6 when 'DRMD Chief' then 7 when 'DRMD Financial Analyst' then 8 when 'LGU' then 9 else 10 end")
                 ->pluck('name')
                 ->map(fn (string $role): array => ['value' => $role, 'label' => $role])
                 ->values(),
@@ -65,14 +65,14 @@ class AccessManagementController extends Controller
                 'inactive' => User::where('is_active', false)->count(),
                 'deleted' => User::onlyTrashed()->count(),
                 'drmd' => User::query()->whereDoesntHave('roles', fn ($query) => $query->where('name', 'LGU'))->where(function ($query): void {
-                    $query->whereIn('office', ['DRMD', 'DRMD AA', 'DRRS', 'DRIMS', 'RROS', 'DRMD Financial Analyst', 'Super Admin'])
-                        ->orWhereHas('roles', fn ($roleQuery) => $roleQuery->whereIn('name', ['Super Admin', 'RROS', 'DRRS', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst']));
+                    $query->whereIn('office', ['DRMD', 'DRMD AA', 'DRRS', 'DRRS AA', 'DRIMS', 'RROS', 'RROS AA', 'DRMD Financial Analyst', 'Super Admin'])
+                        ->orWhereHas('roles', fn ($roleQuery) => $roleQuery->whereIn('name', ['Super Admin', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst']));
                 })->count(),
                 'lgu' => User::query()->where(function ($query): void {
                     $query->whereNotNull('lgu_psgc_code')
                         ->orWhereHas('roles', fn ($roleQuery) => $roleQuery->where('name', 'LGU'));
                 })->count(),
-                'outside' => User::query()->whereNull('lgu_psgc_code')->whereDoesntHave('roles', fn ($query) => $query->whereIn('name', ['Super Admin', 'RROS', 'DRRS', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst', 'LGU']))->count(),
+                'outside' => User::query()->whereNull('lgu_psgc_code')->whereDoesntHave('roles', fn ($query) => $query->whereIn('name', ['Super Admin', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst', 'LGU']))->count(),
             ],
             'deletedUsers' => User::onlyTrashed()
                 ->with('roles:id,name')
@@ -341,6 +341,7 @@ class AccessManagementController extends Controller
             'id' => $user->id,
             'name' => $user->name,
             'email' => $user->email,
+            'avatar' => $user->avatar,
             'office' => $user->office,
             'position' => $user->position,
             'designation' => $user->designation,
@@ -367,8 +368,8 @@ class AccessManagementController extends Controller
             return 'lgu';
         }
 
-        $drmdRoles = ['Super Admin', 'RROS', 'DRRS', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst'];
-        if (array_intersect($roles, $drmdRoles) || in_array($user->office, ['DRMD', 'DRMD AA', 'DRRS', 'DRIMS', 'RROS', 'DRMD Financial Analyst', 'Super Admin'], true)) {
+        $drmdRoles = ['Super Admin', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst'];
+        if (array_intersect($roles, $drmdRoles) || in_array($user->office, ['DRMD', 'DRMD AA', 'DRRS', 'DRRS AA', 'DRIMS', 'RROS', 'RROS AA', 'DRMD Financial Analyst', 'Super Admin'], true)) {
             return 'drmd';
         }
 

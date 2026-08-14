@@ -9,6 +9,8 @@ export default function DromicReportStatus({
     correctionScope,
     seenAt,
     viewerName,
+    ackedAt,
+    ackerName,
     reviewNote,
     reviewerName,
     reviewedAt,
@@ -52,7 +54,9 @@ export default function DromicReportStatus({
             <p className="flex items-center gap-1 text-[10px] font-black uppercase tracking-wide"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />Required LGU correction</p>
             <p className="mt-1 whitespace-normal text-xs font-semibold leading-5">{reviewNote}</p>
         </div>}
-        {seenAt && <p className="flex w-full items-center gap-1 pt-0.5 text-[11px] font-bold text-sky-700"><Eye className="h-3.5 w-3.5 shrink-0" />Seen by {viewerName || 'DSWD recipient'} · {formatDateTime(seenAt)}</p>}
+        {ackedAt
+            ? <p className="flex w-full items-center gap-1 pt-0.5 text-[11px] font-bold text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5 shrink-0" />Acknowledged by {ackerName || viewerName || 'DSWD recipient'} · {formatDateTime(ackedAt)}</p>
+            : (seenAt && <p className="flex w-full items-center gap-1 pt-0.5 text-[11px] font-bold text-sky-700"><Eye className="h-3.5 w-3.5 shrink-0" />Seen by {viewerName || 'DSWD recipient'} · {formatDateTime(seenAt)}</p>)}
         {resolvedValidation !== 'needs_lgu_action' && reviewNote && <p title={reviewNote} className="mt-1 line-clamp-2 max-w-[300px] text-xs font-semibold leading-5 text-slate-700 dark:text-zinc-200">{reviewNote}</p>}
         {reviewerName && <p className="text-[11px] text-slate-500">Reviewed by {reviewerName} · {formatDateTime(reviewedAt)}</p>}
     </div>;

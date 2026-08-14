@@ -5,7 +5,7 @@ import AppLayout, { Card, DataTable } from '@/Layouts/AppLayout';
 import SearchableSelect from '@/Components/SearchableSelect';
 import { formatDate } from '@/Utils/dateFormat';
 import DrmdAaRequestWorkspaceTabs from '@/Components/DrmdAaRequestWorkspaceTabs';
-import SystemTabs from '@/Components/SystemTabs';
+import SectionTabs from '@/Components/SectionTabs';
 
 export default function Upload({ requestParties = [], defaultReceivedAt, transactions, submissionType = 'fni_request' }) {
     const isProposal = submissionType === 'proposal';
@@ -112,7 +112,7 @@ export default function Upload({ requestParties = [], defaultReceivedAt, transac
             />}
 
             {showModal && (
-                <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
+                <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
                     <div role="dialog" aria-modal="true" aria-label={`Endorse ${singular}`} className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-lg bg-white shadow-2xl dark:bg-zinc-900">
                         <div className="sticky top-0 z-10 flex items-start justify-between border-b border-slate-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
                             <div><h2 className="text-xl font-black">Endorse {singular}</h2><p className="mt-1 text-sm text-slate-500">All fields are required except Remarks.</p></div>
@@ -254,25 +254,25 @@ function DocumentPreviewModal({ row, tab, setTab, onClose }) {
         : `/requests/${row.id}/source-document`;
     const tabs = [
         ...(isLguRequest ? [
-            { key: 'request', label: 'Request Letter', icon: FileCheck2, onClick: () => setTab('request') },
-            { key: 'report', label: 'Supporting DROMIC / SitRep', icon: FileCheck2, onClick: () => setTab('report') },
+            { id: 'request', label: 'Request Letter', icon: FileCheck2 },
+            { id: 'report', label: 'Supporting DROMIC / SitRep', icon: FileCheck2 },
         ] : row.source_document_url ? [
-            { key: 'request', label: 'Uploaded Document', icon: FileCheck2, onClick: () => setTab('request') },
+            { id: 'request', label: 'Uploaded Document', icon: FileCheck2 },
         ] : []),
         ...(photos.length ? [
-            { key: 'photos', label: `Captured Photos (${photos.length})`, icon: Images, onClick: () => setTab('photos') },
+            { id: 'photos', label: `Captured Photos (${photos.length})`, icon: Images },
         ] : []),
     ];
 
     return (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm">
             <div role="dialog" aria-modal="true" aria-label="Request document preview" className="flex h-[92vh] w-[96vw] max-w-[1500px] flex-col overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-900">
                 <div className="flex items-start justify-between border-b p-4">
                     <div><p className="text-xs font-black uppercase tracking-wide text-emerald-700">Request document preview</p><h2 className="mt-1 font-black">{source?.lgu_relief_request_reference || row.reference_number}</h2></div>
                     <button type="button" onClick={onClose} className="dromis-tip rounded-md border p-2" data-tip="Close preview" data-tip-side="bottom" aria-label="Close preview"><X className="h-4 w-4" /></button>
                 </div>
                 {tabs.length > 1 && <div className="border-b bg-white p-3 dark:bg-zinc-900">
-                    <SystemTabs active={tab} ariaLabel="Request documents" items={tabs} />
+                    <SectionTabs appearance="plain" value={tab} onChange={setTab} ariaLabel="Request documents" tabs={tabs} />
                 </div>}
                 {tab === 'photos'
                     ? <div className="grid min-h-0 flex-1 auto-rows-max grid-cols-1 gap-4 overflow-y-auto bg-slate-100 p-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -290,7 +290,7 @@ function initialPreviewTab(row) {
 
 function PhotoCaptureModal({ title, files, setFiles, processing, errors, onClose, onSubmit }) {
     return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
             <div role="dialog" aria-modal="true" aria-label={title} className="max-h-[94vh] w-full max-w-4xl overflow-y-auto rounded-xl bg-white shadow-2xl dark:bg-zinc-900">
                 <div className="sticky top-0 z-10 flex items-center justify-between border-b bg-white px-5 py-4 dark:bg-zinc-900">
                     <div><p className="text-xs font-black uppercase tracking-wide text-blue-700">Camera evidence</p><h2 className="mt-1 text-lg font-black">{title}</h2></div>

@@ -16,7 +16,7 @@ class AiRogerSystemMapService
         ];
 
         foreach ($this->pages() as $page) {
-            if ($this->canSee($user, $page['permissions'])) {
+            if ($this->canSee($user, $page['permissions'] ?? [], $page['roles'] ?? [])) {
                 $sections[] = $this->pageLine($page);
             }
         }
@@ -40,6 +40,7 @@ class AiRogerSystemMapService
                 'path' => '/warehouses',
                 'label' => 'Warehouses',
                 'permissions' => ['manage warehouses'],
+                'roles' => ['Super Admin', 'RROS', 'RROS AA'],
                 'purpose' => 'View, sync, create, update, search, and manage warehouse master records.',
                 'sections' => ['Overview & Sync', 'Warehouse Dashboard', 'Filters & Search', 'Warehouse Master List'],
             ],
@@ -115,10 +116,10 @@ class AiRogerSystemMapService
             ],
             [
                 'path' => '/dispatches',
-                'label' => 'Dispatch',
+                'label' => 'Dispatch/Delivery',
                 'permissions' => ['manage dispatches'],
-                'purpose' => 'Create and monitor dispatch plans for approved/released requests.',
-                'sections' => ['Create Dispatch', 'Dispatch Records'],
+                'purpose' => 'Encode Dispatch / Delivery later in the logistics chain (after RIS / DR signing), through LGU receipt (draft → planned → released → in transit → received).',
+                'sections' => ['Still for Action', 'In Progress', 'Completed'],
             ],
             [
                 'path' => '/libraries',
@@ -177,8 +178,12 @@ class AiRogerSystemMapService
         return "Page: {$page['label']} ({$page['path']}) — {$page['purpose']} Sections/buttons: ".implode(', ', $page['sections']).'.';
     }
 
-    private function canSee(User $user, array $permissions): bool
+    private function canSee(User $user, array $permissions, array $roles = []): bool
     {
+        if ($roles !== [] && $user->hasAnyRole($roles)) {
+            return true;
+        }
+
         return collect($permissions)->contains(fn (string $permission): bool => $user->can($permission));
     }
 
@@ -203,7 +208,7 @@ class AiRogerSystemMapService
         }
 
         if ($user->can('manage inventory')) {
-            $parts[] = 'RROS inventory guide: Use /inventory for stockpile receipt/release and balances, /inventory/e-stock-card for ledger, /near-expiry for expiring stock, /fni-issuances for release history, /dispatches for dispatch plans.';
+            $parts[] = 'RROS inventory guide: Use /inventory for stockpile receipt/release and balances, /inventory/e-stock-card for ledger, /near-expiry for expiring stock, /fni-issuances for release history, /dispatches for Dispatch/Delivery.';
         }
 
         if ($user->can('manage users')) {

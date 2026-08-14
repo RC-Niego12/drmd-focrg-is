@@ -805,7 +805,6 @@ function PsgcAddressFields({ form, addressDefaults }) {
 }
 
 export default function Index({ warehouses, metrics, filters, filterOptions, editOptions, sync, addressDefaults }) {
-    const syncForm = useForm({});
     const [warehouseModalMode, setWarehouseModalMode] = useState(null);
     const [selectedWarehouse, setSelectedWarehouse] = useState(null);
     const [showFilters, setShowFilters] = useState(false);
@@ -874,15 +873,6 @@ export default function Index({ warehouses, metrics, filters, filterOptions, edi
                         >
                             <Plus className="h-4 w-4" />
                             Add Warehouse
-                        </button>
-                        <button
-                            type="button"
-                            disabled={syncForm.processing}
-                            onClick={() => syncForm.post('/warehouses/sync-google-sheet', { preserveScroll: true })}
-                            className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-70"
-                        >
-                            <RefreshCw className={`h-4 w-4 ${syncForm.processing ? 'animate-spin' : ''}`} />
-                            {syncForm.processing ? 'Syncing...' : 'Sync Warehouse Master'}
                         </button>
                         <p className="mt-2 text-xs text-slate-500 dark:text-zinc-400">
                             {sync?.last_synced_at ? `Last synced: ${formatDateTime(sync.last_synced_at)}` : 'No sync recorded yet.'}

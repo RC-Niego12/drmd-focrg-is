@@ -37,7 +37,7 @@ class DrmdLguRoutingController extends Controller
         ]);
     }
 
-    public function recordDrn(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit): RedirectResponse
+    public function recordDrn(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit, WorkflowNotificationService $workflowNotifications): RedirectResponse
     {
         $this->ensureLguRequest($assistanceRequest);
         abort_unless(
@@ -54,8 +54,17 @@ class DrmdLguRoutingController extends Controller
         $operational = $assistanceRequest->reliefAugmentationRequest;
         abort_unless($operational, 422, 'The linked FNI Request has not been created yet.');
         $old = $operational->toArray();
+        $previousDrn = $operational->request_drn;
         $operational->update(['request_drn' => trim($data['request_drn'])]);
-        $audit->log('lgu_relief_augmentation.drn_recorded', $operational, $old, $operational->fresh()->toArray());
+        $fresh = $operational->fresh();
+        $audit->log('lgu_relief_augmentation.drn_recorded', $operational, $old, $fresh->toArray());
+
+        if ((string) $previousDrn !== (string) $fresh->request_drn) {
+            $workflowNotifications->broadcastRequestUpdated($fresh, [
+                'changed' => ['request_drn'],
+                'source' => 'drmd_aa_drn',
+            ]);
+        }
 
         return back()->with('success', "DRN recorded for {$assistanceRequest->lgu_relief_request_reference}.");
     }

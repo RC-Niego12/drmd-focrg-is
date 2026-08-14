@@ -17,6 +17,8 @@ import {
   Eye,
   EyeOff,
   FileClock,
+  FileCheck2,
+  FileSignature,
   FileText,
   IdCard,
   LayoutDashboard,
@@ -29,6 +31,7 @@ import {
   PencilLine,
   Phone,
   RadioTower,
+  RefreshCw,
   Save,
   Send,
   Sparkles,
@@ -57,13 +60,51 @@ import ExportButtons, { exportFilename } from "@/Components/ExportButtons";
 import AccessDecisionModal from "@/Components/AccessDecisionModal";
 import AgencyProfileModal from "@/Components/AgencyProfileModal";
 import AorScopeFields from "@/Components/AorScopeFields";
-import SystemTabs from "@/Components/SystemTabs";
+import SectionTabs from "@/Components/SectionTabs";
 import {
   connectRealtime,
   disconnectRealtime,
   listenRealtime,
 } from "@/realtime";
 import { roleAcronymLabel } from "@/Utils/roleAcronyms";
+import { formatDateTime } from "@/Utils/dateFormat";
+import { installDromisTooltips } from "@/Utils/dromisTooltips";
+
+// Matches alert-acknowledgments route role_or_permission middleware (not LGU).
+const alertAcknowledgementRoles = [
+  "Super Admin",
+  "RROS",
+  "RROS AA",
+  "DRRS",
+  "DRRS AA",
+  "DRIMS",
+  "DRMD AA",
+  "DRMD Chief",
+  "DRMD Financial Analyst",
+  "OCD Caraga",
+  "QRT",
+  "Quick Response Team",
+];
+
+// Dashboard / inventory view roles seeded with view dashboards (not LGU).
+const dashboardViewRoles = [
+  "Super Admin",
+  "RROS",
+  "RROS AA",
+  "DRRS",
+  "DRRS AA",
+  "DRIMS",
+  "DRMD Chief",
+  "DRMD Financial Analyst",
+];
+
+const inventoryManageRoles = ["Super Admin", "RROS", "RROS AA"];
+const nearExpiryRoles = ["Super Admin", "RROS", "RROS AA", "DRRS"];
+const dispatchRoles = ["Super Admin", "RROS", "RROS AA"];
+const dswdStaffRoles = [
+  "Super Admin", "RROS", "RROS AA", "DRRS", "DRRS AA", "DRIMS",
+  "DRMD AA", "DRMD Chief", "DRMD Financial Analyst", "QRT", "Quick Response Team",
+];
 
 const nav = [
   {
@@ -71,22 +112,31 @@ const nav = [
     label: "Dashboard",
     icon: LayoutDashboard,
     permissions: ["view dashboards", "submit drmd aa requests", "submit lgu dromic requests"],
-  },
-  {
-    href: "/rros-dashboard",
-    label: "RROS Dashboard",
-    icon: LayoutDashboard,
-    permissions: [],
-    roles: ["Super Admin", "RROS", "DRRS", "DRIMS", "DRMD AA", "DRMD Chief", "DRMD Financial Analyst", "QRT", "Quick Response Team"],
-    roleOnly: true,
+    roles: [...dashboardViewRoles, "DRMD AA", "LGU"],
   },
   {
     href: "/requests",
     label: "FNI Requests",
     icon: ClipboardList,
     permissions: ["encode requests", "monitor requests", "process requests"],
+    // Role fallback when permission pivots drift; matches route middleware.
+    roles: ["Super Admin", "DRRS", "DRIMS", "RROS", "RROS AA"],
     // Keep sidebar highlight when DRRS workspace switches to LGU Reports & Requests.
     matchHrefs: ["/requests", "/dromic/lgu-reports"],
+  },
+  {
+    href: "/dispatches",
+    label: "Dispatch/Delivery",
+    icon: Truck,
+    permissions: ["manage dispatches"],
+    roles: dispatchRoles,
+  },
+  {
+    href: "/delivery-escort",
+    label: "Delivery Escort Workspace",
+    icon: Truck,
+    roles: dswdStaffRoles,
+    roleOnly: true,
   },
   {
     href: "/dromic/lgu-reports",
@@ -101,30 +151,36 @@ const nav = [
     label: "Warehouses",
     icon: Warehouse,
     permissions: ["manage warehouses"],
+    // Role fallback when permission pivots/cache drift; matches route middleware.
+    roles: inventoryManageRoles,
   },
   {
     href: "/inventory",
     label: "Inventory",
     icon: Boxes,
     permissions: ["manage inventory", "view dashboards"],
+    roles: dashboardViewRoles,
   },
   {
     href: "/inventory/e-stock-card",
     label: "E-Stock Card",
     icon: ClipboardList,
     permissions: ["manage inventory"],
+    roles: inventoryManageRoles,
   },
   {
     href: "/near-expiry",
     label: "Near Expiry",
     icon: Send,
     permissions: ["manage near expiry"],
+    roles: nearExpiryRoles,
   },
   {
     href: "/fni-issuances",
     label: "FNI Issuances",
     icon: PackageCheck,
     permissions: ["manage inventory", "view dashboards"],
+    roles: dashboardViewRoles,
   },
   {
     href: "/drmd-aa/requests",
@@ -136,10 +192,26 @@ const nav = [
     matchHrefs: ["/drmd-aa/requests", "/drmd-aa/proposals", "/drmd-aa/lgu-intake"],
   },
   {
+    href: "/drrs-aa/epirma",
+    label: "e-Pirma",
+    icon: FileSignature,
+    permissions: ["route epirma documents"],
+    roles: ["DRRS AA", "Super Admin"],
+    roleOnly: true,
+  },
+  {
     href: "/lgu/dromic-sitrep",
     label: "DROMIC / SitRep",
     icon: FileText,
     permissions: ["submit lgu dromic requests"],
+    roles: ["LGU"],
+  },
+  {
+    href: "/lgu/response-letters",
+    label: "Response Letters",
+    icon: FileCheck2,
+    permissions: ["submit lgu dromic requests"],
+    roles: ["LGU", "Super Admin"],
   },
   {
     href: "/drmd-chief/lgu-intake",
@@ -150,66 +222,86 @@ const nav = [
     roleOnly: true,
   },
   {
-    href: "/dispatches",
-    label: "Dispatch",
-    icon: Truck,
-    permissions: ["manage dispatches"],
-  },
-  {
     href: "/libraries",
     label: "Libraries",
     icon: Database,
     permissions: ["manage inventory", "encode requests", "manage users"],
+    // Nav filter still Super Admin–only; roles keep deep-link alignment with routes.
+    roles: ["Super Admin", "RROS", "RROS AA", "DRRS"],
   },
   {
     href: "/dromic",
     label: "DROMIC",
     icon: ClipboardList,
     permissions: ["manage dromic reports"],
+    roles: ["Super Admin", "DRIMS"],
   },
   {
     href: "/ocd/alerts",
     label: "Regional Alerts",
     icon: RadioTower,
     permissions: ["manage regional alerts"],
+    roles: ["Super Admin", "OCD Caraga"],
   },
   {
     href: "/alert-acknowledgments",
     label: "Alert Acknowledgments",
     icon: CheckCircle2,
     permissions: ["view regional alert acknowledgements"],
+    // Role fallback when permission pivots/cache drift; matches route middleware. Not LGU.
+    roles: alertAcknowledgementRoles,
   },
   {
     href: "/audit-trail",
     label: "Audit Trail",
     icon: FileClock,
     permissions: ["view audit logs"],
+    roles: ["Super Admin"],
   },
   {
     href: "/access-management",
     label: "User Access",
     icon: UsersRound,
     permissions: ["manage users"],
+    roles: ["Super Admin"],
   },
   {
     href: "/psgc-addresses",
     label: "PSGC Addresses",
     icon: Database,
     permissions: ["manage users", "manage psgc addresses"],
+    roles: ["Super Admin"],
   },
   {
     href: "/population",
     label: "Population",
     icon: UsersRound,
     permissions: ["manage users", "manage population"],
+    roles: ["Super Admin"],
   },
   {
     href: "/standby-funds",
     label: "Standby Funds",
     icon: BadgeDollarSign,
     permissions: ["manage standby funds"],
+    roles: ["Super Admin", "DRMD Financial Analyst"],
   },
 ];
+
+// Super Admin–only routes DRRS (PDRC) must never see, even if permissions drift.
+const drrsExcludedNavHrefs = new Set([
+  "/access-management",
+  "/audit-trail",
+  "/psgc-addresses",
+  "/population",
+  "/standby-funds",
+  "/dromic",
+  "/libraries",
+  "/warehouses",
+  "/inventory/e-stock-card",
+  "/dispatches",
+  "/ocd/alerts",
+]);
 
 const superAdminAccessGroups = [
   {
@@ -218,13 +310,13 @@ const superAdminAccessGroups = [
     icon: Warehouse,
     hrefs: [
       "/",
+      "/requests",
+      "/dispatches",
       "/warehouses",
       "/inventory",
       "/inventory/e-stock-card",
       "/near-expiry",
       "/fni-issuances",
-      "/requests",
-      "/dispatches",
     ],
   },
   {
@@ -318,16 +410,22 @@ const pageTrees = {
       href: "/dromic/lgu-reports",
       roles: ["DRRS", "Super Admin"],
     },
-    { id: "request-list", label: "Requests & Action Status", sectionId: "request-list" },
-    { id: "created-assessments", label: "Created Assessments", sectionId: "created-assessments" },
+    { id: "request-list", label: "Still for Action", sectionId: "request-list" },
+    { id: "created-assessments", label: "In Progress", sectionId: "created-assessments" },
+    { id: "approved-requests", label: "Approved", sectionId: "approved-requests" },
+  ],
+  "/rros/requests": [
+    { id: "ris-dr", label: "RIS/DR" },
+    { id: "stf", label: "STF" },
+    { id: "ris-epirma", label: "e-PIRMA", href: "/rros-aa/epirma", roles: ["RROS AA"] },
   ],
   "/drmd-aa/requests": [
     { id: "aa-fni-requests", label: "FNI Requests", href: "/drmd-aa/requests" },
     { id: "aa-proposals", label: "Proposals", href: "/drmd-aa/proposals" },
   ],
   "/dispatches": [
-    { id: "dispatch-create", label: "Create Dispatch" },
-    { id: "dispatch-list", label: "Dispatch Records" },
+    { id: "dispatch-ready", label: "Still for Action", sectionId: "dispatch-ready" },
+    { id: "dispatch-list", label: "Dispatch / Delivery", sectionId: "dispatch-list" },
   ],
   "/libraries": [
     { id: "fni-library-overview", label: "Libraries Overview" },
@@ -432,110 +530,13 @@ export default function AppLayout({ title, children }) {
   const [regionalAlertAcknowledging, setRegionalAlertAcknowledging] = useState(false);
   const [messageCenterOpen, setMessageCenterOpen] = useState(false);
 
-  useEffect(() => {
-    const upgradeTooltips = (root = document) => {
-      const elements = [];
-      if (root instanceof Element && root.matches("button[title], a[title]")) elements.push(root);
-      root.querySelectorAll?.("button[title], a[title]").forEach((element) => elements.push(element));
-      elements.forEach((element) => {
-        const label = element.getAttribute("title");
-        if (!label) return;
-        // React reuses table buttons as filters, pagination, and realtime data
-        // change. Always refresh the tooltip text so it matches the current
-        // status mark instead of retaining the label from the previous row.
-        element.dataset.tip = label;
-        element.removeAttribute("title");
-        element.classList.add("dromis-tip");
-        const rect = element.getBoundingClientRect();
-        if (!element.dataset.tipAlign) {
-          if (rect.left < 170) element.dataset.tipAlign = "left";
-          else if (rect.right > window.innerWidth - 170) element.dataset.tipAlign = "right";
-        }
-        if (!element.dataset.tipSide) {
-          let ancestor = element.parentElement;
-          while (ancestor && ancestor !== document.body) {
-            const overflow = getComputedStyle(ancestor);
-            if (/(auto|scroll|hidden|clip)/.test(`${overflow.overflow} ${overflow.overflowX} ${overflow.overflowY}`)) {
-              const boundary = ancestor.getBoundingClientRect();
-              if (rect.top - boundary.top < 52) element.dataset.tipSide = "bottom";
-              break;
-            }
-            ancestor = ancestor.parentElement;
-          }
-        }
-      });
-    };
-
-    upgradeTooltips();
-    const positionTooltip = (event) => {
-      const element = event.target instanceof Element ? event.target.closest(".dromis-tip[data-tip]") : null;
-      if (!element) return;
-      if (element.dataset.tipLocked === "true") return;
-
-      const rect = element.getBoundingClientRect();
-      let boundary = { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight };
-      let ancestor = element.parentElement;
-      while (ancestor && ancestor !== document.body) {
-        const overflow = getComputedStyle(ancestor);
-        if (/(auto|scroll|hidden|clip)/.test(`${overflow.overflow} ${overflow.overflowX} ${overflow.overflowY}`)) {
-          const candidate = ancestor.getBoundingClientRect();
-          boundary = {
-            left: Math.max(0, candidate.left),
-            right: Math.min(window.innerWidth, candidate.right),
-            top: Math.max(0, candidate.top),
-            bottom: Math.min(window.innerHeight, candidate.bottom),
-          };
-          break;
-        }
-        ancestor = ancestor.parentElement;
-      }
-
-      const preferredSide = element.dataset.tipPreferredSide || element.dataset.tipSide || "";
-
-      if (preferredSide === "left" || preferredSide === "right") {
-        element.dataset.tipSide = preferredSide;
-        delete element.dataset.tipAlign;
-        return;
-      }
-
-      if (preferredSide !== "bottom") {
-        const estimatedWidth = Math.min(256, Math.max(90, String(element.dataset.tip || "").length * 7.2));
-        if (rect.left - boundary.left < estimatedWidth / 2 + 8) element.dataset.tipAlign = "left";
-        else if (boundary.right - rect.right < estimatedWidth / 2 + 8) element.dataset.tipAlign = "right";
-        else delete element.dataset.tipAlign;
-
-        if (rect.top - boundary.top < 52) element.dataset.tipSide = "bottom";
-        else if (element.dataset.tipSide === "bottom" && rect.bottom + 70 > boundary.bottom) delete element.dataset.tipSide;
-      } else {
-        element.dataset.tipSide = "bottom";
-        const estimatedWidth = Math.min(256, Math.max(90, String(element.dataset.tip || "").length * 7.2));
-        if (rect.left - boundary.left < estimatedWidth / 2 + 8) element.dataset.tipAlign = "left";
-        else if (boundary.right - rect.right < estimatedWidth / 2 + 8) element.dataset.tipAlign = "right";
-        else delete element.dataset.tipAlign;
-      }
-    };
-    document.addEventListener("pointerover", positionTooltip, true);
-    document.addEventListener("focusin", positionTooltip, true);
-    const observer = new MutationObserver((mutations) => {
-      mutations.forEach((mutation) => {
-        if (mutation.type === "attributes") upgradeTooltips(mutation.target);
-        mutation.addedNodes.forEach((node) => {
-          if (node instanceof Element) upgradeTooltips(node);
-        });
-      });
-    });
-    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["title"] });
-    return () => {
-      observer.disconnect();
-      document.removeEventListener("pointerover", positionTooltip, true);
-      document.removeEventListener("focusin", positionTooltip, true);
-    };
-  }, []);
+  useEffect(() => installDromisTooltips(), []);
   const [messageCenter, setMessageCenter] = useState({ unread_count: 0, messages: [], contacts: [] });
   const [messageDraft, setMessageDraft] = useState({ recipient_id: "", subject: "", body: "" });
   const [messageSending, setMessageSending] = useState(false);
   const [messageLoading, setMessageLoading] = useState(false);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
+  const [witSyncing, setWitSyncing] = useState(false);
   const [selectedAccessRequest, setSelectedAccessRequest] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
   const [aiRogerOpen, setAiRogerOpen] = useState(false);
@@ -556,6 +557,7 @@ export default function AppLayout({ title, children }) {
   const inactivityLoggedOut = useRef(false);
   const lastActivityResetAt = useRef(0);
   const sessionKeepaliveInterval = useRef(null);
+  const lastKeepaliveAt = useRef(0);
   const [sessionWarningOpen, setSessionWarningOpen] = useState(false);
   const [sessionWarningSecondsLeft, setSessionWarningSecondsLeft] = useState(0);
   const sessionWarningTicker = useRef(null);
@@ -965,9 +967,12 @@ export default function AppLayout({ title, children }) {
       }
 
       const alertId = notification.meta?.alert_id;
+      const canViewAlertAcknowledgements =
+        permissions.includes("view regional alert acknowledgements")
+        || (auth.user?.roles ?? []).some((role) => alertAcknowledgementRoles.includes(role));
       const destination = isLguAccess
         ? "/lgu/dromic-sitrep"
-        : permissions.includes("view regional alert acknowledgements")
+        : canViewAlertAcknowledgements
           ? `/alert-acknowledgments${alertId ? `?alert_id=${alertId}` : ""}`
           : "/";
       visitNotificationDestination(destination);
@@ -1080,12 +1085,26 @@ export default function AppLayout({ title, children }) {
       });
     });
 
+    const onAppToast = (event) => {
+      const detail = event?.detail;
+      if (!detail?.message) {
+        return;
+      }
+      showToast({
+        type: detail.type || "error",
+        title: detail.title,
+        message: detail.message,
+      });
+    };
+    window.addEventListener("dromis:toast", onAppToast);
+
     return () => {
       if (toastTimeout.current) {
         clearTimeout(toastTimeout.current);
       }
 
       removeSuccessListener();
+      window.removeEventListener("dromis:toast", onAppToast);
     };
   }, []);
 
@@ -1147,9 +1166,11 @@ export default function AppLayout({ title, children }) {
     restoreVisibleLoader();
 
     const removeBeforeListener = router.on("before", () => {
+      if (window.__drmdSilentWorkspaceRefresh) return;
       showGlobalLoader();
     });
     const removeStartListener = router.on("start", () => {
+      if (window.__drmdSilentWorkspaceRefresh) return;
       showGlobalLoader();
     });
     const removeFinishListener = router.on("finish", () => {
@@ -1158,9 +1179,13 @@ export default function AppLayout({ title, children }) {
     const removeInvalidListener = router.on("invalid", (event) => {
       event.preventDefault();
       hideWorkspaceLoaderNow();
+      const status = event?.detail?.response?.status;
       showToast({
         type: "error",
-        message: "The requested workspace is unavailable or the link is outdated.",
+        title: status === 403 ? "Access denied" : "Transaction failed",
+        message: status === 403
+          ? "You do not have permission for that workspace. Ask a Super Admin to grant the needed role permissions."
+          : "The requested workspace is unavailable or the link is outdated.",
       });
     });
     const removeExceptionListener = router.on("exception", () => {
@@ -1216,19 +1241,25 @@ export default function AppLayout({ title, children }) {
       setSessionWarningSecondsLeft(0);
     };
 
-    const touchServerSession = () => {
+    const touchServerSession = ({ force = false } = {}) => {
       const token = csrfToken();
       if (!token) return;
 
-      fetch("/session/keepalive", {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "X-CSRF-TOKEN": token,
-          "X-Requested-With": "XMLHttpRequest",
-        },
-        credentials: "same-origin",
-      }).catch(() => {});
+      const now = Date.now();
+      // Debounce remounts / Strict Mode / multi-tab storms (throttle is 12/min).
+      if (!force && now - lastKeepaliveAt.current < 60_000) {
+        return;
+      }
+      lastKeepaliveAt.current = now;
+
+      window.axios.post("/session/keepalive", {}, {
+        headers: { Accept: "application/json" },
+        withXSRFToken: true,
+      }).catch((error) => {
+        if ([401, 419].includes(Number(error?.response?.status))) {
+          window.location.reload();
+        }
+      });
     };
 
     const logoutForInactivity = () => {
@@ -1295,7 +1326,7 @@ export default function AppLayout({ title, children }) {
       inactivityLoggedOut.current = false;
       lastActivityResetAt.current = 0;
       dismissWarning();
-      touchServerSession();
+      touchServerSession({ force: true });
       resetInactivityTimer();
     };
 
@@ -1352,20 +1383,56 @@ export default function AppLayout({ title, children }) {
     );
   };
 
-  const canSee = (item) =>
-    (item.roleOnly || item.permissions.some((permission) => permissions.includes(permission)))
-    && (!item.roles || item.roles.some((role) => auth.user?.roles?.includes(role)));
+  const canSee = (item) => {
+    const hasPermission = Array.isArray(item.permissions)
+      && item.permissions.some((permission) => permissions.includes(permission));
+    const hasRole = Array.isArray(item.roles)
+      && item.roles.some((role) => auth.user?.roles?.includes(role));
+
+    // roleOnly: roles alone grant access.
+    // Otherwise: permission OR role (when roles are listed as a fallback).
+    if (item.roleOnly) {
+      return hasRole;
+    }
+
+    if (hasPermission) {
+      return true;
+    }
+
+    return hasRole;
+  };
   const isSuperAdmin = auth.user?.roles?.includes("Super Admin") ?? false;
+  const isRrosLevel = auth.user?.roles?.some((role) => ["RROS", "RROS AA"].includes(role)) ?? false;
   const isDrrsUser = auth.user?.roles?.includes("DRRS") ?? false;
+  const isDrrsAaOnly = Boolean(
+    auth.user?.roles?.includes("DRRS AA")
+      && !isSuperAdmin
+      && !isDrrsUser
+      && !auth.user?.roles?.some((role) => ["RROS", "RROS AA"].includes(role))
+      && !auth.user?.roles?.includes("DRMD AA"),
+  );
   const visibleNav = nav.filter(
     (item) =>
       canSee(item) &&
       (item.href !== "/libraries" || isSuperAdmin) &&
       (!isDrrsUser || item.href !== "/dromic/lgu-reports") &&
-      (!isSuperAdmin || !["/drmd-aa/requests", "/drmd-aa/proposals"].includes(item.href)),
-  ).map((item) => item.href === "/requests" && isDrrsUser
-    ? { ...item, label: "Requests Workspace" }
-    : item);
+      (!isDrrsUser || !drrsExcludedNavHrefs.has(item.href)) &&
+      (!isSuperAdmin || !["/drmd-aa/requests", "/drmd-aa/proposals"].includes(item.href)) &&
+      (!isDrrsAaOnly || ["/", "/drrs-aa/epirma"].includes(item.href)) &&
+      (!Array.isArray(item.hideForRoles)
+        || !item.hideForRoles.some((role) => auth.user?.roles?.includes(role))),
+  ).map((item) => {
+    if (item.href === "/requests" && isDrrsUser) return { ...item, label: "Requests Workspace" };
+    if (item.href === "/requests" && isRrosLevel) {
+      return {
+        ...item,
+        href: "/rros/requests",
+        label: "RIS/DR/STF Workspace",
+        matchHrefs: ["/rros/requests", "/rros-aa/epirma"],
+      };
+    }
+    return item;
+  });
   const groupedSuperAdminHrefs = new Set(
     superAdminAccessGroups.flatMap((group) => group.hrefs),
   );
@@ -1402,7 +1469,7 @@ export default function AppLayout({ title, children }) {
       return b.href.length - a.href.length;
     })[0]?.href;
   const activeItem = visibleNav.find((item) => item.href === activeHref);
-  const blankPrimaryDashboardRoles = ["DRIMS", "DRRS", "DRMD AA", "DRMD Financial Analyst"];
+  const blankPrimaryDashboardRoles = ["DRIMS", "DRRS", "DRRS AA", "DRMD AA", "DRMD Financial Analyst"];
   const hasBlankPrimaryDashboard = isLguAccess
     || blankPrimaryDashboardRoles.some((role) => auth.user?.roles?.includes(role));
   const HeaderIcon = activeItem?.icon ?? LayoutDashboard;
@@ -1552,7 +1619,7 @@ export default function AppLayout({ title, children }) {
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-brand-50/20 to-emerald-50/30 text-slate-900 dark:from-zinc-950 dark:via-brand-950/10 dark:to-zinc-950 dark:text-zinc-100">
       <CreativePageLoader active={pageLoading} />
       {toast && (
-        <div className="fixed right-4 top-5 z-[60] w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-md border border-slate-200 bg-white shadow-2xl shadow-slate-950/10 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-black/30">
+        <div className="fixed right-4 top-5 z-[200] w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-md border border-slate-200 bg-white shadow-2xl shadow-slate-950/10 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-black/30">
           <div
             className={clsx(
               "h-1",
@@ -1603,8 +1670,9 @@ export default function AppLayout({ title, children }) {
         </div>
       )}
       <aside
+        data-app-sidebar
         className={clsx(
-          "fixed inset-y-0 left-0 z-[55] isolate max-w-[100vw] overflow-visible border-r border-brand-200/70 bg-gradient-to-b from-white via-brand-50/35 to-emerald-50/40 transition-all duration-200 dark:border-brand-900/50 dark:from-zinc-950 dark:via-brand-950/25 dark:to-zinc-950",
+          "fixed inset-y-0 left-0 z-40 isolate max-w-[100vw] overflow-visible border-r border-brand-200/70 bg-gradient-to-b from-white via-brand-50/35 to-emerald-50/40 transition-all duration-200 dark:border-brand-900/50 dark:from-zinc-950 dark:via-brand-950/25 dark:to-zinc-950",
           sidebarCollapsed ? "w-20" : "w-72",
         )}
       >
@@ -1623,7 +1691,7 @@ export default function AppLayout({ title, children }) {
           data-tip={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
           data-tip-side="right"
           className={clsx(
-            "dromis-tip absolute top-6 z-[70] flex h-8 w-8 items-center justify-center rounded-full border border-brand-200/80 bg-white text-brand-700 shadow-md shadow-brand-900/5 transition hover:-translate-y-0.5 hover:border-brand-300 hover:text-brand-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 dark:border-brand-800 dark:bg-zinc-900 dark:text-brand-100 dark:shadow-black/30 dark:hover:border-brand-600",
+            "dromis-tip absolute top-6 z-[70] flex h-8 w-8 items-center justify-center text-brand-700 transition hover:text-brand-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 dark:text-brand-100 dark:hover:text-white",
             sidebarCollapsed ? "-right-2" : "-right-3",
           )}
         >
@@ -1761,8 +1829,11 @@ export default function AppLayout({ title, children }) {
               sidebarCollapsed && "hidden",
             )}
           >
-            <p>&copy; Copyright 2026</p>
-            <p>All Rights Reserved</p>
+            <p>
+              &copy; Copyright 2026
+              <span className="mx-1.5" aria-hidden>•</span>
+              All Rights Reserved
+            </p>
             <p className="mt-1 font-semibold text-slate-600 dark:text-zinc-300">
               Developer: Roger L. Ongue, PDO II
             </p>
@@ -1777,8 +1848,9 @@ export default function AppLayout({ title, children }) {
         )}
       >
         <header
+          data-app-header
           className={clsx(
-            "fixed right-0 top-0 z-50 overflow-visible border-b border-brand-200/70 bg-gradient-to-r from-white via-brand-50/40 to-emerald-50/30 px-4 py-3 backdrop-blur-xl transition-all duration-200 dark:border-brand-900/40 dark:from-zinc-950 dark:via-brand-950/20 dark:to-zinc-950",
+            "fixed right-0 top-0 z-40 overflow-visible border-b border-brand-200/70 bg-gradient-to-r from-white via-brand-50/40 to-emerald-50/30 px-4 py-3 backdrop-blur-xl transition-all duration-200 dark:border-brand-900/40 dark:from-zinc-950 dark:via-brand-950/20 dark:to-zinc-950",
             sidebarCollapsed ? "left-20" : "left-72",
           )}
         >
@@ -1836,6 +1908,23 @@ export default function AppLayout({ title, children }) {
               </p>
             </div>
             <div className="relative z-20 flex items-center gap-2 overflow-visible">
+              {isRrosLevel && (
+                <button
+                  type="button"
+                  disabled={witSyncing}
+                  onClick={() => {
+                    setWitSyncing(true);
+                    router.post("/wit/sync", {}, {
+                      preserveScroll: true,
+                      onFinish: () => setWitSyncing(false),
+                    });
+                  }}
+                  className="inline-flex h-10 items-center gap-2 rounded-xl border border-brand-200 bg-brand-700 px-3 text-xs font-black text-white shadow-sm transition hover:bg-brand-800 disabled:opacity-60 dark:border-brand-700 dark:bg-brand-600 dark:hover:bg-brand-500"
+                >
+                  <RefreshCw className={clsx("h-4 w-4", witSyncing && "animate-spin")} />
+                  <span className="hidden xl:inline">Sync WIT</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setProfileOpen(true)}
@@ -1890,7 +1979,7 @@ export default function AppLayout({ title, children }) {
                             {notification.action_required && notification.acted && <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black uppercase text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-950 dark:text-emerald-100 dark:ring-emerald-800">Acted</span>}
                           </div>
                           <p className="mt-1 text-sm text-slate-600 dark:text-zinc-300">{notification.message}</p>
-                          <p className="mt-2 text-xs text-slate-400">{notification.created_at ? new Date(notification.created_at).toLocaleString() : ""}</p>
+                          <p className="mt-2 text-xs text-slate-400">{notification.created_at ? formatDateTime(notification.created_at, "") : ""}</p>
                         </button>
                       )) : <p className="p-6 text-center text-sm text-slate-500">No notifications yet.</p>}
                     </div>
@@ -1994,7 +2083,7 @@ export default function AppLayout({ title, children }) {
         />
       )}
       {sessionWarningOpen && (
-        <div className="fixed inset-0 z-[220] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[220] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm" role="alertdialog" aria-modal="true" aria-label="Session timeout warning">
           <div className="w-full max-w-md rounded-xl border border-amber-200 bg-white p-5 shadow-2xl dark:border-amber-900/60 dark:bg-zinc-900">
             <h2 className="text-lg font-black text-slate-900 dark:text-zinc-50">Still working?</h2>
             <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-zinc-300">
@@ -2111,7 +2200,7 @@ function RegionalAlertAttentionModal({
           </div>
 
           <p className="text-xs text-slate-500">
-            Issued {notification.created_at ? new Date(notification.created_at).toLocaleString("en-PH", { dateStyle: "long", timeStyle: "short" }) : "by OCD Caraga"}
+            Issued {notification.created_at ? formatDateTime(notification.created_at) : "by OCD Caraga"}
           </p>
 
           <div className="flex flex-col-reverse gap-3 border-t border-slate-200 pt-5 dark:border-zinc-800 sm:flex-row sm:justify-end">
@@ -2228,7 +2317,7 @@ function MessageCenterPanel({ center, draft, setDraft, loading, sending, onSubmi
                 </div>
                 <p className="mt-2 text-sm font-bold text-slate-800 dark:text-zinc-100">{message.subject}</p>
                 <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-sm text-slate-600 dark:text-zinc-300">{message.body}</p>
-                <p className="mt-2 text-xs text-slate-400">{message.created_at ? new Date(message.created_at).toLocaleString() : ""}</p>
+                <p className="mt-2 text-xs text-slate-400">{message.created_at ? formatDateTime(message.created_at, "") : ""}</p>
               </button>
             );
           })
@@ -2860,7 +2949,7 @@ function EmployeeProfileModal({ user, onClose }) {
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overflow-x-hidden bg-slate-950/50 p-4 py-6 backdrop-blur-sm sm:items-center">
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overflow-x-hidden bg-slate-950/50 p-4 py-6 backdrop-blur-sm sm:items-center" role="dialog" aria-modal="true" aria-label="Employee profile">
       <div className="flex max-h-[calc(100vh-3rem)] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
         <div className="shrink-0 flex items-start justify-between border-b border-slate-200 bg-slate-50 p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="min-w-0">
@@ -3253,13 +3342,16 @@ function EmployeeProfileModal({ user, onClose }) {
                 </div>
 
                 {aorEnabled && (
-                  <SystemTabs
-                    active={activeProfileArea}
-                    ariaLabel="Employee profile sections"
+                  <SectionTabs
+                    label="Profile Sections"
+                    appearance="framed"
                     className="mb-4"
-                    items={[
-                      { key: "overview", label: "Overview", onClick: () => setActiveProfileArea("overview") },
-                      { key: "aor", label: "Area of Responsibility", onClick: () => setActiveProfileArea("aor") },
+                    value={activeProfileArea}
+                    onChange={setActiveProfileArea}
+                    ariaLabel="Employee profile sections"
+                    tabs={[
+                      { id: "overview", label: "Overview" },
+                      { id: "aor", label: "Area of Responsibility" },
                     ]}
                   />
                 )}

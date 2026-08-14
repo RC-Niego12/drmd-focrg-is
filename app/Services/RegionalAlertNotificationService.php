@@ -73,9 +73,24 @@ class RegionalAlertNotificationService
                     'acknowledgement_method' => null,
                 ],
             );
+            $canViewAcknowledgements = $user->can('view regional alert acknowledgements')
+                || $user->hasAnyRole([
+                    'Super Admin',
+                    'RROS',
+                    'RROS AA',
+                    'DRRS',
+                    'DRRS AA',
+                    'DRIMS',
+                    'DRMD AA',
+                    'DRMD Chief',
+                    'DRMD Financial Analyst',
+                    'OCD Caraga',
+                    'QRT',
+                    'Quick Response Team',
+                ]);
             $notificationUrl = $isLgu
                 ? route('lgu.dromic-requests.index')
-                : ($user->can('view regional alert acknowledgements')
+                : ($canViewAcknowledgements
                     ? route('alert-acknowledgments.index', ['alert_id' => $alert->id])
                     : route('dashboard'));
 

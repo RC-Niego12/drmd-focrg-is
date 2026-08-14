@@ -182,8 +182,15 @@ class AorCoverageService
 
         if ($hasAssessment) {
             $isActor = $actedBy && (int) $actedBy->id === (int) $user->id;
-            // Drafts stay locked to the creating PDRC. Final/submitted docs stay with the actor as well.
-            $canAccess = $isPrivileged || $isActor;
+            $isDrrsAa = $user->hasRole('DRRS AA') || $user->can('route epirma documents');
+            $isRrosViewer = $user->hasRole('RROS') && (
+                in_array((string) $request->assessment_status, ['final', 'submitted'], true)
+                || filled($request->epirma_assessment_signed_at)
+                || filled($request->epirma_response_letter_signed_at)
+            );
+            $isAaViewer = $isDrrsAa && filled($request->epirma_forwarded_to_drrs_aa_at);
+            // Drafts stay locked to the creating PDRC. Final/signed docs open to RROS / DRRS AA.
+            $canAccess = $isPrivileged || $isActor || $isAaViewer || $isRrosViewer;
 
             return [
                 'can_create' => false,
@@ -198,6 +205,9 @@ class AorCoverageService
                 ],
                 'primary_owner' => $primaryPayload,
                 'reason' => $canAccess ? null : 'acted_by_other',
+                'can_forward_epirma' => ($isPrivileged || $isActor) && $request->assessment_status === 'draft',
+                'can_route_epirma' => $isPrivileged || $isAaViewer,
+                'viewer_role' => $isAaViewer ? 'drrs_aa' : ($isRrosViewer ? 'rros' : ($isActor ? 'pdrc' : 'other')),
             ];
         }
 
@@ -213,8 +223,9 @@ class AorCoverageService
             ];
         }
 
-        // Creating a new assessment is open to any DRRS encoder; ownership locks after first save.
-        if ($isPrivileged || ($isDrrs && $user->can('encode requests'))) {
+        // Creating a new assessment is open to any DRRS / encoder; ownership locks after first save.
+        // Prefer role checks so stale Spatie permission cache cannot hide Create Assessment.
+        if ($isPrivileged || $isDrrs || $user->can('encode requests')) {
             return [
                 'can_create' => true,
                 'can_act_on_behalf' => false,

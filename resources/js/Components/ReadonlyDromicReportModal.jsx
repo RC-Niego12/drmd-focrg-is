@@ -354,7 +354,7 @@ function Section({ title, children, na = false }) {
     );
 }
 
-export default function ReadonlyDromicReportModal({ report, onClose, embedded = false }) {
+export function DromicEncodedReportBody({ report, className = '' }) {
     if (!report) return null;
 
     const payload = report.lgu_dromic_payload || {};
@@ -395,7 +395,68 @@ export default function ReadonlyDromicReportModal({ report, onClose, embedded = 
         .filter(([, value]) => value.length > 0);
 
     return (
-        <div className={embedded ? 'flex h-full min-h-0 w-full overflow-hidden bg-slate-100 dark:bg-zinc-900' : 'fixed inset-0 z-[120] flex items-start justify-center overflow-hidden bg-slate-950/70 p-2 backdrop-blur-sm sm:p-4'}>
+        <div className={`space-y-4 bg-white p-4 text-slate-950 ${className}`.trim()}>
+            <header className="border-b border-slate-200 pb-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-emerald-700">DROMIC / Situational Report</p>
+                <h2 className="mt-1 text-lg font-black">{report.reference_number || 'Draft DROMIC / Situational Report'}</h2>
+                <p className="mt-1 text-xs text-slate-500">{reportingLgu} · Report No. {report.lgu_dromic_report_number || 1}</p>
+            </header>
+            <Section title="Incident Information"><ReadonlyFields entries={scalarEntries} /></Section>
+            <Section title="Status of Affected Population">
+                <ReadonlyTable rows={areaRows} columns={['area', 'psa_2024', 'affected_families', 'affected_persons']} totalColumns={['psa_2024', 'affected_families', 'affected_persons']} />
+            </Section>
+            <Section title="Status of Displaced Population — Inside Evacuation Centers" na={notApplicable.has('inside_ec')}>
+                <EvacuationCenterDisaggregation rows={payload.evacuation_center_rows || []} />
+            </Section>
+            <Section title="Status of Displaced Population — Outside Evacuation Centers" na={notApplicable.has('outside_ec')}>
+                <ReadonlyTable rows={outsideRows} columns={['area', 'outside_ec_families_cum', 'outside_ec_families_now', 'outside_ec_persons_cum', 'outside_ec_persons_now']} totalColumns={['outside_ec_families_cum', 'outside_ec_families_now', 'outside_ec_persons_cum', 'outside_ec_persons_now']} />
+            </Section>
+            <Section title="Status of Damaged Houses" na={notApplicable.has('damaged_houses')}>
+                <ReadonlyTable rows={damagedRows} columns={['area', 'damaged_houses_totally', 'damaged_houses_partially', 'damaged_houses_estimated_cost', 'affected_families']} totalColumns={['damaged_houses_totally', 'damaged_houses_partially', 'damaged_houses_estimated_cost', 'affected_families']} />
+            </Section>
+            <Section title="Cost of Assistance Provided" na={notApplicable.has('assistance')}>
+                <ReadonlyTable
+                    rows={(payload.assistance_rows || []).map((row) => ({ ...row, total_cost: row.total_cost ?? (Number(row.quantity || 0) * Number(row.cost_per_unit || 0)) }))}
+                    columns={['barangay', 'source', 'source_details', 'quantity', 'unit', 'item_type', 'particular', 'cost_per_unit', 'total_cost', 'families_served']}
+                    totalColumns={['quantity', 'total_cost', 'families_served']}
+                />
+            </Section>
+            {additionalTables.map(([key, rows]) => (
+                <Section key={key} title={labels[key] || humanize(key)} na={notApplicable.has(key.replace(/_rows$/, ''))}>
+                    <ReadonlyTable rows={rows} />
+                </Section>
+            ))}
+            <Section title="Response Actions and Interventions">
+                <ReadonlyTable rows={payload.response_action_rows || []} columns={['acted_by_office', 'acted_by_office_other', 'action_intervention']} />
+            </Section>
+            <Section title="Request Letter (Relief Augmentation)" na={!payload.has_relief_request}>
+                <ReadonlyTable rows={payload.requested_fni_items || []} columns={['item_name', 'requested_quantity', 'unit_of_measure']} totalColumns={['requested_quantity']} />
+            </Section>
+            <Section title="PAGASA / PHIVOLCS Advisory Screenshots" na={notApplicable.has('advisory_screenshots')}>
+                <ReadonlyTable rows={payload.official_advisory_rows || []} columns={['agency', 'advisory_title', 'issued_at', 'extracted_text', 'screenshot_attached']} />
+            </Section>
+            <Section title="Situation Overview">
+                <div className="whitespace-pre-line rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold leading-7 text-slate-900">{payload.narrative || '-'}</div>
+            </Section>
+        </div>
+    );
+}
+
+export default function ReadonlyDromicReportModal({ report, onClose, embedded = false }) {
+    if (!report) return null;
+
+    const payload = report.lgu_dromic_payload || {};
+    const reportingLguName = payload.requesting_lgu || report.requesting_agency || report.municipality || '-';
+    const reportingProvince = payload.province || report.province || report.incident?.province || '';
+    const reportingLgu = reportingProvince && !String(reportingLguName).toLowerCase().includes(String(reportingProvince).toLowerCase())
+        ? `${reportingLguName}, ${reportingProvince}`
+        : reportingLguName;
+
+    return (
+        <div
+            className={embedded ? 'flex h-full min-h-0 w-full overflow-hidden bg-slate-100 dark:bg-zinc-900' : 'fixed inset-0 z-[120] flex items-start justify-center overflow-hidden bg-slate-950/70 p-2 backdrop-blur-sm sm:p-4'}
+            {...(embedded ? {} : { role: 'dialog', 'aria-modal': 'true', 'aria-label': report.reference_number || 'DROMIC / Situational Report' })}
+        >
             <div className={embedded ? 'flex h-full min-h-0 w-full flex-col overflow-hidden bg-slate-100 dark:bg-zinc-900' : 'flex h-full w-full max-w-[1500px] flex-col overflow-hidden rounded-xl bg-slate-100 shadow-2xl dark:bg-zinc-900'}>
                 <header className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-slate-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
                     <div>
@@ -409,44 +470,8 @@ export default function ReadonlyDromicReportModal({ report, onClose, embedded = 
                     </div>
                 </header>
 
-                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3 sm:p-5">
-                    <Section title="Incident Information"><ReadonlyFields entries={scalarEntries} /></Section>
-                    <Section title="Status of Affected Population">
-                        <ReadonlyTable rows={areaRows} columns={['area', 'psa_2024', 'affected_families', 'affected_persons']} totalColumns={['psa_2024', 'affected_families', 'affected_persons']} />
-                    </Section>
-                    <Section title="Status of Displaced Population — Inside Evacuation Centers" na={notApplicable.has('inside_ec')}>
-                        <EvacuationCenterDisaggregation rows={payload.evacuation_center_rows || []} />
-                    </Section>
-                    <Section title="Status of Displaced Population — Outside Evacuation Centers" na={notApplicable.has('outside_ec')}>
-                        <ReadonlyTable rows={outsideRows} columns={['area', 'outside_ec_families_cum', 'outside_ec_families_now', 'outside_ec_persons_cum', 'outside_ec_persons_now']} totalColumns={['outside_ec_families_cum', 'outside_ec_families_now', 'outside_ec_persons_cum', 'outside_ec_persons_now']} />
-                    </Section>
-                    <Section title="Status of Damaged Houses" na={notApplicable.has('damaged_houses')}>
-                        <ReadonlyTable rows={damagedRows} columns={['area', 'damaged_houses_totally', 'damaged_houses_partially', 'damaged_houses_estimated_cost', 'affected_families']} totalColumns={['damaged_houses_totally', 'damaged_houses_partially', 'damaged_houses_estimated_cost', 'affected_families']} />
-                    </Section>
-                    <Section title="Cost of Assistance Provided" na={notApplicable.has('assistance')}>
-                        <ReadonlyTable
-                            rows={(payload.assistance_rows || []).map((row) => ({ ...row, total_cost: row.total_cost ?? (Number(row.quantity || 0) * Number(row.cost_per_unit || 0)) }))}
-                            columns={['barangay', 'source', 'source_details', 'quantity', 'unit', 'item_type', 'particular', 'cost_per_unit', 'total_cost', 'families_served']}
-                            totalColumns={['quantity', 'total_cost', 'families_served']}
-                        />
-                    </Section>
-                    {additionalTables.map(([key, rows]) => (
-                        <Section key={key} title={labels[key] || humanize(key)} na={notApplicable.has(key.replace(/_rows$/, ''))}>
-                            <ReadonlyTable rows={rows} />
-                        </Section>
-                    ))}
-                    <Section title="Response Actions and Interventions">
-                        <ReadonlyTable rows={payload.response_action_rows || []} columns={['acted_by_office', 'acted_by_office_other', 'action_intervention']} />
-                    </Section>
-                    <Section title="Request Letter (Relief Augmentation)" na={!payload.has_relief_request}>
-                        <ReadonlyTable rows={payload.requested_fni_items || []} columns={['item_name', 'requested_quantity', 'unit_of_measure']} totalColumns={['requested_quantity']} />
-                    </Section>
-                    <Section title="PAGASA / PHIVOLCS Advisory Screenshots">
-                        <ReadonlyTable rows={payload.official_advisory_rows || []} columns={['agency', 'advisory_title', 'issued_at', 'extracted_text', 'screenshot_attached']} />
-                    </Section>
-                    <Section title="Situation Overview">
-                        <div className="whitespace-pre-line rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold leading-7 text-slate-900 dark:border-emerald-900 dark:bg-emerald-950/20 dark:text-zinc-100">{payload.narrative || '-'}</div>
-                    </Section>
+                <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
+                    <DromicEncodedReportBody report={report} className="rounded-lg border border-slate-200 dark:border-zinc-800" />
                 </div>
             </div>
         </div>

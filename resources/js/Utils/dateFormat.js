@@ -7,7 +7,7 @@ const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
   hour12: true,
 });
 
-const dateFormatter = new Intl.DateTimeFormat(undefined, {
+const dateFormatter = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
   year: "numeric",

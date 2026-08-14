@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\AssistanceRequest;
 use App\Models\BarangayPopulation;
+use App\Models\EpirmaSignedDocument;
 use App\Models\FniLibraryItem;
 use App\Models\Incident;
 use App\Models\LguDirectoryEntry;
@@ -11,12 +12,16 @@ use App\Models\LguDromicRequestedItem;
 use App\Models\LguSignedDocumentVersion;
 use App\Models\OperationalLibraryValue;
 use App\Models\PsgcAddress;
+use App\Services\AorCoverageService;
 use App\Services\AuditLogger;
+use App\Services\EpirmaDocumentStatusService;
 use App\Services\OfficialAdvisoryService;
 use App\Services\RealtimePublisher;
 use App\Services\WorkflowNotificationService;
 use App\Support\AssessmentNarrative;
+use App\Support\InlinePdfFilename;
 use App\Support\LguDromicReportTitle;
+use App\Support\LguFniProcessingStatus;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -46,7 +51,11 @@ class LguDromicRequestController extends Controller
                 'lguReliefReviewer:id,name,office',
                 'lguDromicViewer:id,name,office',
                 'lguReliefViewer:id,name,office',
-                'reliefAugmentationRequest:id,source_lgu_dromic_request_id,reference_number,status',
+                'lguDromicAcker:id,name,office',
+                'lguReliefAcker:id,name,office',
+                'reliefAugmentationRequest:id,source_lgu_dromic_request_id,reference_number,status,epirma_response_letter_signed_at,lgu_response_letter_sent_at,lgu_response_letter_acked_at,lgu_response_letter_acked_by,lgu_response_letter_advance_path,lgu_response_letter_advance_name,lgu_response_letter_advance_sent_at,lgu_response_letter_advance_acked_at,lgu_response_letter_advance_acked_by',
+                'reliefAugmentationRequest.lguResponseLetterAcker:id,name',
+                'reliefAugmentationRequest.lguResponseLetterAdvanceAcker:id,name',
                 'signedDocumentVersions:id,request_id,kind,path,original_name,uploaded_at,created_at',
             ])
             ->where('submission_type', 'lgu_dromic_relief_request');
@@ -191,6 +200,7 @@ class LguDromicRequestController extends Controller
             })
             ->when($request->filled('search'), fn ($groups) => $groups->filter(function (array $group) use ($request): bool {
                 $needle = Str::lower(trim($request->string('search')->toString()));
+
                 return Str::contains(Str::lower(implode(' ', [
                     $group['incident_name'],
                     $group['incident_code'],
@@ -313,6 +323,53 @@ class LguDromicRequestController extends Controller
                         'updated_at' => $version->updated_at,
                     ])->all();
                 $row->setAttribute('revision_history', $history);
+
+                $fni = $row->reliefAugmentationRequest;
+                $hasAdvance = $fni && filled($fni->lgu_response_letter_advance_sent_at) && filled($fni->lgu_response_letter_advance_path);
+                $hasSigned = $fni
+                    && filled($fni->epirma_response_letter_signed_at)
+                    && filled($fni->lgu_response_letter_sent_at)
+                    && EpirmaSignedDocument::query()
+                        ->where('assistance_request_id', $fni->id)
+                        ->where('document_type', EpirmaSignedDocument::TYPE_RESPONSE_LETTER)
+                        ->where('action', EpirmaSignedDocument::ACTION_ROUTE)
+                        ->where('routing_status', EpirmaSignedDocument::STATUS_SIGNED)
+                        ->where(function ($artifact): void {
+                            $artifact->whereNotNull('remote_document_url')
+                                ->orWhereNotNull('remote_base_path')
+                                ->orWhere('document_path', 'like', EpirmaDocumentStatusService::SIGNED_CACHE_DIR.'%');
+                        })
+                        ->exists();
+                $processing = LguFniProcessingStatus::resolve($fni, (bool) $hasAdvance, (bool) $hasSigned);
+                if ($fni) {
+                    $fni->setAttribute('processing_key', $processing['key']);
+                    $fni->setAttribute('processing_label', $processing['label']);
+                }
+                $row->setAttribute('dswd_response_letter', $fni ? [
+                    'fni_request_id' => $fni->id,
+                    'reference_number' => $fni->reference_number,
+                    'processing_key' => $processing['key'],
+                    'processing_label' => $processing['label'],
+                    'advance' => [
+                        'available' => (bool) $hasAdvance,
+                        'sent_at' => $fni->lgu_response_letter_advance_sent_at,
+                        'acked_at' => $fni->lgu_response_letter_advance_acked_at,
+                        'acked_by' => $fni->lguResponseLetterAdvanceAcker?->only(['id', 'name']),
+                        'view_url' => $hasAdvance
+                            ? route('lgu.response-letters.show', ['assistanceRequest' => $fni->id, 'kind' => 'advance'])
+                            : null,
+                        'name' => $fni->lgu_response_letter_advance_name,
+                    ],
+                    'signed' => [
+                        'available' => (bool) $hasSigned,
+                        'sent_at' => $fni->lgu_response_letter_sent_at,
+                        'acked_at' => $fni->lgu_response_letter_acked_at,
+                        'acked_by' => $fni->lguResponseLetterAcker?->only(['id', 'name']),
+                        'view_url' => $hasSigned
+                            ? route('lgu.response-letters.show', ['assistanceRequest' => $fni->id, 'kind' => 'signed'])
+                            : null,
+                    ],
+                ] : null);
 
                 return $row;
             });
@@ -828,7 +885,22 @@ class LguDromicRequestController extends Controller
         }
 
         $factPayload = $data['facts'] ?? [];
-        $blockedScreenshot = collect(data_get($factPayload, 'official_agency_advisories', []))
+        $advisoriesNotApplicable = $this->officialAdvisoriesMarkedNotApplicable($factPayload);
+        $usableAdvisories = $advisoriesNotApplicable
+            ? collect()
+            : collect(data_get($factPayload, 'official_agency_advisories', []))
+                ->filter(fn ($advisory): bool => filled(data_get($advisory, 'summary'))
+                    || filled(data_get($advisory, 'extracted_text'))
+                    || data_get($advisory, 'content_status') === 'extracted_for_review');
+        if ($advisoriesNotApplicable) {
+            $factPayload['official_agency_advisories'] = [];
+            $factPayload['official_agency_advisories_status'] = 'not_applicable';
+        } elseif ($usableAdvisories->isEmpty()) {
+            $factPayload['official_agency_advisories'] = [];
+            $factPayload['official_agency_advisories_status'] = 'none_supplied';
+        }
+
+        $blockedScreenshot = ! $advisoriesNotApplicable && collect(data_get($data['facts'] ?? [], 'official_agency_advisories', []))
             ->contains(fn ($advisory): bool => data_get($advisory, 'source_kind') === 'screenshot'
                 && (
                     data_get($advisory, 'content_status') !== 'extracted_for_review'
@@ -840,6 +912,7 @@ class LguDromicRequestController extends Controller
             ], 422);
         }
 
+        $incidentProfile = $this->situationOverviewIncidentProfile($factPayload);
         $facts = collect($factPayload)
             ->filter(fn ($value) => filled($value))
             ->map(fn ($value, $key) => Str::headline((string) $key).': '.(is_array($value) ? json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : $value))
@@ -855,7 +928,7 @@ class LguDromicRequestController extends Controller
                         ? 'You help LGU focal persons prepare a concise official justification when reported affected persons exceed PSA 2024 population. First judge if the draft contains a real, relevant reason for the excess. Relevant reasons may include actual validation results, transient/visiting population, displaced persons from nearby areas, locally stranded individuals, renters/boarders, census undercount/outdated data, duplicate household sharing, or another concrete LGU-verified explanation. Do not invent facts, numbers, causes, validations, agencies, or approvals. If the draft is empty, vague, circular, or unrelated, return exactly: NEEDS_USER_INPUT: Please encode the actual reason why the affected persons exceeded the PSA 2024 population. If relevant, polish it into 1 concise official paragraph without headings or markdown.'
                         : ($data['mode'] === 'caption'
                             ? 'You help LGU focal persons polish photo documentation captions for a DROMIC/Situational Report. Preserve the original meaning, keep it official and concise, and do not invent activities, dates, locations, agencies, or beneficiaries. If the draft is random letters, vague, or has no usable idea, return exactly: NEEDS_USER_INPUT: Please encode a clear caption that describes the documented LGU response action or activity. Return one complete sentence only, using no more than 35 words and 220 characters so it fits within three displayed lines.'
-                            : 'Write as a real LGU employee preparing the Situation Overview for the LGU\'s current DROMIC/Situational Report. Sound human, observant, practical, and professional rather than mechanical or AI-generated. Describe what is happening in the locality, how residents and communities are being affected, what conditions are currently evident, and what the LGU has done or is continuing to do. Write from the reporting LGU perspective, but do not begin every paragraph with "The LGU reports" and do not repeatedly mention that the information came from the LGU. Never write "as reported by the local government unit," "as reported by the LGU," or an equivalent attribution to the reporting LGU. Replace that empty attribution with a useful elaboration of the actual local hazard, observable condition, effect, or response supported by the encoded facts. On the first use of an acronym in the narrative, write the complete official term followed by the acronym in parentheses, for example "Local Government Unit (LGU)." On every later use, write only the acronym. Do not spell out the same acronym more than once. Treat the supplied encoded facts as the sole source of truth. Any Official Agency Advisories in the facts were selected and reviewed by the LGU and may be used only as supporting hazard context. An advisory row that has only a source URL or has content_status "reference_only" is a citation record only: never infer, quote, summarize, or attribute any claim from its URL, title, or agency name. Use an advisory only when it includes a verified relevant excerpt or extracted summary. Attribute an agency statement naturally and cite the agency no more often than needed. Never present an agency forecast or warning as an observed local impact. Never mix regional or agency figures with LGU-validated affected-population figures. For an earthquake, use supplied technical details only when relevant, then describe local effects solely from LGU data. For weather hazards, use the verified advisory to explain the weather system or warning that influenced the locality, while flooding, displacement, damage, and response must come from LGU data. For fire, health, maritime, geohazard, environmental, or other incidents, use the verified responsible-agency excerpt only for technical context and keep the LGU narrative focused on locally validated conditions and actions. Never invent or infer an unencoded date, count, barangay, evacuation center, damaged house, casualty, assistance item, action, weather condition, agency response, validation, signatory, or approval. Missing information is unknown and must simply be omitted. Do not include reporting cut-off times, the time information was received, the reporter\'s name, form-completion details, database language, field labels, source URLs, match notes, or other administrative metadata. Mention an incident date only when it helps the reader understand how the event developed; omit exact times unless the timing is essential to the incident itself. Use readable whole numbers with thousands separators and proper units. Produce at least 2 cohesive paragraphs and use a third paragraph only when the encoded facts support a genuinely separate topic. Give every paragraph a distinct purpose: normally the first describes the incident and present conditions, the second explains verified effects on people or places together with the most relevant figures, and an optional third covers LGU actions, assistance, remaining needs, or continuing concerns. When the data is limited, combine impacts and actions into two natural paragraphs rather than padding the report. Never repeat a fact, count, conclusion, or idea in another paragraph merely by changing the wording. Avoid generic filler, ceremonial language, overlong introductions, item-by-item form recitation, and repetitive closing statements. Preserve useful facts from an existing draft when polishing, but remove repetition and irrelevant administrative details. Return only the narrative paragraphs separated by blank lines, without a heading, bullets, numbering, sources, notes, or markdown.')],
+                            : $this->situationOverviewSystemPrompt($factPayload))],
                     ['role' => 'user', 'content' => match ($data['mode']) {
                         'generate' => "Write a natural, human Situation Overview from the encoded facts below as the LGU employee responsible for this incident report. Produce at least two paragraphs, keep each paragraph focused on a different aspect of the situation, and include only facts that help describe current conditions, verified effects, and the LGU response. If a reviewed official agency advisory is supplied, use it briefly and with attribution to explain the hazard, without treating a warning as an observed LGU impact. Do not repeat the same thought or figure in different words:\n\nEncoded data:\n".$facts,
                         'caption' => 'Polish this photo documentation caption into one concise official sentence. Do not add unsupported details. Draft caption: '.($data['text'] ?? '')."\n\nEncoded facts for context only:\n".$facts,
@@ -865,10 +938,10 @@ class LguDromicRequestController extends Controller
                 ],
             ];
             if (in_array($data['mode'], ['generate', 'polish'], true)) {
-                $payload['messages'][0]['content'] = $this->situationOverviewSystemPrompt();
+                $payload['messages'][0]['content'] = $this->situationOverviewSystemPrompt($factPayload);
                 $payload['messages'][1]['content'] = ($data['mode'] === 'generate'
-                    ? 'Write the Situation Overview in exactly four distinct paragraphs using the required paragraph purpose and order.'
-                    : 'Rewrite the draft into exactly four distinct paragraphs using the required paragraph purpose and order. Preserve supported facts and remove repetition.')
+                    ? 'Write the Situation Overview in exactly four distinct paragraphs using the required paragraph purpose and order. '.$this->situationOverviewUserDirective($incidentProfile)
+                    : 'Rewrite the draft into exactly four distinct paragraphs using the required paragraph purpose and order. Preserve supported facts and remove repetition. '.$this->situationOverviewUserDirective($incidentProfile))
                     ."\n\n".($data['mode'] === 'polish' ? 'Existing draft: '.($data['text'] ?? '')."\n\n" : '')
                     ."Encoded data:\n".$facts;
             }
@@ -898,10 +971,11 @@ class LguDromicRequestController extends Controller
             ], 422);
         }
 
-        if (in_array($data['mode'], ['generate', 'polish'], true) && $polished !== '' && $this->situationOverviewNeedsCorrection($polished, $facts)) {
+        if (in_array($data['mode'], ['generate', 'polish'], true) && $polished !== '' && $this->situationOverviewNeedsCorrection($polished, $facts, $factPayload)) {
             $correctionPayload = $payload;
             $correctionPayload['temperature'] = 0.12;
-            $correctionPayload['messages'][1]['content'] = "Correct the draft below so it follows the required structure and contains exactly four paragraphs separated by blank lines. Never name or enumerate the affected barangays; state only the number of affected barangays when useful. Remove weather information about Luzon, Visayas, Metro Manila, or another place outside Caraga unless the encoded facts explicitly show that it directly explains conditions in the reporting LGU. Remove every statement about missing, unreadable, unavailable, unspecified, or unencoded information, including statements that no challenges or gaps were encoded. Remove phrases such as \"as reported by the local government unit\" or \"as reported by the LGU\" and replace them with supported elaboration about the local condition, effect, or response. Expand each acronym only on its first mention by writing the complete official term followed by the acronym in parentheses; use only the acronym afterward and never expand it twice. If Report Classification is terminal or first_and_final, rewrite every response action as completed in past tense and remove language saying that an action is ongoing, underway, continuing, planned, or still to be done. For those closed reports, make the fourth paragraph a concise completion statement rather than a future commitment. Simply omit unavailable content. Do not add unsupported facts.\n\nDraft to correct:\n".$polished."\n\nEncoded data:\n".$facts;
+            $correctionPayload['messages'][1]['content'] = $this->situationOverviewCorrectionDirective($incidentProfile)
+                ."\n\nDraft to correct:\n".$polished."\n\nEncoded data:\n".$facts;
 
             try {
                 $correctionResponse = Http::timeout(45)->retry(1, 500)->withToken($apiKey)->acceptJson()->post(
@@ -910,7 +984,7 @@ class LguDromicRequestController extends Controller
                 );
                 if ($correctionResponse->successful()) {
                     $corrected = AssessmentNarrative::sanitize((string) data_get($correctionResponse->json(), 'choices.0.message.content'));
-                    if (! $this->situationOverviewNeedsCorrection($corrected, $facts)) {
+                    if (! $this->situationOverviewNeedsCorrection($corrected, $facts, $factPayload)) {
                         $polished = $corrected;
                     }
                 }
@@ -1098,7 +1172,10 @@ PROMPT;
         $record = $assistanceRequest->load(['incident', 'lguSubmitter', 'drmdAssignedUser']);
         $reportProfile = $this->dromicReportProfile($record);
         $orientation = $this->dromicPdfOrientation((array) ($record->lgu_dromic_payload ?? []));
-        $filename = "LGU-DROMIC-{$record->reference_number}.pdf";
+        $filename = InlinePdfFilename::fromCandidates(
+            $record->reference_number ? 'LGU-DROMIC-'.$record->reference_number : null,
+            'LGU-DROMIC-'.$record->id,
+        );
         $pdf = Pdf::loadView('documents.lgu-dromic', [
             'request' => $record,
             'reportProfile' => $reportProfile,
@@ -1324,22 +1401,53 @@ PROMPT;
         Request $request,
         AssistanceRequest $assistanceRequest,
         RealtimePublisher $realtime,
+        AorCoverageService $aorCoverage,
     ): JsonResponse {
         $this->authorizeDromicViewer($request, $assistanceRequest);
         abort_unless($assistanceRequest->submission_type === 'lgu_dromic_relief_request', 404);
-        abort_unless($request->user()?->hasAnyRole(['DRIMS', 'DRRS', 'QRT', 'Quick Response Team', 'DRMD AA', 'DRMD Chief', 'Super Admin']), 403);
 
+        $user = $request->user();
         $data = $request->validate(['kind' => ['required', 'in:report,request']]);
         $kind = $data['kind'];
-        abort_if($kind === 'request' && ! data_get($assistanceRequest->lgu_dromic_payload, 'has_relief_request'), 422, 'This report has no request letter.');
+        abort_if($kind === 'request' && ! data_get($assistanceRequest->lgu_dromic_payload, 'has_relief_request') && blank($assistanceRequest->lgu_relief_request_reference), 422, 'This report has no request letter.');
+
+        if ($kind === 'report') {
+            abort_unless($user?->hasAnyRole(['DRIMS', 'Super Admin']), 403, 'Only DRIMS (AOR) may acknowledge DROMIC report receipt.');
+            $aorCodes = $aorCoverage->normalizeUserAorCodes($user);
+            $hasAssignedAor = $aorCodes['cities'] !== [] || $aorCodes['districts'] !== [] || $aorCodes['provinces'] !== [];
+            if ($hasAssignedAor && ! $user->hasRole('Super Admin')) {
+                abort_unless($aorCoverage->coversRequest($user, $assistanceRequest, 'DRIMS'), 403, 'This DROMIC report is outside your DRIMS area of responsibility.');
+            }
+        } else {
+            abort_unless($user?->hasAnyRole(['DRRS', 'Super Admin']), 403, 'Only DRRS PDRC (AOR) may acknowledge relief request letter receipt.');
+            // Assessment creation is open to any DRRS encoder for endorsed linked requests.
+            // Skip the AOR gate when this sitrep already feeds an endorsed DRRS assessment so
+            // Create Assessment can mark the source letter viewed without a false 403.
+            $linkedEndorsedAssessment = AssistanceRequest::query()
+                ->where('source_lgu_dromic_request_id', $assistanceRequest->id)
+                ->where('endorsed_to_drrs', true)
+                ->exists();
+            $aorCodes = $aorCoverage->normalizeUserAorCodes($user);
+            $hasAssignedAor = $aorCodes['cities'] !== [] || $aorCodes['districts'] !== [] || $aorCodes['provinces'] !== [];
+            if ($hasAssignedAor && ! $user->hasRole('Super Admin') && ! $linkedEndorsedAssessment) {
+                abort_unless($aorCoverage->coversRequest($user, $assistanceRequest, 'DRRS'), 403, 'This request letter is outside your DRRS area of responsibility.');
+            }
+        }
 
         $seenAtColumn = $kind === 'report' ? 'lgu_dromic_seen_at' : 'lgu_relief_seen_at';
         $seenByColumn = $kind === 'report' ? 'lgu_dromic_seen_by' : 'lgu_relief_seen_by';
+        $ackedAtColumn = $kind === 'report' ? 'lgu_dromic_acked_at' : 'lgu_relief_acked_at';
+        $ackedByColumn = $kind === 'report' ? 'lgu_dromic_acked_by' : 'lgu_relief_acked_by';
         $now = now();
-        $assistanceRequest->forceFill([
+        $updates = [
             $seenAtColumn => $now,
-            $seenByColumn => $request->user()->id,
-        ])->save();
+            $seenByColumn => $user->id,
+        ];
+        if (blank($assistanceRequest->{$ackedAtColumn})) {
+            $updates[$ackedAtColumn] = $now;
+            $updates[$ackedByColumn] = $user->id;
+        }
+        $assistanceRequest->forceFill($updates)->save();
 
         $recipientIds = collect([$assistanceRequest->lgu_submitted_by, $assistanceRequest->encoded_by])
             ->filter()
@@ -1349,13 +1457,17 @@ PROMPT;
             'request_id' => $assistanceRequest->id,
             'kind' => $kind,
             'seen_at' => $now->toIso8601String(),
-            'seen_by' => $request->user()->name,
+            'seen_by' => $user->name,
+            'acked_at' => ($assistanceRequest->fresh()->{$ackedAtColumn})?->toIso8601String(),
+            'acked_by' => $user->name,
         ]);
 
         return response()->json([
-            'message' => ucfirst($kind).' view receipt recorded.',
+            'message' => ucfirst($kind).' receipt acknowledged.',
             'seen_at' => $now->toIso8601String(),
-            'seen_by' => $request->user()->name,
+            'seen_by' => $user->name,
+            'acked_at' => ($assistanceRequest->fresh()->{$ackedAtColumn})?->toIso8601String(),
+            'acked_by' => $user->name,
         ]);
     }
 
@@ -1400,8 +1512,8 @@ PROMPT;
                 : ['exclude_unless:has_relief_request,true', 'required_if:has_relief_request,true', 'array', 'min:1', 'max:100'],
             'requested_fni_items.*.fni_library_item_id' => ['required', 'integer', 'distinct', 'exists:fni_library_items,id'],
             'requested_fni_items.*.requested_quantity' => $isDraft
-                ? ['nullable', 'numeric', 'min:1', 'max:999999999999.99']
-                : ['required', 'numeric', 'min:1', 'max:999999999999.99'],
+                ? ['nullable', 'integer', 'min:1', 'max:999999999']
+                : ['required', 'integer', 'min:1', 'max:999999999'],
             'not_applicable_sections' => ['nullable', 'array'],
             'not_applicable_sections.*' => ['nullable', 'string', 'max:100'],
             'narrative' => [$required, 'string', 'max:12000'],
@@ -1713,6 +1825,11 @@ PROMPT;
             fn ($section): bool => $section !== 'response_actions',
         ));
 
+        $notApplicableSections = collect($data['not_applicable_sections'] ?? []);
+        if ($notApplicableSections->contains('advisory_screenshots')) {
+            $data['official_advisory_rows'] = [];
+        }
+
         foreach ($data['official_advisory_rows'] ?? [] as $index => $advisory) {
             if (blank($advisory['source_url'] ?? null) && blank($advisory['screenshot_data_url'] ?? null) && blank($advisory['pasted_text'] ?? null)) {
                 throw ValidationException::withMessages([
@@ -1732,8 +1849,6 @@ PROMPT;
         if ($isDraft) {
             return $data;
         }
-
-        $notApplicableSections = collect($data['not_applicable_sections'] ?? []);
         $areaRows = collect($data['area_rows'] ?? []);
         $sectionContent = [
             'inside_ec' => ! empty($data['evacuation_center_rows']),
@@ -2704,20 +2819,135 @@ PROMPT;
         ];
     }
 
-    private function situationOverviewSystemPrompt(): string
+    private function officialAdvisoriesMarkedNotApplicable(array $factPayload): bool
     {
-        return <<<'PROMPT'
-Write as the LGU employee responsible for the current DROMIC/Situational Report. Sound human, direct, observant, and professional. Treat the encoded form data and readable text extracted from pasted warning-agency screenshots as the only sources of truth. Never invent, infer, or complete missing facts. Never treat a forecast, warning, or hazard statement as an observed local impact. Never mix PAGASA/PHIVOLCS figures with LGU-validated affected-population figures.
+        $status = Str::lower((string) data_get($factPayload, 'official_agency_advisories_status', ''));
+        if (in_array($status, ['not_applicable', 'n/a', 'na'], true)) {
+            return true;
+        }
 
-Before writing, test whether the existing Situation Overview and the encoded facts are coherent. Reject any draft that is merely N/A, NA, Not Applicable, To Follow, TBA, TBD, pending, none, no data, random text, generic filler, or another placeholder. Also reject a draft that materially contradicts the encoded incident type, incident status, dates, affected-population totals, displacement totals, damage, casualties, assistance, gaps, or response actions. Do not silently turn contradictory or meaningless input into plausible official prose. In either case, return exactly: NEEDS_USER_INPUT: Please replace the placeholder or correct the Situation Overview so it agrees with the encoded report data. When generating without an existing draft, use only coherent supported facts and omit unavailable facts.
+        $flag = data_get($factPayload, 'official_agency_advisories_not_applicable');
+
+        return $flag === true || $flag === 1 || $flag === '1' || Str::lower((string) $flag) === 'true';
+    }
+
+    private function situationOverviewIncidentProfile(array $factPayload = []): array
+    {
+        $incident = data_get($factPayload, 'incident', []);
+        $incidentText = Str::lower(collect([
+            data_get($incident, 'type'),
+            data_get($incident, 'other_type'),
+            data_get($incident, 'name'),
+            data_get($incident, 'specific_details'),
+            data_get($incident, 'summary'),
+            data_get($factPayload, 'incident_type'),
+        ])->filter()->implode(' '));
+
+        $kind = 'other';
+        if (preg_match('/\b(?:earthquake|seismic|intensity|magnitude|phivolcs|volcan(?:o|ic)?|tsunami)/i', $incidentText)) {
+            $kind = 'earthquake';
+        } elseif (preg_match('/\b(?:typhoon|tropical(?:\s+cyclone|\s+depression|\s+storm)?|thunderstorms?|storms?|weather|rains?|floods?|monsoon|habagat|amihan|low\s+pressure|lpa|hydrometeor(?:ological)?|hydro-meteo)/i', $incidentText)) {
+            $kind = 'weather';
+        } elseif (preg_match('/\bfire\b/i', $incidentText)) {
+            $kind = 'fire';
+        }
+
+        $advisoriesNotApplicable = $this->officialAdvisoriesMarkedNotApplicable($factPayload);
+        $hasUsableAdvisory = ! $advisoriesNotApplicable && collect(data_get($factPayload, 'official_agency_advisories', []))
+            ->contains(fn ($advisory): bool => filled(data_get($advisory, 'summary'))
+                || filled(data_get($advisory, 'extracted_text')));
+
+        return [
+            'kind' => $kind,
+            'is_fire' => $kind === 'fire',
+            'is_weather' => $kind === 'weather',
+            'is_earthquake' => $kind === 'earthquake',
+            'is_local_incident' => in_array($kind, ['fire', 'other'], true),
+            'advisories_not_applicable' => $advisoriesNotApplicable,
+            'has_usable_advisory' => $hasUsableAdvisory,
+            'omit_warning_agencies' => $advisoriesNotApplicable || ! $hasUsableAdvisory,
+        ];
+    }
+
+    private function situationOverviewUserDirective(array $profile): string
+    {
+        $parts = [
+            'Follow the incident-type rules for the encoded disaster type.',
+        ];
+
+        if ($profile['is_fire']) {
+            $parts[] = 'This is a fire incident: use the encoded barangay name(s), occurrence date/time, and when the incident ended use the term fireout for the encoded fireout/ended date and time.';
+        } elseif ($profile['is_local_incident']) {
+            $parts[] = 'This is a non-weather, non-earthquake incident: describe it from the encoded incident type, details, location, dates/times, barangay name(s), effects, and response.';
+        }
+
+        if ($profile['omit_warning_agencies']) {
+            $parts[] = 'Official PAGASA/PHIVOLCS advisories are not applicable or were not supplied. Do not mention PAGASA, PHIVOLCS, weather advisories, earthquake bulletins, or write that those agencies are irrelevant or unused.';
+        }
+
+        return implode(' ', $parts);
+    }
+
+    private function situationOverviewCorrectionDirective(array $profile): string
+    {
+        $barangayRule = $profile['is_local_incident']
+            ? 'Name the encoded affected barangay or barangays; do not replace a supplied barangay name with a vague phrase such as "one barangay" or "a barangay."'
+            : 'Never name or enumerate the affected barangays; state only the number of affected barangays when useful.';
+
+        $agencyRule = $profile['omit_warning_agencies']
+            ? 'Remove every mention of PAGASA, PHIVOLCS, weather advisories, earthquake bulletins, and any statement that those agencies are not relevant, not applicable, unavailable, or unused.'
+            : 'Keep PAGASA/PHIVOLCS only when a usable advisory excerpt was supplied; never invent agency content.';
+
+        $fireRule = $profile['is_fire']
+            ? 'For an ended fire incident, use the term fireout when stating the encoded ended/fireout date and time; do not use only a vague "ended" phrasing for that timestamp.'
+            : '';
+
+        return trim(implode(' ', array_filter([
+            'Correct the draft below so it follows the required structure and contains exactly four paragraphs separated by blank lines.',
+            $barangayRule,
+            $agencyRule,
+            $fireRule,
+            'Remove weather information about Luzon, Visayas, Metro Manila, or another place outside Caraga unless the encoded facts explicitly show that it directly explains conditions in the reporting LGU.',
+            'Remove every statement about missing, unreadable, unavailable, unspecified, or unencoded information, including statements that no challenges or gaps were encoded.',
+            'Remove phrases such as "as reported by the local government unit" or "as reported by the LGU" and replace them with supported elaboration about the local condition, effect, or response.',
+            'Expand each acronym only on its first mention by writing the complete official term followed by the acronym in parentheses; use only the acronym afterward and never expand it twice.',
+            'If Report Classification is terminal or first_and_final, rewrite every response action as completed in past tense and remove language saying that an action is ongoing, underway, continuing, planned, or still to be done.',
+            'For those closed reports, make the fourth paragraph a concise completion statement rather than a future commitment.',
+            'Simply omit unavailable content. Do not add unsupported facts.',
+        ])));
+    }
+
+    private function situationOverviewSystemPrompt(array $factPayload = []): string
+    {
+        $profile = $this->situationOverviewIncidentProfile($factPayload);
+
+        $paragraph1 = match ($profile['kind']) {
+            'weather' => 'Paragraph 1 — Current incident situation. This is a weather/hydrometeorological incident. Describe only the weather conditions, forecast area, warning, or weather system that applies to the reporting LGU, its province, Caraga Region, or Mindanao when the excerpt clearly includes the LGU\'s area. Omit conditions, forecasts, cyclone positions, wind speeds, movement, and other details concerning Luzon, Visayas, Metro Manila, or another area outside Caraga unless the encoded advisory explicitly connects that information to a direct effect or forecast for the reporting LGU. A tropical cyclone outside the Philippine Area of Responsibility is not automatically relevant; include it only when the supplied excerpt states that its trough, circulation, or another identified influence is affecting Caraga or the LGU. Attribute PAGASA or another warning agency naturally once only when a usable advisory excerpt exists in the encoded facts. If Official Agency Advisories Status is not_applicable or none_supplied, do not mention PAGASA, PHIVOLCS, advisories, or write that those agencies are irrelevant—simply describe the local weather-related incident from encoded LGU facts.',
+            'earthquake' => 'Paragraph 1 — Current incident situation. This is an earthquake/seismic incident. Describe the earthquake information using the supplied DOST-PHIVOLCS screenshot excerpt when available, retaining only visible/supplied magnitude, depth, epicentral location, date, time, and intensity applicable to or felt in the LGU; an epicenter outside Caraga may be named when it identifies the same earthquake experienced by the LGU. Attribute PHIVOLCS naturally once only when a usable excerpt exists. If Official Agency Advisories Status is not_applicable or none_supplied, do not mention PAGASA, PHIVOLCS, advisories, or write that those agencies are irrelevant—describe the local earthquake situation only from encoded LGU facts.',
+            'fire' => 'Paragraph 1 — Current incident situation. This is a fire incident. Write from the encoded incident type, specific details, location, occurrence date and time, and the actual name(s) of the affected barangay or barangays. Do not say only "one barangay" or "a barangay" when the barangay name is supplied. When the incident status is Ended and a fireout, ended_datetime, or ended_date is supplied, state that date and time as the fireout using the word "fireout" (for example, "fireout was declared at ..."); do not use a vague "ended" phrasing for that timestamp. Focus on the fire event and present local conditions. Do not use weather-system, typhoon, monsoon, PAGASA, PHIVOLCS, magnitude, intensity, or earthquake boilerplate. If Official Agency Advisories Status is not_applicable or none_supplied, or no usable advisory excerpt exists, never mention PAGASA or PHIVOLCS and never write that those agencies are not relevant, not applicable, unavailable, or unused—omit them entirely.',
+            default => 'Paragraph 1 — Current incident situation. This is a non-weather, non-earthquake incident. Describe the incident using the encoded incident type, specific details, location, occurrence date and time, present status, and the actual name(s) of the affected barangay or barangays. Do not replace a supplied barangay name with "one barangay" or "a barangay." Do not use weather-system, typhoon, monsoon, PAGASA forecast, PHIVOLCS magnitude/intensity, or earthquake boilerplate unless a usable advisory excerpt for this incident is actually supplied. If Official Agency Advisories Status is not_applicable or none_supplied, or no usable advisory excerpt exists, never mention PAGASA or PHIVOLCS and never write that those agencies are not relevant, not applicable, unavailable, or unused—omit them entirely.',
+        };
+
+        $paragraph2 = $profile['is_local_incident']
+            ? 'Paragraph 2 — Summarized LGU-validated effects. State the available municipality/city-wide totals for affected families and persons, displaced families and persons inside or outside evacuation centers, damaged houses, casualties, and other material effects. When affected barangay names are encoded, name those barangays naturally (for example, "in Barangay San Juan") instead of writing only "one barangay" or an unnamed barangay count. Do not invent barangay names, recite full table rows, compare data types, calculate percentages, interpret trends, or analyze why one count differs from another. Never write phrases such as "the exact breakdown is not specified," "with the breakdown not included in this summary," "the LGU has reported these numbers," "as part of its response efforts," "based on the encoded data," or any similar commentary about missing detail, data provenance, or report preparation. Omit any total that was not encoded.'
+            : 'Paragraph 2 — Summarized LGU-validated effects. State only the available municipality/city-wide totals for affected families and persons, displaced families and persons inside or outside evacuation centers, damaged houses, casualties, and other material effects. Present these totals directly and naturally in one or two concise sentences. Never name, list, or enumerate the affected barangays. If useful, state only the total number of affected barangays, such as "across nine barangays." Do not say that people are spread across named barangays, provide barangay-level breakdowns, recite table rows, compare data types, calculate percentages, interpret trends, or analyze why one count differs from another. Never write phrases such as "the exact breakdown is not specified," "with the breakdown not included in this summary," "the LGU has reported these numbers," "as part of its response efforts," "based on the encoded data," or any similar commentary about missing detail, data provenance, or report preparation. Omit any total that was not encoded.';
+
+        $agencyTruth = $profile['omit_warning_agencies']
+            ? 'Official PAGASA/PHIVOLCS advisory screenshots are marked not applicable or were not supplied. Treat warning-agency content as absent: do not mention PAGASA, PHIVOLCS, weather advisories, earthquake bulletins, or write that those agencies are irrelevant or unused.'
+            : 'Treat the encoded form data and readable text extracted from pasted warning-agency screenshots as the only sources of truth. Never invent, infer, or complete missing facts. Never treat a forecast, warning, or hazard statement as an observed local impact. Never mix PAGASA/PHIVOLCS figures with LGU-validated affected-population figures. Use an advisory only when it includes a verified relevant excerpt or extracted summary.';
+
+        return <<<PROMPT
+Write as the LGU employee responsible for the current DROMIC/Situational Report. Sound human, direct, observant, and professional. {$agencyTruth} Never invent, infer, or complete missing facts.
+
+Before writing, identify the encoded incident type and write only an overview appropriate to that type. Reject any draft that is merely N/A, NA, Not Applicable, To Follow, TBA, TBD, pending, none, no data, random text, generic filler, or another placeholder. Also reject a draft that materially contradicts the encoded incident type, incident status, dates, affected-population totals, displacement totals, damage, casualties, assistance, gaps, or response actions. Do not silently turn contradictory or meaningless input into plausible official prose. In either case, return exactly: NEEDS_USER_INPUT: Please replace the placeholder or correct the Situation Overview so it agrees with the encoded report data. When generating without an existing draft, use only coherent supported facts and omit unavailable facts.
 
 On the first mention of any acronym, write its complete official term followed by the acronym in parentheses, for example "Local Government Unit (LGU)." Use only the acronym on every succeeding mention, and never spell out the same acronym more than once. Never write "as reported by the local government unit," "as reported by the LGU," or an equivalent attribution to the reporting LGU. Instead, use that sentence to elaborate on the actual local hazard, observed condition, effect on the community, or ongoing response supported by the encoded facts.
 
 Return exactly four narrative paragraphs, separated by one blank line, with no heading, numbering, bullets, source list, URLs, field labels, or markdown:
 
-Paragraph 1 — Current incident situation. For a weather disturbance, describe only the weather conditions, forecast area, warning, or weather system that applies to the reporting LGU, its province, Caraga Region, or Mindanao when the excerpt clearly includes the LGU's area. Omit conditions, forecasts, cyclone positions, wind speeds, movement, and other details concerning Luzon, Visayas, Metro Manila, or another area outside Caraga unless the encoded advisory explicitly connects that information to a direct effect or forecast for the reporting LGU. A tropical cyclone outside the Philippine Area of Responsibility is not automatically relevant; include it only when the supplied excerpt states that its trough, circulation, or another identified influence is affecting Caraga or the LGU. For an earthquake, describe the earthquake information using the supplied DOST-PHIVOLCS screenshot excerpt, retaining only visible/supplied magnitude, depth, epicentral location, date, time, and intensity applicable to or felt in the LGU; an epicenter outside Caraga may be named when it identifies the same earthquake experienced by the LGU. For another disaster, describe the incident information or present situation supported by its screenshot excerpt or encoded incident facts. Attribute the agency naturally once when its usable excerpt exists.
+{$paragraph1}
 
-Paragraph 2 — Summarized LGU-validated effects. State only the available municipality/city-wide totals for affected families and persons, displaced families and persons inside or outside evacuation centers, damaged houses, casualties, and other material effects. Present these totals directly and naturally in one or two concise sentences. Never name, list, or enumerate the affected barangays. If useful, state only the total number of affected barangays, such as "across nine barangays." Do not say that people are spread across named barangays, provide barangay-level breakdowns, recite table rows, compare data types, calculate percentages, interpret trends, or analyze why one count differs from another. Never write phrases such as "the exact breakdown is not specified," "with the breakdown not included in this summary," "the LGU has reported these numbers," "as part of its response efforts," "based on the encoded data," or any similar commentary about missing detail, data provenance, or report preparation. Omit any total that was not encoded.
+{$paragraph2}
 
 Paragraph 3 — Challenges, gaps, and response. Briefly summarize only the challenges, unmet needs, service or cluster gaps, access/lifeline concerns, and other issues actually encoded in the appropriate form sections. When none are supplied, begin directly with the recorded response actions and never mention the absence of challenge or gap data. It is strictly forbidden to write "no specific challenges or gaps were encoded," "no challenges were reported," "no gaps were identified," "no information was provided," or any similar missing-data statement. In the same paragraph, summarize the response actions, interventions, and assistance actually provided or underway by the LGU and any partner agencies explicitly named in the encoded data. For a Terminal Report or First and Final Report, treat every encoded response action as completed: use past-tense verbs such as conducted, coordinated, distributed, assessed, assisted, or completed, and never say that an action is ongoing, underway, continuing, planned, or still to be done. For a Regular Report, distinguish completed actions from actions explicitly encoded as ongoing. Do not invent a challenge, partner, coordination activity, assistance item, or completed response.
 
@@ -2735,11 +2965,15 @@ PROMPT;
         )));
     }
 
-    private function situationOverviewNeedsCorrection(string $narrative, string $facts): bool
+    private function situationOverviewNeedsCorrection(string $narrative, string $facts, array $factPayload = []): bool
     {
         if ($this->situationParagraphCount($narrative) !== 4) {
             return true;
         }
+
+        $profile = $factPayload === []
+            ? $this->situationOverviewIncidentProfileFromFactsString($facts)
+            : $this->situationOverviewIncidentProfile($factPayload);
 
         $lowerNarrative = Str::lower($narrative);
         $metaCommentary = [
@@ -2767,6 +3001,11 @@ PROMPT;
             'timed out',
             'not provided',
             'no information was',
+            'pagasa and phivolcs are not',
+            'pagasa/phivolcs are not',
+            'not relevant to this',
+            'are not applicable to this',
+            'warning agencies are not',
         ];
         if (Str::contains($lowerNarrative, $metaCommentary)) {
             return true;
@@ -2780,16 +3019,45 @@ PROMPT;
             return true;
         }
 
-        if (preg_match('/\bbarangays?\s+(?:of|namely|including|such as)\b/i', $narrative)) {
+        if ($profile['omit_warning_agencies'] && preg_match('/\b(?:pagasa|phivolcs|dost-phivolcs)\b/i', $narrative)) {
             return true;
         }
 
-        $weatherIncident = Str::contains(Str::lower($facts), [
-            'weather', 'typhoon', 'tropical cyclone', 'tropical depression', 'tropical storm',
-            'rain', 'thunderstorm', 'monsoon', 'habagat', 'amihan', 'flood',
-        ]);
+        if ($profile['is_fire'] && preg_match('/\b(?:ended|concluded|was\s+over)\b/i', $narrative) && ! preg_match('/\bfireout\b/i', $narrative) && preg_match('/\b(?:ended_date|fireout|incident status:\s*ended|status":"Ended")\b/i', $facts)) {
+            return true;
+        }
 
-        return $weatherIncident && Str::contains($lowerNarrative, ['luzon', 'visayas', 'metro manila']);
+        if ($profile['is_local_incident']) {
+            if (preg_match('/\b(?:one|a)\s+barangay\b/i', $narrative) && preg_match('/affected_barangays|barangay/i', $facts)) {
+                return true;
+            }
+        } elseif (preg_match('/\bbarangays?\s+(?:of|namely|including|such as)\b/i', $narrative)) {
+            return true;
+        }
+
+        return $profile['is_weather'] && Str::contains($lowerNarrative, ['luzon', 'visayas', 'metro manila']);
+    }
+
+    private function situationOverviewIncidentProfileFromFactsString(string $facts): array
+    {
+        $lowerFacts = Str::lower($facts);
+
+        return $this->situationOverviewIncidentProfile([
+            'incident' => [
+                'type' => $lowerFacts,
+            ],
+            'official_agency_advisories_status' => Str::contains($lowerFacts, [
+                'official agency advisories status: not_applicable',
+                'official_agency_advisories_status: not_applicable',
+                'official agency advisories not applicable: true',
+            ]) ? 'not_applicable' : (
+                Str::contains($lowerFacts, ['official agency advisories:', 'official_agency_advisories:'])
+                && ! Str::contains($lowerFacts, ['official agency advisories: []', 'official_agency_advisories: []', 'none_supplied'])
+                    ? 'supplied'
+                    : 'none_supplied'
+            ),
+            'official_agency_advisories' => Str::contains($lowerFacts, ['"summary":', '"extracted_text":']) ? [['summary' => 'present']] : [],
+        ]);
     }
 
     private function barangayOptionsWithPopulation(?string $cityMunicipalityCode)
@@ -3051,6 +3319,7 @@ PROMPT;
     ): array {
         if ($current?->lgu_correction_of_id) {
             $source = AssistanceRequest::query()->find($current->lgu_correction_of_id);
+
             return [
                 'classification' => $source?->lgu_dromic_report_classification ?: $current->lgu_dromic_report_classification ?: 'regular',
                 'report_number' => $source?->lgu_dromic_report_number,
@@ -3156,38 +3425,46 @@ PROMPT;
 
     private function safeInlinePdfFilename(string $filename): string
     {
-        $cleaned = basename(trim(str_replace(["\r", "\n", '"', '/', '\\'], '', $filename)));
-        if ($cleaned === '' || $cleaned === '.' || $cleaned === '..') {
-            return 'document.pdf';
-        }
-
-        return str_ends_with(Str::lower($cleaned), '.pdf') ? $cleaned : "{$cleaned}.pdf";
+        return InlinePdfFilename::sanitize($filename);
     }
 
     private function inlineContentDisposition(string $filename): string
     {
-        $ascii = preg_replace('/[^\x20-\x7E]/', '_', $filename) ?: 'document.pdf';
-
-        return 'inline; filename="'.$ascii.'"; filename*=UTF-8\'\''.rawurlencode($filename);
+        return InlinePdfFilename::disposition($filename);
     }
 
     private function authorizeDromicViewer(Request $request, AssistanceRequest $assistanceRequest): void
     {
         $user = $request->user();
+        abort_unless($user, 403, 'Authentication is required to view this DROMIC document.');
+
         $canViewAsPlgu = $this->isProvinceLgu($user->lgu_level)
             && $assistanceRequest->province === $user->lgu_name;
         $isOriginatingLgu = $assistanceRequest->lgu_submitted_by === $user->id
             || $assistanceRequest->encoded_by === $user->id
             || $canViewAsPlgu;
+        $canViewLinkedRrosRequest = $user->hasAnyRole(['RROS', 'RROS AA', 'Super Admin'])
+            && AssistanceRequest::query()
+                ->where('source_lgu_dromic_request_id', $assistanceRequest->id)
+                ->where('endorsed_to_drrs', true)
+                ->exists();
+        // Prefer role checks for DRIMS/DRRS review so a stale Spatie permission cache
+        // (or missing role→permission sync after a DB wipe) cannot block advance/signed PDFs.
         $canViewAsDswd = filled($assistanceRequest->lgu_submitted_to_dswd_at)
             && (
-                $user->can('route lgu dromic requests')
+                $user->hasAnyRole(['RROS', 'RROS AA', 'DRIMS', 'DRRS', 'DRRS AA', 'QRT', 'Quick Response Team', 'Super Admin'])
+                || $user->can('route lgu dromic requests')
                 || $user->can('monitor requests')
                 || $user->can('process requests')
+                || $user->can('manage dromic reports')
                 || $user->can('manage regional alerts')
             );
 
-        abort_unless($isOriginatingLgu || $canViewAsDswd, 403);
+        abort_unless(
+            $isOriginatingLgu || $canViewAsDswd || $canViewLinkedRrosRequest,
+            403,
+            'You are not allowed to view this DROMIC document.',
+        );
     }
 
     private function syncRequestedFniItems(AssistanceRequest $request, array $data): void

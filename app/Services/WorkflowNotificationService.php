@@ -3,12 +3,94 @@
 namespace App\Services;
 
 use App\Models\AssistanceRequest;
+use App\Models\DispatchPlan;
+use App\Models\RequisitionIssuanceSlip;
 use App\Models\User;
 use App\Notifications\WorkflowNotification;
+use App\Support\LguFniProcessingStatus;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
 
 class WorkflowNotificationService
 {
+    public function notifyRisEpirmaForwarded(RequisitionIssuanceSlip $slip, AssistanceRequest $request): void
+    {
+        $this->notifyRoles(['RROS AA'], [
+            'workflow' => 'RIS e-PIRMA approval', 'action_key' => 'ris_epirma_route_required', 'action_required' => true,
+            'title' => 'RIS ready for e-PIRMA routing',
+            'message' => "{$slip->ris_number} for {$request->reference_number} was forwarded to the RROS Administrative Assistant and is ready for e-PIRMA routing to the concerned signatories, including the ARDO as Approving Authority.",
+            'request_id' => $request->id, 'reference_number' => $request->reference_number,
+            'url' => route('rros.requests.index', ['status' => 'in_progress', 'search' => $request->reference_number]),
+            'meta' => ['ris_id' => $slip->id, 'ris_number' => $slip->ris_number, 'approval_mode' => 'epirma'],
+        ], $slip->ris_epirma_forwarded_by);
+    }
+
+    public function notifyRisEpirmaCompleted(RequisitionIssuanceSlip $slip, AssistanceRequest $request): void
+    {
+        $payload = [
+            'workflow' => 'RIS e-PIRMA approval', 'action_key' => 'ris_epirma_completed', 'action_required' => false,
+            'title' => 'RIS approved through e-PIRMA',
+            'message' => "{$slip->ris_number} for {$request->reference_number} is approved and ready for Dispatch Plan. The printable RIS / DR remains unsigned to prevent combining electronic and wet signatures.",
+            'request_id' => $request->id, 'reference_number' => $request->reference_number,
+            'url' => route('rros.requests.index', ['status' => 'approved', 'search' => $request->reference_number]),
+            'meta' => ['ris_id' => $slip->id, 'ris_number' => $slip->ris_number, 'approval_mode' => 'epirma'],
+        ];
+        $this->notifyRoles(['RROS', 'RROS AA', 'Super Admin'], $payload);
+        $this->notifyUsers($this->lguRecipients($request), [...$payload, 'url' => route('lgu.dromic-requests.index', ['tab' => 'requests', 'focus' => $request->source_lgu_dromic_request_id ?: $request->id])]);
+    }
+
+    public function notifyRisPostMonitoringAssigned(RequisitionIssuanceSlip $slip, AssistanceRequest $request): void
+    {
+        $staff = User::query()->whereKey($slip->prepared_by)->where('is_active', true)->get();
+        if ($staff->isEmpty()) {
+            // Prefer RROS holders; keep RROS AA only as a legacy fallback, not a required tier.
+            $staff = User::query()->role(['RROS'])->where('is_active', true)->get();
+            if ($staff->isEmpty()) {
+                $staff = User::query()->role(['RROS AA'])->where('is_active', true)->get();
+            }
+        }
+
+        $this->notifyUsers($staff, [
+            'workflow' => 'RROS RIS post-monitoring',
+            'action_key' => 'ris_post_monitoring_required',
+            'action_required' => true,
+            'title' => 'Complete RIS delivery and accounting details',
+            'message' => "{$slip->ris_number} for {$request->reference_number} was created. Encode delivery, receipt, accounting, RDS, and CSMR details as soon as they become available.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('rros.requests.index', ['search' => $request->reference_number]),
+            'meta' => ['ris_id' => $slip->id, 'ris_number' => $slip->ris_number],
+        ]);
+    }
+
+    public function notifyRisReadyForSigning(RequisitionIssuanceSlip $slip, AssistanceRequest $request): void
+    {
+        $staff = User::query()
+            ->permission('manage dispatches')
+            ->where('is_active', true)
+            ->get();
+
+        if ($staff->isEmpty()) {
+            $staff = User::query()->role(['RROS', 'Super Admin'])->where('is_active', true)->get();
+        }
+
+        $this->notifyUsers($staff, [
+            'workflow' => 'RROS RIS signing',
+            'action_key' => 'ris_ready_for_signing',
+            'action_required' => true,
+            'title' => 'RIS ready for signing',
+            'message' => "RIS / DR {$slip->ris_number} for {$request->reference_number} was generated and is ready for signing by the dispatch officer (print/sign — e-PIRMA is not used for RIS / DR).",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('rros.requests.index', ['search' => $request->reference_number]),
+            'meta' => [
+                'ris_id' => $slip->id,
+                'ris_number' => $slip->ris_number,
+                'next_process' => 'ris_signing',
+            ],
+        ]);
+    }
+
     public function notifyDrmdAaEndorsed(AssistanceRequest $request): void
     {
         $label = $request->submission_type === 'proposal' ? 'proposal' : 'FNI request';
@@ -28,7 +110,7 @@ class WorkflowNotificationService
 
     public function notifyDrrsAssessmentSubmitted(AssistanceRequest $request): void
     {
-        $this->notifyRoles(['RROS'], [
+        $this->notifyRoles(['RROS', 'RROS AA'], [
             'workflow' => 'DRRS to RROS',
             'action_key' => 'rros_decision_required',
             'action_required' => true,
@@ -38,6 +120,270 @@ class WorkflowNotificationService
             'reference_number' => $request->reference_number,
             'url' => route('requests.index', ['status' => 'actionable']),
         ]);
+    }
+
+    public function notifyDrrsAaEpirmaForwarded(AssistanceRequest $request): void
+    {
+        $this->notifyRoles(['DRRS AA', 'Super Admin'], [
+            'workflow' => 'DRRS PDRC to DRRS AA',
+            'action_key' => 'drrs_aa_epirma_required',
+            'action_required' => true,
+            'title' => 'Assessment forwarded for e-PIRMA routing',
+            'message' => "{$request->reference_number} was forwarded by DRRS PDRC for e-PIRMA routing of the assessment and response letter.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('drrs-aa.epirma.index', ['search' => $request->reference_number]),
+        ], $request->epirma_forwarded_by);
+    }
+
+    public function notifyLguAdvanceResponseLetter(AssistanceRequest $request): void
+    {
+        $this->notifyUsers($this->lguRecipients($request), [
+            'workflow' => 'DSWD to LGU',
+            'action_key' => 'lgu_response_letter_advance_ack_required',
+            'action_required' => true,
+            'title' => 'Acknowledge advance response letter',
+            'message' => "DSWD FO Caraga released an advance copy of the response letter for {$request->reference_number}. Please open it and acknowledge receipt. A signed copy will follow after e-PIRMA routing.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('lgu.dromic-requests.index', ['tab' => 'requests', 'focus' => $request->source_lgu_dromic_request_id ?: $request->id]),
+            'meta' => ['copy' => 'advance'],
+        ]);
+
+        $this->broadcastLguFniProcessingUpdated($request, [
+            'reason' => 'advance_response_letter',
+            'copy' => 'advance',
+        ]);
+    }
+
+    public function notifyRrosEpirmaDocumentSigned(AssistanceRequest $request, string $documentType): void
+    {
+        $label = $documentType === 'response_letter' ? 'response letter' : 'assessment';
+
+        $this->notifyRoles(['RROS', 'RROS AA', 'Super Admin'], [
+            'workflow' => 'DRRS AA e-PIRMA to RROS',
+            'action_key' => 'rros_epirma_document_ready',
+            'action_required' => false,
+            'title' => 'Signed '.ucfirst($label).' ready for review',
+            'message' => "The signed {$label} for {$request->reference_number} is available after e-PIRMA routing.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('rros.requests.index', ['search' => $request->reference_number]),
+            'meta' => ['document_type' => $documentType],
+        ]);
+    }
+
+    /**
+     * Notify the DRRS PDRC forwarder / assessment actor when an e-PIRMA document finishes signing.
+     */
+    public function notifyPdrcEpirmaDocumentSigned(AssistanceRequest $request, string $documentType): void
+    {
+        $label = $documentType === 'response_letter' ? 'response letter' : 'assessment';
+        $bothComplete = filled($request->epirma_assessment_signed_at)
+            && filled($request->epirma_response_letter_signed_at);
+        $documentPhrase = $bothComplete
+            ? 'assessment and response letter'
+            : $label;
+        $title = $bothComplete
+            ? 'e-PIRMA routing completed'
+            : 'Signed '.ucfirst($label).' ready';
+
+        $recipients = collect([
+            $request->epirma_forwarded_by,
+            $request->assessment_acted_by,
+        ])
+            ->filter(fn ($id): bool => is_numeric($id) && (int) $id > 0)
+            ->map(fn ($id): int => (int) $id)
+            ->unique()
+            ->values();
+
+        $users = $recipients->isNotEmpty()
+            ? User::query()->whereIn('id', $recipients->all())->where('is_active', true)->get()
+            : collect();
+
+        if ($users->isEmpty()) {
+            $aor = app(AorCoverageService::class)->ownersForRequest($request, 'DRRS');
+            $users = $aor->isNotEmpty()
+                ? $aor
+                : User::query()->role(['DRRS'])->where('is_active', true)->get();
+        }
+
+        $this->notifyUsers($users, [
+            'workflow' => 'DRRS AA e-PIRMA to DRRS PDRC',
+            'action_key' => 'drrs_pdrc_epirma_document_signed',
+            'action_required' => false,
+            'title' => $title,
+            'message' => "The signed {$documentPhrase} for {$request->reference_number} "
+                .($bothComplete ? 'completed e-PIRMA routing.' : 'is available after e-PIRMA routing.'),
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('requests.assessment', $request),
+            'meta' => [
+                'document_type' => $documentType,
+                'both_complete' => $bothComplete,
+            ],
+        ]);
+    }
+
+    /**
+     * Push live e-PIRMA document/queue updates to DRRS AA and related actors.
+     *
+     * @param  array<string, mixed>  $meta
+     */
+    public function broadcastEpirmaStatusChanged(AssistanceRequest $request, array $meta = []): void
+    {
+        $userIds = User::role(['DRRS AA', 'Super Admin', 'DRRS', 'RROS', 'RROS AA'])
+            ->where('is_active', true)
+            ->pluck('id')
+            ->merge(
+                User::permission('route epirma documents')
+                    ->where('is_active', true)
+                    ->pluck('id')
+            )
+            ->merge([
+                $request->epirma_forwarded_by,
+                $request->assessment_acted_by,
+                $request->encoded_by,
+            ])
+            ->filter(fn ($id): bool => is_numeric($id) && (int) $id > 0)
+            ->map(fn ($id): int => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        app(RealtimePublisher::class)->usersChanged($userIds, 'epirma.status.changed', array_merge([
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'epirma_aa_status' => $request->epirma_aa_status,
+            'epirma_status' => $request->epirma_status,
+            'assessment_status' => $request->assessment_status,
+        ], $meta));
+    }
+
+    /**
+     * Push live FNI request field updates (e.g. Request DRN) to DRRS / related actors.
+     *
+     * @param  array<string, mixed>  $meta
+     */
+    public function broadcastRequestUpdated(AssistanceRequest $request, array $meta = []): void
+    {
+        $userIds = User::query()
+            ->role(['DRRS', 'DRRS AA', 'DRMD AA', 'Super Admin', 'RROS'])
+            ->where('is_active', true)
+            ->pluck('id')
+            ->merge([
+                $request->encoded_by,
+                $request->assessment_acted_by,
+                $request->epirma_forwarded_by,
+                $request->drmd_assigned_to ?? null,
+            ])
+            ->filter(fn ($id): bool => is_numeric($id) && (int) $id > 0)
+            ->map(fn ($id): int => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        app(RealtimePublisher::class)->usersChanged($userIds, 'request.updated', array_merge([
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'request_drn' => $request->request_drn,
+            'status' => $request->status,
+            'assessment_status' => $request->assessment_status,
+            'endorsed_to_drrs' => (bool) $request->endorsed_to_drrs,
+        ], $meta));
+
+        // Status / field changes that affect LGU FNI PROCESSING without a dedicated notification.
+        $this->broadcastLguFniProcessingUpdated($request, array_merge([
+            'reason' => 'request_updated',
+        ], $meta));
+    }
+
+    /**
+     * Push live FNI processing / response-letter column updates to the concerned LGU users.
+     *
+     * @param  array<string, mixed>  $meta
+     */
+    public function broadcastLguFniProcessingUpdated(AssistanceRequest $request, array $meta = []): void
+    {
+        $userIds = $this->lguRecipients($request)
+            ->pluck('id')
+            ->filter(fn ($id): bool => is_numeric($id) && (int) $id > 0)
+            ->map(fn ($id): int => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        if ($userIds === []) {
+            return;
+        }
+
+        $hasAdvance = filled($request->lgu_response_letter_advance_sent_at)
+            && filled($request->lgu_response_letter_advance_path);
+        $hasSigned = filled($request->epirma_response_letter_signed_at)
+            && filled($request->lgu_response_letter_sent_at);
+        $processing = LguFniProcessingStatus::resolve($request, $hasAdvance, $hasSigned);
+
+        app(RealtimePublisher::class)->usersChanged($userIds, 'lgu.fni.processing.updated', array_merge([
+            'request_id' => $request->id,
+            'source_lgu_dromic_request_id' => $request->source_lgu_dromic_request_id,
+            'reference_number' => $request->reference_number,
+            'lgu_psgc_code' => $request->lgu_psgc_code,
+            'status' => $request->status,
+            'processing_key' => $processing['key'],
+            'processing_label' => $processing['label'],
+            'has_advance' => $hasAdvance,
+            'has_signed' => $hasSigned,
+            'advance_acked_at' => optional($request->lgu_response_letter_advance_acked_at)?->toIso8601String(),
+            'signed_acked_at' => optional($request->lgu_response_letter_acked_at)?->toIso8601String(),
+        ], $meta));
+    }
+
+    public function notifyLguSignedResponseLetter(AssistanceRequest $request): void
+    {
+        $this->notifyUsers($this->lguRecipients($request), [
+            'workflow' => 'DSWD to LGU',
+            'action_key' => 'lgu_response_letter_ack_required',
+            'action_required' => true,
+            'title' => 'Acknowledge signed response letter',
+            'message' => "DSWD FO Caraga released the signed response letter for {$request->reference_number}. Please open it and acknowledge receipt.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('lgu.dromic-requests.index', ['tab' => 'requests', 'focus' => $request->source_lgu_dromic_request_id ?: $request->id]),
+            'meta' => ['copy' => 'signed'],
+        ]);
+
+        $this->broadcastLguFniProcessingUpdated($request, [
+            'reason' => 'signed_response_letter',
+            'copy' => 'signed',
+        ]);
+    }
+
+    public function notifyDrrsAaLguAdvanceAcknowledged(AssistanceRequest $request): void
+    {
+        $this->notifyRoles(['DRRS AA', 'DRRS', 'Super Admin'], [
+            'workflow' => 'LGU acknowledgement',
+            'action_key' => 'lgu_response_letter_advance_acked',
+            'action_required' => false,
+            'title' => 'LGU acknowledged advance response letter',
+            'message' => "{$request->requesting_agency} acknowledged receipt of the advance response letter for {$request->reference_number}.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('requests.assessment', $request),
+        ], $request->lgu_response_letter_advance_acked_by);
+    }
+
+    public function notifyDrrsAaLguAcknowledged(AssistanceRequest $request): void
+    {
+        $this->notifyRoles(['DRRS AA', 'DRRS', 'RROS', 'Super Admin'], [
+            'workflow' => 'LGU acknowledgement',
+            'action_key' => 'lgu_response_letter_acked',
+            'action_required' => false,
+            'title' => 'LGU acknowledged signed response letter',
+            'message' => "{$request->requesting_agency} acknowledged receipt of the signed response letter for {$request->reference_number}.",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('requests.assessment', $request),
+        ], $request->lgu_response_letter_acked_by);
     }
 
     public function notifyRrosDecisionRecorded(AssistanceRequest $request): void
@@ -83,6 +429,180 @@ class WorkflowNotificationService
         ]);
     }
 
+    public function notifyDispatchStatusChanged(
+        AssistanceRequest $request,
+        DispatchPlan $dispatch,
+        ?string $previousStatus,
+        array $previousData = [],
+    ): void {
+        $status = (string) $dispatch->status;
+        $url = route('dispatches.index', [
+            'dispatch_id' => $dispatch->id,
+            'bucket' => $dispatch->bucket(),
+        ]);
+
+        if ($previousStatus === null || $previousStatus === $status) {
+            $staff = User::query()->permission('manage dispatches')->where('is_active', true)->get();
+            if ($staff->isEmpty()) {
+                $staff = User::query()->role(['RROS', 'Super Admin'])->where('is_active', true)->get();
+            }
+
+            $this->notifyUsers($staff, [
+                'workflow' => 'RROS Dispatch Plan',
+                'action_key' => 'dispatch_plan_updated',
+                'action_required' => ! in_array($status, DispatchPlan::COMPLETED, true),
+                'title' => $previousStatus === null ? 'Dispatch Plan created' : 'Dispatch Plan updated',
+                'message' => "{$dispatch->dispatch_number} for {$request->reference_number} is now {$this->dispatchStatusLabel($status)}.",
+                'request_id' => $request->id,
+                'reference_number' => $request->reference_number,
+                'url' => $url,
+                'meta' => [
+                    'dispatch_id' => $dispatch->id,
+                    'status' => $status,
+                ],
+            ]);
+        } else {
+            $staff = User::query()->permission('manage dispatches')->where('is_active', true)->get();
+            if ($staff->isEmpty()) {
+                $staff = User::query()->role(['RROS', 'Super Admin'])->where('is_active', true)->get();
+            }
+
+            $this->notifyUsers($staff, [
+                'workflow' => 'RROS Dispatch Plan',
+                'action_key' => 'dispatch_plan_status_changed',
+                'action_required' => ! in_array($status, DispatchPlan::COMPLETED, true),
+                'title' => 'Dispatch Plan status changed',
+                'message' => "{$dispatch->dispatch_number} for {$request->reference_number}: {$this->dispatchStatusLabel($previousStatus)} → {$this->dispatchStatusLabel($status)}.",
+                'request_id' => $request->id,
+                'reference_number' => $request->reference_number,
+                'url' => $url,
+                'meta' => [
+                    'dispatch_id' => $dispatch->id,
+                    'status' => $status,
+                    'previous_status' => $previousStatus,
+                ],
+            ]);
+        }
+
+        if (in_array($status, [DispatchPlan::STATUS_RELEASED, DispatchPlan::STATUS_IN_TRANSIT], true)
+            && ! in_array((string) $previousStatus, [DispatchPlan::STATUS_RELEASED, DispatchPlan::STATUS_IN_TRANSIT, DispatchPlan::STATUS_RECEIVED], true)
+        ) {
+            $this->notifyDispatchCreated($request);
+        }
+
+        if ($status === DispatchPlan::STATUS_RECEIVED && $previousStatus !== DispatchPlan::STATUS_RECEIVED) {
+            $replacementRequired = $dispatch->items()
+                ->whereIn('variance_disposition', DispatchPlan::REPLACEMENT_REQUIRED_DISPOSITIONS)
+                ->whereRaw('COALESCE(allocated_quantity, 0) > COALESCE(received_quantity, 0)')
+                ->exists();
+            $this->notifyRoles(['DRIMS', 'DRRS'], [
+                'workflow' => 'RROS Dispatch Plan',
+                'action_key' => 'dispatch_plan_received',
+                'action_required' => $replacementRequired,
+                'title' => $replacementRequired ? 'Partial delivery requires replacement' : 'Goods received by LGU',
+                'message' => $replacementRequired
+                    ? "{$dispatch->dispatch_number} for {$request->reference_number} was partially received. Deferred, returned, or cancelled quantities must be delivered through a follow-up dispatch before the RIS can be completed."
+                    : "{$dispatch->dispatch_number} for {$request->reference_number} was acknowledged as received by the LGU.",
+                'request_id' => $request->id,
+                'reference_number' => $request->reference_number,
+                'url' => $url,
+                'meta' => ['dispatch_id' => $dispatch->id, 'status' => $status],
+            ]);
+        }
+
+        $notifiableStatuses = [
+            DispatchPlan::STATUS_PLANNED,
+            DispatchPlan::STATUS_RELEASED,
+            DispatchPlan::STATUS_IN_TRANSIT,
+            DispatchPlan::STATUS_RECEIVED,
+        ];
+        $returnsChanged = $status === DispatchPlan::STATUS_RECEIVED
+            && $this->dispatchReturnsChanged($dispatch, $previousData);
+        $returnsOnlyUpdate = $previousStatus === $status && $returnsChanged;
+        if (in_array($status, $notifiableStatuses, true)
+            && ($previousStatus !== $status || $returnsChanged)
+        ) {
+            $escorts = $this->assignedDispatchEscorts($dispatch);
+            $title = $returnsOnlyUpdate
+                ? 'Dispatch returns/cancellations updated'
+                : match ($status) {
+                    DispatchPlan::STATUS_PLANNED => 'Delivery assignment ready for release',
+                    DispatchPlan::STATUS_RELEASED => 'Assigned delivery released',
+                    DispatchPlan::STATUS_IN_TRANSIT => 'Assigned delivery is in transit',
+                    DispatchPlan::STATUS_RECEIVED => 'Assigned delivery received by LGU',
+                    default => 'Assigned delivery updated',
+                };
+            $message = $returnsOnlyUpdate
+                ? "{$dispatch->dispatch_number} for {$request->reference_number} has updated returned/cancelled item details."
+                : "{$dispatch->dispatch_number} for {$request->reference_number} is now {$this->dispatchStatusLabel($status)}."
+                    .($returnsChanged ? ' Returned/cancelled item details are included.' : '');
+
+            $this->notifyUsers($escorts, [
+                'workflow' => 'Delivery Escort Workspace',
+                'action_key' => $returnsOnlyUpdate
+                    ? 'dispatch_returns_updated'
+                    : "delivery_escort_{$status}",
+                'action_required' => ! in_array($status, DispatchPlan::COMPLETED, true),
+                'title' => $title,
+                'message' => $message,
+                'request_id' => $request->id,
+                'reference_number' => $request->reference_number,
+                'url' => route('delivery-escort.index', [
+                    'dispatch_id' => $dispatch->id,
+                    'bucket' => $dispatch->bucket(),
+                ]),
+                'meta' => [
+                    'dispatch_id' => $dispatch->id,
+                    'status' => $status,
+                    'has_returns_or_cancellations' => $returnsChanged,
+                ],
+            ]);
+        }
+    }
+
+    private function assignedDispatchEscorts(DispatchPlan $dispatch): Collection
+    {
+        $vehicles = collect($dispatch->resolvedVehicleDetails())
+            ->filter(fn (array $vehicle): bool => (bool) ($vehicle['has_dswd_escort'] ?? false));
+        $idNumbers = $vehicles->pluck('escort_id_number')->filter()->map(
+            fn ($value): string => Str::lower(trim((string) $value))
+        )->unique();
+        $names = $vehicles->pluck('escort_name')->filter()->map(
+            fn ($value): string => Str::lower(preg_replace('/\s+/u', ' ', trim((string) $value)) ?? '')
+        )->unique();
+
+        return User::query()->where('is_active', true)->get()->filter(function (User $user) use ($idNumbers, $names): bool {
+            $userId = Str::lower(trim((string) $user->id_number));
+            $userName = Str::lower(preg_replace('/\s+/u', ' ', trim((string) $user->name)) ?? '');
+
+            return ($userId !== '' && $idNumbers->contains($userId))
+                || ($userName !== '' && $names->contains($userName));
+        })->values();
+    }
+
+    private function dispatchReturnsChanged(DispatchPlan $dispatch, array $previousData): bool
+    {
+        foreach (['has_returned_items', 'returned_particulars', 'returned_quantity', 'returned_reason'] as $field) {
+            if (($previousData[$field] ?? null) != $dispatch->{$field}) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function dispatchStatusLabel(string $status): string
+    {
+        return match ($status) {
+            DispatchPlan::STATUS_DRAFT => 'Draft',
+            DispatchPlan::STATUS_PLANNED => 'Planned',
+            DispatchPlan::STATUS_RELEASED => 'Released',
+            DispatchPlan::STATUS_IN_TRANSIT => 'In Transit',
+            DispatchPlan::STATUS_RECEIVED => 'Received',
+            default => Str::headline($status),
+        };
+    }
+
     public function notifyDromicCreated(AssistanceRequest $request): void
     {
         $this->notifyUsers($this->originators($request), [
@@ -114,10 +634,54 @@ class WorkflowNotificationService
 
     public function notifyLguReportSubmitted(AssistanceRequest $request, bool $signedComplete): void
     {
-        $hasReliefRequest = (bool) data_get($request->lgu_dromic_payload, 'has_relief_request');
+        $hasReliefRequest = (bool) data_get($request->lgu_dromic_payload, 'has_relief_request')
+            || filled($request->lgu_relief_request_reference);
         $copyLabel = $signedComplete ? 'with complete signed copies' : 'as an advance copy';
+        $aor = app(AorCoverageService::class);
 
-        $this->notifyRoles(['DRRS', 'DRIMS', 'OCD Caraga', 'Super Admin'], [
+        $drimsRecipients = $aor->ownersForRequest($request, 'DRIMS');
+        if ($drimsRecipients->isEmpty()) {
+            $drimsRecipients = User::query()->role(['DRIMS', 'Super Admin'])->where('is_active', true)->get();
+        }
+        $this->notifyUsers($drimsRecipients, [
+            'workflow' => 'LGU DROMIC reporting',
+            'action_key' => 'drims_dromic_ack_required',
+            'action_required' => blank($request->lgu_dromic_acked_at),
+            'title' => $signedComplete ? 'Acknowledge signed LGU DROMIC report' : 'Acknowledge LGU DROMIC advance copy',
+            'message' => "{$request->requesting_agency} sent {$request->reference_number} {$copyLabel}. Please open and acknowledge receipt (AOR).",
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('dromic.lgu-reports', ['tab' => 'reports', 'search' => $request->reference_number]),
+            'meta' => [
+                'has_relief_request' => $hasReliefRequest,
+                'signed_copy_complete' => $signedComplete,
+                'document' => 'dromic_report',
+            ],
+        ]);
+
+        if ($hasReliefRequest) {
+            $drrsRecipients = $aor->ownersForRequest($request, 'DRRS');
+            if ($drrsRecipients->isEmpty()) {
+                $drrsRecipients = User::query()->role(['DRRS', 'Super Admin'])->where('is_active', true)->get();
+            }
+            $this->notifyUsers($drrsRecipients, [
+                'workflow' => 'LGU relief request letter',
+                'action_key' => 'drrs_relief_request_ack_required',
+                'action_required' => blank($request->lgu_relief_acked_at),
+                'title' => $signedComplete ? 'Acknowledge signed LGU request letter' : 'Acknowledge LGU request letter (advance)',
+                'message' => "{$request->requesting_agency} submitted a relief augmentation request letter with {$request->reference_number}. Please open and acknowledge receipt (AOR).",
+                'request_id' => $request->id,
+                'reference_number' => $request->reference_number,
+                'url' => route('dromic.lgu-reports', ['tab' => 'requests', 'search' => $request->lgu_relief_request_reference ?: $request->reference_number]),
+                'meta' => [
+                    'has_relief_request' => true,
+                    'signed_copy_complete' => $signedComplete,
+                    'document' => 'request_letter',
+                ],
+            ]);
+        }
+
+        $this->notifyRoles(['OCD Caraga', 'Super Admin'], [
             'workflow' => 'LGU DROMIC reporting',
             'action_key' => $signedComplete ? 'lgu_dromic_submitted_complete' : 'lgu_dromic_signed_copy_pending',
             'action_required' => ! $signedComplete,
@@ -131,7 +695,6 @@ class WorkflowNotificationService
                 'signed_copy_complete' => $signedComplete,
             ],
         ], $request->lgu_submitted_by);
-
     }
 
     public function notifyLguDromicReviewComment(AssistanceRequest $request, string $reviewer): void
@@ -439,5 +1002,43 @@ class WorkflowNotificationService
     private function originators(AssistanceRequest $request): Collection
     {
         return collect([$request->encoder, $request->lguSubmitter]);
+    }
+
+    private function lguRecipients(AssistanceRequest $request): Collection
+    {
+        $users = collect();
+
+        $source = $request->relationLoaded('sourceLguDromicReport')
+            ? $request->sourceLguDromicReport
+            : $request->sourceLguDromicReport()->with('lguSubmitter')->first();
+
+        if ($source) {
+            $users->push($source->lguSubmitter ?: $source->encoder);
+            if (filled($source->lgu_psgc_code)) {
+                $users = $users->merge(
+                    User::query()
+                        ->role('LGU')
+                        ->where('is_active', true)
+                        ->where('lgu_psgc_code', $source->lgu_psgc_code)
+                        ->get()
+                );
+            }
+        }
+
+        if (filled($request->lgu_psgc_code)) {
+            $users = $users->merge(
+                User::query()
+                    ->role('LGU')
+                    ->where('is_active', true)
+                    ->where('lgu_psgc_code', $request->lgu_psgc_code)
+                    ->get()
+            );
+        }
+
+        $users = $users->merge($this->originators($request)->filter(
+            fn (?User $user): bool => $user !== null && $user->hasRole('LGU')
+        ));
+
+        return $users->filter()->unique('id')->values();
     }
 }

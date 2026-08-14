@@ -7,7 +7,7 @@ import SignedPdfPreview from '@/Components/SignedPdfPreview';
 import DromicReportStatus, { CorrectedVersionMark, DromicAdvanceCopyMark, DromicSubmissionMark, DromicValidationMark, ReliefRequestMark, RequestSubmissionMark, RequestValidationMark, StatusLegend } from '@/Components/DromicReportStatus';
 import { formatDate, formatDateTime } from '@/Utils/dateFormat';
 import DrrsRequestsWorkspaceTabs from '@/Components/DrrsRequestsWorkspaceTabs';
-import SystemTabs from '@/Components/SystemTabs';
+import SectionTabs from '@/Components/SectionTabs';
 import ReliefAssessmentGateBanner from '@/Components/ReliefAssessmentGateBanner';
 
 export default function LguReports({ reports, incidentGroups = [], activeTab = 'incidents', filters = {}, reportDashboard = {}, requestDashboard = {}, canReviewDromic = false, canReviewRelief = false, reliefAssessmentGate = null }) {
@@ -33,6 +33,18 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
         }
         setReviewReport({ report, kind });
     };
+    const acknowledgeReceipt = async (report, kind) => {
+        try {
+            await window.axios.patch(`/lgu/dromic-sitrep/${report.id}/document-viewed`, { kind }, { headers: { Accept: 'application/json' }, withXSRFToken: true });
+            router.reload({ only: ['reports'], preserveScroll: true });
+        } catch (error) {
+            const payload = error?.response?.data;
+            const serverMessage = typeof payload?.message === 'string' && payload.message.trim()
+                ? payload.message.trim()
+                : (typeof payload?.error === 'string' && payload.error.trim() ? payload.error.trim() : null);
+            window.alert(serverMessage || 'Unable to acknowledge receipt for this document.');
+        }
+    };
 
     return (
         <AppLayout title="LGU DROMIC Reports">
@@ -45,22 +57,26 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
                     context="requests"
                 />
             )}
-            <Card className="rounded-t-none">
-                <div className="border-b border-slate-200 p-5 dark:border-zinc-800">
+            <Card className="rounded-t-none border-t-0 p-0 shadow-none">
+                <div className="px-5 pt-5">
                     <p className="text-xs font-black uppercase tracking-wide text-emerald-700">Received LGU Reports</p>
                     <h1 className="mt-1 text-2xl font-black">LGU DROMIC / Situational Reports</h1>
                     <p className="mt-1 text-sm text-slate-500">Review DROMIC / SitRep completeness separately from the Request Letter (Relief Augmentation).</p>
-                    <SystemTabs
-                        active={activeTab}
-                        ariaLabel="LGU DROMIC report views"
-                        className="mt-4 w-fit"
-                        items={[
-                            { key: 'incidents', label: 'All Incidents', icon: ListChecks, onClick: () => openTab('incidents') },
-                            { key: 'reports', label: 'Reports', icon: FileCheck2, onClick: () => openTab('reports') },
-                            { key: 'requests', label: 'Requests', icon: FilePlus2, onClick: () => openTab('requests') },
-                        ]}
-                    />
                 </div>
+                <SectionTabs
+                    label="LGU Report Views"
+                    appearance="framed"
+                    className="mt-4"
+                    contentClassName="px-5"
+                    value={activeTab}
+                    onChange={(tab) => openTab(tab)}
+                    ariaLabel="LGU DROMIC report views"
+                    tabs={[
+                        { id: 'incidents', label: 'All Incidents', icon: ListChecks },
+                        { id: 'reports', label: 'Reports', icon: FileCheck2 },
+                        { id: 'requests', label: 'Requests', icon: FilePlus2 },
+                    ]}
+                />
                 {summaryFiltersActive && <div className="flex items-center gap-2 border-b border-blue-200 bg-blue-50 px-4 py-2.5 text-xs font-bold text-blue-900"><Search className="h-4 w-4 shrink-0" />Filters are active. Summary cards reflect only the filtered table results.</div>}
                 <div className="grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3 border-b border-slate-200 bg-slate-50/70 p-4 dark:border-zinc-800 dark:bg-zinc-950/30">
                     {(activeTab === 'incidents' ? [
@@ -166,9 +182,21 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
                                 <div className="flex flex-wrap items-center gap-2">
                                     {activeTab === 'reports' && canReviewDromic && <button type="button" title="Preview the narrative and encoded data, compare signed copies, and record validation" aria-label="Preview and review DROMIC report" onClick={() => openReview(report, 'dromic')} className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-emerald-700 text-white"><ClipboardCheck className="h-4 w-4" /></button>}
                                     {activeTab === 'requests' && canReviewRelief && <button type="button" title="Preview the request letter and record DRRS validation" aria-label="Preview and review request letter" disabled={!report.lgu_signed_request_path} onClick={() => openReview(report, 'relief')} className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-violet-700 text-white disabled:cursor-not-allowed disabled:opacity-40"><FileCheck2 className="h-4 w-4" /></button>}
+                                    {activeTab === 'reports' && report.can_acknowledge_report && !report.acked_at && (
+                                        <button type="button" title="Acknowledge receipt of this DROMIC report (AOR)" aria-label="Acknowledge DROMIC report receipt" onClick={() => acknowledgeReceipt(report, 'report')} className="inline-flex h-8 items-center gap-1 rounded-md border border-sky-300 bg-sky-50 px-2 text-[11px] font-black text-sky-900">
+                                            <Eye className="h-3.5 w-3.5" /> Ack
+                                        </button>
+                                    )}
+                                    {activeTab === 'requests' && report.can_acknowledge_request && !report.relief_acked_at && (
+                                        <button type="button" title="Acknowledge receipt of this request letter (AOR)" aria-label="Acknowledge request letter receipt" onClick={() => acknowledgeReceipt(report, 'request')} className="inline-flex h-8 items-center gap-1 rounded-md border border-sky-300 bg-sky-50 px-2 text-[11px] font-black text-sky-900">
+                                            <Eye className="h-3.5 w-3.5" /> Ack
+                                        </button>
+                                    )}
                                     {(report.signed_document_versions || []).some((version) => version.kind === (activeTab === 'requests' ? 'request' : 'report')) && <button type="button" title="Preview previous signed document versions" aria-label="View signed document history" onClick={() => setHistoryPreview({ report, kind: activeTab === 'requests' ? 'request' : 'report' })} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-700"><History className="h-4 w-4" /></button>}
                                     {activeTab === 'requests' && !canReviewRelief && <span className="text-[11px] font-semibold text-slate-500">DRRS review only</span>}
                                 </div>
+                                {activeTab === 'reports' && report.acked_at && <p className="mt-1 text-[11px] font-bold text-emerald-700">Acked by {report.acked_by} · {formatDateTime(report.acked_at)}</p>}
+                                {activeTab === 'requests' && report.relief_acked_at && <p className="mt-1 text-[11px] font-bold text-emerald-700">Acked by {report.relief_acked_by} · {formatDateTime(report.relief_acked_at)}</p>}
                             </td>
                         </tr>
                     ))}
@@ -426,20 +454,38 @@ function ReviewOutcomeModal({ report, kind, onClose }) {
                 <div className={`grid min-h-0 flex-1 ${reviewPanelCollapsed ? 'grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_460px]'}`}>
                     <div className="flex min-h-[45vh] min-w-0 flex-col bg-slate-100 dark:bg-zinc-950">
                         {!isRelief && !reviewControlsCollapsed && <div className="shrink-0 border-b bg-white p-3 dark:bg-zinc-900">
-                            <SystemTabs
-                                active={reviewContentTab}
+                            <SectionTabs
+                                appearance="plain"
+                                value={reviewContentTab}
+                                onChange={(tab) => {
+                                    setReviewContentTab(tab);
+                                    if (tab === 'narrative') setReviewCopyTab('advance');
+                                }}
                                 ariaLabel="Report review format"
-                                className="w-fit"
-                                items={[
-                                    { key: 'narrative', label: 'Narrative Report', icon: FileCheck2, onClick: () => { setReviewContentTab('narrative'); setReviewCopyTab('advance'); } },
-                                    { key: 'encoded', label: 'Encoded Data', icon: ListChecks, onClick: () => setReviewContentTab('encoded') },
+                                tabs={[
+                                    { id: 'narrative', label: 'Narrative Report', icon: FileCheck2 },
+                                    { id: 'encoded', label: 'Encoded Data', icon: ListChecks },
                                 ]}
                             />
                         </div>}
                         {!isRelief && reviewContentTab === 'encoded'
                             ? <ReadonlyDromicReportModal report={report} embedded />
                             : <>
-                                {hasSignedComparison && !reviewControlsCollapsed && <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-white p-3 dark:bg-zinc-900"><span className="mr-1 text-[10px] font-black uppercase tracking-wide text-slate-500">Document copy:</span><SystemTabs active={reviewCopyTab} ariaLabel="Document copy" subtle items={[{ key: 'advance', label: 'Advance Copy', icon: FileCheck2, title: 'View the advance copy generated from the encoded report data', onClick: () => setReviewCopyTab('advance') }, { key: 'signed', label: 'Signed Copy', icon: UploadCloud, title: 'View the signed PDF submitted by the LGU', onClick: () => setReviewCopyTab('signed') }]} /></div>}
+                                {hasSignedComparison && !reviewControlsCollapsed && (
+                                    <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-white p-3 dark:bg-zinc-900">
+                                        <SectionTabs
+                                            label="Document copy"
+                                            appearance="plain"
+                                            value={reviewCopyTab}
+                                            onChange={setReviewCopyTab}
+                                            ariaLabel="Document copy"
+                                            tabs={[
+                                                { id: 'advance', label: 'Advance Copy', icon: FileCheck2, title: 'View the advance copy generated from the encoded report data' },
+                                                { id: 'signed', label: 'Signed Copy', icon: UploadCloud, title: 'View the signed PDF submitted by the LGU' },
+                                            ]}
+                                        />
+                                    </div>
+                                )}
                                 {isRelief || (reviewCopyTab === 'signed' && report.lgu_signed_report_path) ? (
                                     <SignedPdfPreview
                                         src={isRelief
@@ -666,7 +712,7 @@ function ValidationBadge({ report }) {
         superseded: ['DROMIC document · Superseded by corrected submission', 'bg-slate-100 text-slate-700', CheckCircle2],
     };
     const [label, classes, Icon] = config[status] || config.pending_review;
-    return <div><span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-black uppercase ${classes}`}><Icon className="h-3.5 w-3.5" />{label}</span>{report.seen_at && <p className="mt-1 inline-flex items-center gap-1 text-[11px] font-bold text-sky-700"><Eye className="h-3.5 w-3.5" />Opened by {report.seen_by || 'DSWD recipient'} · {formatDate(report.seen_at)}</p>}{report.validation_note && <p className="mt-2 line-clamp-2 text-xs font-semibold leading-5" title={report.validation_note}>{report.validation_note}</p>}{report.reviewer?.name && <p className="mt-1 text-[11px] text-slate-500">{report.reviewer.name}{report.reviewer.office ? ` · ${report.reviewer.office}` : ''} · {formatDate(report.reviewed_at)}</p>}</div>;
+    return <div><span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-black uppercase ${classes}`}><Icon className="h-3.5 w-3.5" />{label}</span>{report.acked_at ? <p className="mt-1 inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5" />Acknowledged by {report.acked_by || report.seen_by || 'DSWD recipient'} · {formatDate(report.acked_at)}</p> : (report.seen_at && <p className="mt-1 inline-flex items-center gap-1 text-[11px] font-bold text-sky-700"><Eye className="h-3.5 w-3.5" />Opened by {report.seen_by || 'DSWD recipient'} · {formatDate(report.seen_at)}</p>)}{report.validation_note && <p className="mt-2 line-clamp-2 text-xs font-semibold leading-5" title={report.validation_note}>{report.validation_note}</p>}{report.reviewer?.name && <p className="mt-1 text-[11px] text-slate-500">{report.reviewer.name}{report.reviewer.office ? ` · ${report.reviewer.office}` : ''} · {formatDate(report.reviewed_at)}</p>}</div>;
 }
 
 function AugmentationBadge({ report, showWorkflow = true }) {
@@ -688,7 +734,7 @@ function AugmentationBadge({ report, showWorkflow = true }) {
         routed_to_drrs: 'Processing · Routed to DRRS',
     }[report.augmentation_status] || 'Processing · Request submitted';
     const [label, classes, Icon] = validationConfig[report.relief_validation_status] || validationConfig.pending_review;
-    return <div><span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-black uppercase ${classes}`}><Icon className="h-3.5 w-3.5" />{label}</span>{report.relief_seen_at && <p className="mt-1 flex w-full items-center gap-1 text-[11px] font-bold text-sky-700"><Eye className="h-3.5 w-3.5 shrink-0" />Seen by {report.relief_seen_by || 'DRRS recipient'} · {formatDateTime(report.relief_seen_at)}</p>}{showWorkflow && <p className="mt-1 text-[11px] font-bold text-violet-700">{workflow}</p>}{report.relief_validation_note && <p className="mt-2 line-clamp-2 text-xs font-semibold" title={report.relief_validation_note}>{report.relief_validation_note}</p>}{report.relief_reviewer?.name && <p className="mt-1 text-[11px] text-slate-500">{report.relief_reviewer.name} · {formatDateTime(report.relief_reviewed_at)}</p>}{report.relief_request && <p className="mt-1 text-[11px] font-semibold">{report.relief_request.reference_number}</p>}</div>;
+    return <div><span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-black uppercase ${classes}`}><Icon className="h-3.5 w-3.5" />{label}</span>{report.relief_acked_at ? <p className="mt-1 flex w-full items-center gap-1 text-[11px] font-bold text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5 shrink-0" />Acknowledged by {report.relief_acked_by || report.relief_seen_by || 'DRRS recipient'} · {formatDateTime(report.relief_acked_at)}</p> : (report.relief_seen_at && <p className="mt-1 flex w-full items-center gap-1 text-[11px] font-bold text-sky-700"><Eye className="h-3.5 w-3.5 shrink-0" />Seen by {report.relief_seen_by || 'DRRS recipient'} · {formatDateTime(report.relief_seen_at)}</p>)}{showWorkflow && <p className="mt-1 text-[11px] font-bold text-violet-700">{workflow}</p>}{report.relief_validation_note && <p className="mt-2 line-clamp-2 text-xs font-semibold" title={report.relief_validation_note}>{report.relief_validation_note}</p>}{report.relief_reviewer?.name && <p className="mt-1 text-[11px] text-slate-500">{report.relief_reviewer.name} · {formatDateTime(report.relief_reviewed_at)}</p>}{report.relief_request && <p className="mt-1 text-[11px] font-semibold">{report.relief_request.reference_number}</p>}</div>;
 }
 
 function RoutingBadge({ report }) {

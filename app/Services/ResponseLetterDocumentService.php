@@ -6,6 +6,8 @@ use App\Models\AssistanceRequest;
 use App\Models\LguDirectoryEntry;
 use App\Models\OperationalLibraryValue;
 use App\Models\User;
+use App\Support\RequestedGoodsTypeSummary;
+use Illuminate\Support\Carbon;
 use DOMDocument;
 use DOMElement;
 use DOMXPath;
@@ -20,7 +22,15 @@ class ResponseLetterDocumentService
     public function generate(AssistanceRequest $request): array
     {
         $template = $this->templatePath();
-        $request->loadMissing(['requestParty.lguDirectoryEntry.officials', 'requestParty.lguDirectoryEntry.contacts', 'drmdAssignedUser', 'assessmentActor', 'incident']);
+        $request->loadMissing([
+            'requestParty.lguDirectoryEntry.officials',
+            'requestParty.lguDirectoryEntry.contacts',
+            'drmdAssignedUser',
+            'assessmentActor',
+            'incident',
+            'items.fniLibraryItem',
+            'items.inventoryItem',
+        ]);
 
         $directory = storage_path('app/generated-documents');
         if (! is_dir($directory) && ! mkdir($directory, 0775, true) && ! is_dir($directory)) {
@@ -107,6 +117,18 @@ class ResponseLetterDocumentService
             || (blank($responsePurpose) && ($meta['provide_augmentation'] ?? false) === true);
         $incident = $isReliefAugmentation ? ($request->incident?->name ?: 'the reported incident') : null;
         $incidentDate = $request->incident?->incident_date?->format('F j, Y');
+        $incidentRows = collect($meta['incidents'] ?? [])->filter(fn ($row) => is_array($row) && filled($row['incident_type'] ?? null))->values();
+        if ($isReliefAugmentation && $incidentRows->count() > 1) {
+            $incident = 'multiple separate incidents: '.$incidentRows->map(function ($row, $index): string {
+                $date = filled($row['occurrence_at'] ?? null) ? Carbon::parse($row['occurrence_at'])->format('F j, Y') : null;
+                $place = collect([$row['barangay'] ?? null, $row['city_municipality'] ?? null])->filter()->implode(', ');
+
+                return ($index + 1).') '.($row['incident_type'] ?? 'incident')
+                    .($place !== '' ? ' in '.$place : '')
+                    .($date ? ' on '.$date : '');
+            })->implode('; ');
+            $incidentDate = null;
+        }
         $areas = collect($meta['affected_areas'] ?? [])->filter()->values();
         $areaSummary = match (true) {
             $areas->isEmpty() => '',
@@ -120,15 +142,16 @@ class ResponseLetterDocumentService
         $itemSummary = $items->map(function ($item): string {
             $quantity = $item->approved_quantity ?: $item->requested_quantity;
             $unit = strtolower((string) $item->unit);
-            if ((float) $quantity !== 1.0) $unit = match ($unit) { 'box' => 'boxes', 'kit' => 'kits', 'set' => 'sets', 'pack' => 'packs', default => $unit };
+            if ((float) $quantity !== 1.0) {
+                $unit = match ($unit) {
+                    'box' => 'boxes', 'kit' => 'kits', 'set' => 'sets', 'pack' => 'packs', default => $unit
+                };
+            }
+
             return number_format((float) $quantity).' '.$unit.' of '.$item->item_name;
         })->implode(', ');
-        // Opening paragraph: name the requested items only — never the LGU-requested quantities.
-        $requestedItemNames = $items->map(fn ($item): string => trim((string) $item->item_name))
-            ->filter()
-            ->unique(fn (string $name): string => mb_strtolower($name))
-            ->values()
-            ->implode(', ');
+        // Opening paragraph: enumerate FNI type/category labels only — never each item name or quantities.
+        $requestedGoodsTypes = RequestedGoodsTypeSummary::summarize($items);
         $locality = $this->localityReference($request, $lguName, $provinceName, $directory?->lgu_level);
         $socialWorker = $this->responseSocialWorker($request, $meta);
         $workerReference = filled($socialWorker['full_name'])
@@ -146,17 +169,37 @@ class ResponseLetterDocumentService
         $occurrenceClause = $incidentDate
             ? ' which occurred in Caraga Region on '.$incidentDate
             : ' which occurred in Caraga Region';
-        $responseLetterInitials = OperationalLibraryValue::query()
-            ->where('library_type', 'response_letter_initials')
-            ->where('context', 'response_letter')
+        $responseApprover = OperationalLibraryValue::query()
+            ->where('library_type', 'drrs_signatory')
+            ->where('context', 'approved_by')
+            ->where('metadata->document_type', 'response_letter')
             ->where('is_active', true)
             ->orderBy('id')
-            ->value('value') ?: 'JSP/AAA/JLM/1628';
+            ->first();
+        [$savedApproverName, $savedApproverDesignation] = array_pad(explode('|', (string) $responseApprover?->value, 2), 2, '');
+        $responseApproverEmployeeName = trim((string) data_get($responseApprover?->metadata, 'employee_name'));
+        $responseApproverSuffix = trim((string) data_get($responseApprover?->metadata, 'suffix'));
+        $responseApproverName = $responseApproverEmployeeName !== ''
+            ? $responseApproverEmployeeName.($responseApproverSuffix !== '' ? ', '.$responseApproverSuffix : '')
+            : trim($savedApproverName);
+        $responseApproverDesignation = trim((string) (data_get($responseApprover?->metadata, 'designation')
+            ?: data_get($responseApprover?->metadata, 'position')
+            ?: $savedApproverDesignation));
+        $responseLetterInitials = data_get($responseApprover?->metadata, 'initials')
+            ?: OperationalLibraryValue::query()
+                ->where('library_type', 'response_letter_initials')
+                ->where('context', 'response_letter')
+                ->where('is_active', true)
+                ->orderBy('id')
+                ->value('value')
+            ?: '';
         $responseLetterInitials = preg_replace('/\s*\/\s*/', ' / ', trim((string) $responseLetterInitials));
 
         $dateOccurrence = 0;
         foreach ($xpath->query('//w:body//w:p') as $paragraph) {
-            if (! $paragraph instanceof DOMElement) continue;
+            if (! $paragraph instanceof DOMElement) {
+                continue;
+            }
             $text = $this->paragraphText($xpath, $paragraph);
 
             if (str_starts_with(trim($text), 'HON. PABLO YVES')) {
@@ -165,6 +208,7 @@ class ResponseLetterDocumentService
                     ['text' => $recipientPosition, 'breaks_before' => 1, 'bold' => false, 'italic' => false],
                     ['text' => $recipientAddress, 'breaks_before' => 1, 'bold' => false, 'italic' => false],
                 ]);
+
                 continue;
             }
             if (str_starts_with(trim($text), 'ATTENTION:')) {
@@ -173,6 +217,7 @@ class ResponseLetterDocumentService
                     ['text' => $attentionName ?: $request->office_agency_details, 'tab_before' => true, 'bold' => true, 'italic' => false],
                 ]);
                 $this->formatAttentionTabParagraph($document, $xpath, $paragraph);
+
                 continue;
             }
             if (trim($text) === 'CSWDO') {
@@ -180,6 +225,7 @@ class ResponseLetterDocumentService
                     'text' => $attentionPosition ?: 'LSWDO',
                 ]]);
                 $this->formatAttentionDesignationParagraph($document, $xpath, $paragraph);
+
                 continue;
             }
             if (str_starts_with(trim($text), 'Dear Mayor Dumlao:')) {
@@ -193,17 +239,31 @@ class ResponseLetterDocumentService
                 }
                 $segments[] = ['text' => 'Greetings of service excellence and resilience!', 'breaks_before' => 2, 'bold' => false, 'italic' => true];
                 $this->replaceParagraphSegments($document, $xpath, $paragraph, $segments);
+
                 continue;
             }
             if (trim($text) === 'Respectfully yours,') {
                 $this->prependLineBreaks($document, $paragraph, 1);
+
                 continue;
             }
             if (str_starts_with(trim($text), 'MARI- FLOR A. DOLLAGA- LIBANG')) {
-                $this->prependLineBreaks($document, $paragraph, 3);
+                $this->replaceParagraphSegments($document, $xpath, $paragraph, [[
+                    'text' => $responseApproverName ?: trim($text),
+                    'breaks_before' => 3,
+                    'bold' => true,
+                ]]);
+
                 continue;
             }
-            if (preg_match('/^[A-Z]{2,5}\/[A-Z]{2,5}\/[A-Z]{2,5}\/[0-9]+$/', trim($text)) === 1) {
+            if ($responseApproverDesignation !== '' && strcasecmp(trim($text), 'Regional Director') === 0) {
+                $this->replaceParagraphSegments($document, $xpath, $paragraph, [[
+                    'text' => $responseApproverDesignation,
+                ]]);
+
+                continue;
+            }
+            if ($responseLetterInitials !== '' && preg_match('/^[A-Z]{2,5}\/[A-Z]{2,5}\/[A-Z]{2,5}\/[0-9]+$/', trim($text)) === 1) {
                 $this->replaceParagraphSegments($document, $xpath, $paragraph, [[
                     'text' => $responseLetterInitials,
                     'breaks_before' => 3,
@@ -211,20 +271,26 @@ class ResponseLetterDocumentService
                     'font_size' => 8,
                     'italic' => true,
                 ]]);
+
                 continue;
             }
             if (preg_match('/^[A-Z]+\s+\d{1,2},\s+\d{4}$/', trim($text)) === 1) {
                 $dateOccurrence++;
-                if ($dateOccurrence === 2) $this->ensurePageBreakBefore($document, $xpath, $paragraph);
+                if ($dateOccurrence === 2) {
+                    $this->ensurePageBreakBefore($document, $xpath, $paragraph);
+                }
+                // Omit the blank line before the date so countersignee
+                // acronyms stay on page 1 with the signature block.
                 $this->replaceParagraphSegments($document, $xpath, $paragraph, [[
                     'text' => strtoupper(now()->format('F j, Y')),
-                    'breaks_before' => 1,
                 ]]);
+
                 continue;
             }
             if (trim($text) === 'DRN:') {
                 $this->replaceParagraph($document, $xpath, $paragraph, 'DRN: '.($request->response_drn ?: ''));
                 $this->formatDrnParagraph($document, $xpath, $paragraph);
+
                 continue;
             }
 
@@ -232,7 +298,7 @@ class ResponseLetterDocumentService
                 str_starts_with(trim($text), 'This is in reference to your letter requesting') => $isReliefAugmentation
                     ? sprintf(
                         'This is in reference to your letter requesting %s intended for the %s disaster-affected %s in %s due to %s%s%s.',
-                        $requestedItemNames ?: 'Food and Non-Food Items',
+                        $requestedGoodsTypes,
                         number_format((int) ($request->affected_families ?? 0)),
                         (int) ($request->affected_families ?? 0) === 1 ? 'family' : 'families',
                         $locality,
@@ -258,7 +324,9 @@ class ResponseLetterDocumentService
                 default => null,
             };
 
-            if ($replacement !== null) $this->replaceParagraph($document, $xpath, $paragraph, $replacement);
+            if ($replacement !== null) {
+                $this->replaceParagraph($document, $xpath, $paragraph, $replacement);
+            }
         }
 
         $this->compactLetterPages($document, $xpath);
@@ -282,7 +350,9 @@ class ResponseLetterDocumentService
         ]);
 
         foreach ($candidates as $candidate) {
-            if (is_file($candidate)) return $candidate;
+            if (is_file($candidate)) {
+                return $candidate;
+            }
         }
 
         throw new RuntimeException('The official Response Letter.docx template could not be found.');
@@ -290,7 +360,9 @@ class ResponseLetterDocumentService
 
     private function copyTemplate(string $template, string $destination): void
     {
-        if (@copy($template, $destination)) return;
+        if (@copy($template, $destination)) {
+            return;
+        }
 
         if (PHP_OS_FAMILY === 'Windows') {
             $process = new Process([
@@ -300,7 +372,9 @@ class ResponseLetterDocumentService
             ]);
             $process->setTimeout(30);
             $process->run();
-            if ($process->isSuccessful() && is_file($destination)) return;
+            if ($process->isSuccessful() && is_file($destination)) {
+                return;
+            }
         }
 
         throw new RuntimeException('Unable to prepare the official response letter template. Close the template in Word and try again.');
@@ -309,12 +383,16 @@ class ResponseLetterDocumentService
     private function salutation(?string $recipient, ?string $position): string
     {
         $title = str_contains(strtolower((string) $position), 'governor') ? 'Governor' : (str_contains(strtolower((string) $position), 'mayor') ? 'Mayor' : null);
-        if (! $title || blank($recipient)) return 'Dear Sir/Madam:';
+        if (! $title || blank($recipient)) {
+            return 'Dear Sir/Madam:';
+        }
 
         $clean = preg_replace('/^(HON\.?|ATTY\.?|DR\.?)\s+/i', '', trim($recipient));
         $clean = preg_replace('/,.*$/', '', (string) $clean);
         $parts = preg_split('/\s+/', trim((string) $clean));
-        while ($parts && preg_match('/^(JR\.?|SR\.?|II|III|IV)$/i', end($parts))) array_pop($parts);
+        while ($parts && preg_match('/^(JR\.?|SR\.?|II|III|IV)$/i', end($parts))) {
+            array_pop($parts);
+        }
         $surname = $parts ? end($parts) : null;
 
         return $surname ? "Dear {$title} ".str($surname)->lower()->title().':' : "Dear {$title}:";
@@ -323,13 +401,16 @@ class ResponseLetterDocumentService
     private function capitalizedName(?string $value): string
     {
         $value = trim((string) $value);
+
         return $value === '' ? '' : mb_strtoupper($value, 'UTF-8');
     }
 
     private function formattedAddress(?string $value): string
     {
         $value = trim((string) $value);
-        if ($value === '') return '';
+        if ($value === '') {
+            return '';
+        }
         $value = str($value)->lower()->title()->toString();
         $value = preg_replace_callback('/\b(Of|The|And|Del|De|La)\b/u', fn ($match) => strtolower($match[0]), $value);
 
@@ -454,7 +535,9 @@ class ResponseLetterDocumentService
             $paragraph->insertBefore($properties, $paragraph->firstChild);
         }
         foreach (['tabs', 'ind', 'jc', 'keepLines'] as $element) {
-            foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) $properties->removeChild($node);
+            foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) {
+                $properties->removeChild($node);
+            }
         }
         $justification = $document->createElementNS(self::WORD_NS, 'w:jc');
         $justification->setAttributeNS(self::WORD_NS, 'w:val', 'right');
@@ -470,7 +553,9 @@ class ResponseLetterDocumentService
             $paragraph->insertBefore($properties, $paragraph->firstChild);
         }
         foreach (['ind', 'tabs'] as $element) {
-            foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) $properties->removeChild($node);
+            foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) {
+                $properties->removeChild($node);
+            }
         }
         $tabs = $document->createElementNS(self::WORD_NS, 'w:tabs');
         $tab = $document->createElementNS(self::WORD_NS, 'w:tab');
@@ -491,7 +576,9 @@ class ResponseLetterDocumentService
             $paragraph->insertBefore($properties, $paragraph->firstChild);
         }
         foreach (['ind', 'tabs'] as $element) {
-            foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) $properties->removeChild($node);
+            foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) {
+                $properties->removeChild($node);
+            }
         }
         $indent = $document->createElementNS(self::WORD_NS, 'w:ind');
         $indent->setAttributeNS(self::WORD_NS, 'w:left', '1380');
@@ -504,10 +591,14 @@ class ResponseLetterDocumentService
     private function prependLineBreaks(DOMDocument $document, DOMElement $paragraph, int $count): void
     {
         $run = $document->createElementNS(self::WORD_NS, 'w:r');
-        for ($index = 0; $index < $count; $index++) $run->appendChild($document->createElementNS(self::WORD_NS, 'w:br'));
+        for ($index = 0; $index < $count; $index++) {
+            $run->appendChild($document->createElementNS(self::WORD_NS, 'w:br'));
+        }
         $firstContent = null;
         foreach ($paragraph->childNodes as $child) {
-            if ($child instanceof DOMElement && $child->namespaceURI === self::WORD_NS && $child->localName === 'pPr') continue;
+            if ($child instanceof DOMElement && $child->namespaceURI === self::WORD_NS && $child->localName === 'pPr') {
+                continue;
+            }
             $firstContent = $child;
             break;
         }
@@ -517,13 +608,19 @@ class ResponseLetterDocumentService
     private function compactLetterPages(DOMDocument $document, DOMXPath $xpath): void
     {
         foreach (iterator_to_array($xpath->query('//w:body/w:p')) as $paragraph) {
-            if (! $paragraph instanceof DOMElement || trim($this->paragraphText($xpath, $paragraph)) !== '') continue;
-            if ($xpath->query('.//w:drawing|.//w:pict|.//w:br[@w:type="page"]|./w:pPr/w:sectPr', $paragraph)->length > 0) continue;
+            if (! $paragraph instanceof DOMElement || trim($this->paragraphText($xpath, $paragraph)) !== '') {
+                continue;
+            }
+            if ($xpath->query('.//w:drawing|.//w:pict|.//w:br[@w:type="page"]|./w:pPr/w:sectPr', $paragraph)->length > 0) {
+                continue;
+            }
             $paragraph->parentNode?->removeChild($paragraph);
         }
 
         foreach ($xpath->query('//w:body//w:p') as $paragraph) {
-            if (! $paragraph instanceof DOMElement) continue;
+            if (! $paragraph instanceof DOMElement) {
+                continue;
+            }
             $properties = $xpath->query('./w:pPr', $paragraph)->item(0);
             if (! $properties instanceof DOMElement) {
                 $properties = $document->createElementNS(self::WORD_NS, 'w:pPr');
@@ -539,7 +636,9 @@ class ResponseLetterDocumentService
         }
 
         foreach ($xpath->query('//w:sectPr/w:pgMar') as $margins) {
-            if (! $margins instanceof DOMElement) continue;
+            if (! $margins instanceof DOMElement) {
+                continue;
+            }
             // The repeated logo header ends at about 0.8 in. Reserve 0.9 in
             // before body content so page-one DRN and page-two date cannot
             // occupy the logo row.
@@ -580,13 +679,17 @@ class ResponseLetterDocumentService
             $followingPageHeaderXPath = new DOMXPath($followingPageHeaderDocument);
             $drawingId = 50000;
             foreach ($followingPageHeaderXPath->query('//*[local-name()="docPr" or local-name()="cNvPr"]') as $drawing) {
-                if ($drawing instanceof DOMElement) $drawing->setAttribute('id', (string) ++$drawingId);
+                if ($drawing instanceof DOMElement) {
+                    $drawing->setAttribute('id', (string) ++$drawingId);
+                }
             }
             $zip->addFromString('word/header2.xml', $followingPageHeaderDocument->saveXML());
         }
 
         $footer = $zip->getFromName('word/footer3.xml');
-        if ($footer === false) return;
+        if ($footer === false) {
+            return;
+        }
         $document = new DOMDocument('1.0', 'UTF-8');
         $document->preserveWhiteSpace = true;
         $document->loadXML($footer);
@@ -606,7 +709,9 @@ class ResponseLetterDocumentService
     private function rebuildHeaderLogoLayer(DOMDocument $document, DOMXPath $xpath): void
     {
         $header = $document->documentElement;
-        if (! $header instanceof DOMElement) return;
+        if (! $header instanceof DOMElement) {
+            return;
+        }
 
         $logoRuns = [];
         foreach (['rId1', 'rId2'] as $relationshipId) {
@@ -614,11 +719,17 @@ class ResponseLetterDocumentService
             $run = $blip instanceof DOMElement
                 ? $xpath->query('ancestor::*[local-name()="r"][1]', $blip)->item(0)
                 : null;
-            if ($run instanceof DOMElement) $logoRuns[] = $run->cloneNode(true);
+            if ($run instanceof DOMElement) {
+                $logoRuns[] = $run->cloneNode(true);
+            }
         }
-        if (count($logoRuns) !== 2) return;
+        if (count($logoRuns) !== 2) {
+            return;
+        }
 
-        foreach (iterator_to_array($header->childNodes) as $child) $header->removeChild($child);
+        foreach (iterator_to_array($header->childNodes) as $child) {
+            $header->removeChild($child);
+        }
 
         $paragraph = $document->createElementNS(self::WORD_NS, 'w:p');
         $properties = $document->createElementNS(self::WORD_NS, 'w:pPr');
@@ -626,7 +737,9 @@ class ResponseLetterDocumentService
         $spacing->setAttributeNS(self::WORD_NS, 'w:after', '0');
         $properties->appendChild($spacing);
         $paragraph->appendChild($properties);
-        foreach ($logoRuns as $run) $paragraph->appendChild($run);
+        foreach ($logoRuns as $run) {
+            $paragraph->appendChild($run);
+        }
         $header->appendChild($paragraph);
     }
 
@@ -640,15 +753,21 @@ class ResponseLetterDocumentService
         int $height,
     ): void {
         $blip = $xpath->query('//a:blip[@r:embed="'.$relationshipId.'"]')->item(0);
-        if (! $blip instanceof DOMElement) return;
+        if (! $blip instanceof DOMElement) {
+            return;
+        }
 
         $anchor = $xpath->query('ancestor::wp:anchor[1]', $blip)->item(0);
-        if (! $anchor instanceof DOMElement) return;
+        if (! $anchor instanceof DOMElement) {
+            return;
+        }
 
         $positionH = $xpath->query('./wp:positionH', $anchor)->item(0);
         $positionV = $xpath->query('./wp:positionV', $anchor)->item(0);
         $extent = $xpath->query('./wp:extent', $anchor)->item(0);
-        if (! $positionH instanceof DOMElement || ! $positionV instanceof DOMElement || ! $extent instanceof DOMElement) return;
+        if (! $positionH instanceof DOMElement || ! $positionV instanceof DOMElement || ! $extent instanceof DOMElement) {
+            return;
+        }
 
         $anchor->setAttribute('layoutInCell', '0');
         $anchor->setAttribute('allowOverlap', '0');
@@ -660,10 +779,14 @@ class ResponseLetterDocumentService
         $extent->setAttribute('cy', (string) $height);
 
         foreach (iterator_to_array($xpath->query('ancestor::*[local-name()="pic"][1]//a:srcRect', $blip)) as $crop) {
-            foreach (['l', 't', 'r', 'b'] as $attribute) $crop->removeAttribute($attribute);
+            foreach (['l', 't', 'r', 'b'] as $attribute) {
+                $crop->removeAttribute($attribute);
+            }
         }
         foreach ($xpath->query('ancestor::*[local-name()="pic"][1]//a:xfrm/a:ext', $blip) as $shapeExtent) {
-            if (! $shapeExtent instanceof DOMElement) continue;
+            if (! $shapeExtent instanceof DOMElement) {
+                continue;
+            }
             $shapeExtent->setAttribute('cx', (string) $width);
             $shapeExtent->setAttribute('cy', (string) $height);
         }
@@ -671,7 +794,9 @@ class ResponseLetterDocumentService
 
     private function replacePositionOffset(DOMDocument $document, DOMElement $position, int $offset): void
     {
-        foreach (iterator_to_array($position->childNodes) as $child) $position->removeChild($child);
+        foreach (iterator_to_array($position->childNodes) as $child) {
+            $position->removeChild($child);
+        }
         $node = $document->createElementNS('http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing', 'wp:posOffset');
         $node->appendChild($document->createTextNode((string) $offset));
         $position->appendChild($node);
@@ -692,7 +817,10 @@ class ResponseLetterDocumentService
     private function paragraphText(DOMXPath $xpath, DOMElement $paragraph): string
     {
         $parts = [];
-        foreach ($xpath->query('.//w:t', $paragraph) as $textNode) $parts[] = $textNode->textContent;
+        foreach ($xpath->query('.//w:t', $paragraph) as $textNode) {
+            $parts[] = $textNode->textContent;
+        }
+
         return implode('', $parts);
     }
 
@@ -705,7 +833,9 @@ class ResponseLetterDocumentService
     {
         $runProperties = $xpath->query('.//w:r[.//w:t[string-length(normalize-space(.)) > 0]][1]/w:rPr', $paragraph)->item(0)?->cloneNode(true);
         foreach (iterator_to_array($paragraph->childNodes) as $child) {
-            if ($child instanceof DOMElement && $child->namespaceURI === self::WORD_NS && $child->localName === 'pPr') continue;
+            if ($child instanceof DOMElement && $child->namespaceURI === self::WORD_NS && $child->localName === 'pPr') {
+                continue;
+            }
             $paragraph->removeChild($child);
         }
 
@@ -713,31 +843,49 @@ class ResponseLetterDocumentService
             $run = $document->createElementNS(self::WORD_NS, 'w:r');
             $properties = $runProperties ? $runProperties->cloneNode(true) : $document->createElementNS(self::WORD_NS, 'w:rPr');
             foreach (['bold' => 'b', 'italic' => 'i'] as $key => $element) {
-                if (! array_key_exists($key, $segment)) continue;
-                foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) $properties->removeChild($node);
+                if (! array_key_exists($key, $segment)) {
+                    continue;
+                }
+                foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) {
+                    $properties->removeChild($node);
+                }
                 $toggle = $document->createElementNS(self::WORD_NS, 'w:'.$element);
-                if ($segment[$key] !== true) $toggle->setAttributeNS(self::WORD_NS, 'w:val', '0');
+                if ($segment[$key] !== true) {
+                    $toggle->setAttributeNS(self::WORD_NS, 'w:val', '0');
+                }
                 $properties->appendChild($toggle);
             }
             if (isset($segment['font'])) {
-                foreach (iterator_to_array($xpath->query('./w:rFonts', $properties)) as $node) $properties->removeChild($node);
+                foreach (iterator_to_array($xpath->query('./w:rFonts', $properties)) as $node) {
+                    $properties->removeChild($node);
+                }
                 $fonts = $document->createElementNS(self::WORD_NS, 'w:rFonts');
-                foreach (['ascii', 'eastAsia', 'hAnsi', 'cs'] as $attribute) $fonts->setAttributeNS(self::WORD_NS, 'w:'.$attribute, (string) $segment['font']);
+                foreach (['ascii', 'eastAsia', 'hAnsi', 'cs'] as $attribute) {
+                    $fonts->setAttributeNS(self::WORD_NS, 'w:'.$attribute, (string) $segment['font']);
+                }
                 $properties->appendChild($fonts);
             }
             if (isset($segment['font_size'])) {
                 foreach (['sz', 'szCs'] as $element) {
-                    foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) $properties->removeChild($node);
+                    foreach (iterator_to_array($xpath->query('./w:'.$element, $properties)) as $node) {
+                        $properties->removeChild($node);
+                    }
                     $size = $document->createElementNS(self::WORD_NS, 'w:'.$element);
                     $size->setAttributeNS(self::WORD_NS, 'w:val', (string) ((float) $segment['font_size'] * 2));
                     $properties->appendChild($size);
                 }
             }
             $run->appendChild($properties);
-            for ($break = 0; $break < ($segment['breaks_before'] ?? 0); $break++) $run->appendChild($document->createElementNS(self::WORD_NS, 'w:br'));
-            if ($segment['tab_before'] ?? false) $run->appendChild($document->createElementNS(self::WORD_NS, 'w:tab'));
+            for ($break = 0; $break < ($segment['breaks_before'] ?? 0); $break++) {
+                $run->appendChild($document->createElementNS(self::WORD_NS, 'w:br'));
+            }
+            if ($segment['tab_before'] ?? false) {
+                $run->appendChild($document->createElementNS(self::WORD_NS, 'w:tab'));
+            }
             foreach (preg_split('/\R/', (string) ($segment['text'] ?? '')) as $index => $line) {
-                if ($index > 0) $run->appendChild($document->createElementNS(self::WORD_NS, 'w:br'));
+                if ($index > 0) {
+                    $run->appendChild($document->createElementNS(self::WORD_NS, 'w:br'));
+                }
                 $text = $document->createElementNS(self::WORD_NS, 'w:t');
                 $text->setAttributeNS('http://www.w3.org/XML/1998/namespace', 'xml:space', 'preserve');
                 $text->appendChild($document->createTextNode($line));

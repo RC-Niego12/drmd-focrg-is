@@ -5,13 +5,14 @@ namespace App\Http\Controllers;
 use App\Http\Requests\WarehouseRequest;
 use App\Models\PsgcAddress;
 use App\Models\SystemSetting;
+use App\Models\User;
 use App\Models\Warehouse;
 use App\Models\WarehouseLibraryValue;
 use App\Services\AuditLogger;
-use App\Services\WarehouseMasterSheetImportService;
 use App\Services\WarehouseIdentityService;
-use Illuminate\Http\RedirectResponse;
+use App\Services\WarehouseMasterSheetImportService;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -159,7 +160,7 @@ class WarehouseController extends Controller
 
     public function syncGoogleSheet(Request $request, WarehouseMasterSheetImportService $importer, AuditLogger $audit): RedirectResponse
     {
-        abort_unless($request->user()?->can('manage warehouses'), 403);
+        abort_unless($this->canManageWarehouses($request->user()), 403);
 
         $url = config('services.google_sheets.warehouse_master_url');
 
@@ -181,7 +182,7 @@ class WarehouseController extends Controller
 
     public function generateIdentity(Request $request, WarehouseIdentityService $identity): JsonResponse
     {
-        abort_unless($request->user()?->can('manage warehouses'), 403);
+        abort_unless($this->canManageWarehouses($request->user()), 403);
 
         $data = $request->validate([
             'province' => ['nullable', 'string', 'max:255'],
@@ -196,6 +197,16 @@ class WarehouseController extends Controller
         ]);
 
         return response()->json($identity->generate($data));
+    }
+
+    private function canManageWarehouses(?User $user): bool
+    {
+        if (! $user) {
+            return false;
+        }
+
+        return $user->hasAnyRole(['Super Admin', 'RROS', 'RROS AA'])
+            || $user->can('manage warehouses');
     }
 
     public function store(WarehouseRequest $request, AuditLogger $audit, WarehouseIdentityService $identity): RedirectResponse

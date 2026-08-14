@@ -1,6 +1,7 @@
 import { Head, router } from '@inertiajs/react';
 import { AlertTriangle, Archive, CheckCircle2, Crown, KeyRound, RotateCcw, Search, ShieldCheck, Trash2, UserCheck, UsersRound, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import SearchableSelect from '@/Components/SearchableSelect';
 import AppLayout, { Card, DataTable, ExportableCard, TableActionButton } from '@/Layouts/AppLayout';
 import { formatDateTime } from '@/Utils/dateFormat';
@@ -11,6 +12,29 @@ const statusOptions = [
     { value: 'pending', label: 'Pending' },
     { value: 'denied', label: 'Denied' },
 ];
+
+function EmployeeAvatar({ user, size = 'table' }) {
+    const [imageFailed, setImageFailed] = useState(false);
+    const initials = String(user?.name || 'Employee')
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2)
+        .map((part) => part[0])
+        .join('')
+        .toUpperCase();
+    const dimensions = size === 'modal' ? 'h-16 w-16 text-lg' : 'h-10 w-10 text-xs';
+
+    return (
+        <span className={`group/avatar relative z-10 inline-flex shrink-0 ${dimensions}`}>
+            <span className="absolute inset-0 rounded-full bg-gradient-to-br from-emerald-300 via-brand-400 to-sky-500 opacity-60 blur-sm transition duration-300 group-hover/avatar:scale-[1.7] group-hover/avatar:opacity-90" />
+            <span className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-full border-2 border-white bg-brand-700 font-black text-white shadow-md ring-1 ring-brand-200 transition duration-300 ease-out group-hover/avatar:z-[260] group-hover/avatar:scale-[1.75] group-hover/avatar:shadow-2xl dark:border-zinc-900 dark:ring-brand-800">
+                {user?.avatar && !imageFailed
+                    ? <img src={user.avatar} alt={`${user.name} employee photo`} className="h-full w-full object-cover" onError={() => setImageFailed(true)} />
+                    : <span>{initials}</span>}
+            </span>
+        </span>
+    );
+}
 
 export default function Index({ users, deletedUsers = [], roleOptions, requestableRoleOptions = [], metrics, ssoEmployees = [] }) {
     const [query, setQuery] = useState('');
@@ -145,10 +169,15 @@ export default function Index({ users, deletedUsers = [], roleOptions, requestab
                     <DataTable
                         columns={activeSection === 'lgu'
                             ? ['LGU Account', 'Email / Username', 'LGU Level', 'PSGC', 'Current Role', 'Status', 'Created', { label: 'Actions', align: 'right', actionColumn: true }]
-                            : ['Name', 'Email', 'Position', 'Designation', 'Requested', 'Current Role', 'Status', 'Created', { label: 'Actions', align: 'right', actionColumn: true }]}
+                            : ['Employee', 'Email', 'Position', 'Designation', 'Requested', 'Current Role', 'Status', 'Created', { label: 'Actions', align: 'right', actionColumn: true }]}
                         rows={visibleUsers.map((user) => (
                             <tr key={user.id} className={user.access_status === 'pending' ? 'bg-amber-50/60 dark:bg-amber-950/20' : undefined}>
-                                <td className="whitespace-nowrap px-4 py-3 font-bold">{activeSection === 'lgu' ? (user.lgu_name || user.name) : user.name}</td>
+                                <td className="whitespace-nowrap px-4 py-3 font-bold">
+                                    <div className="flex items-center gap-3">
+                                        <EmployeeAvatar user={user} />
+                                        <div><p>{activeSection === 'lgu' ? (user.lgu_name || user.name) : user.name}</p>{activeSection !== 'lgu' && <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Employee</p>}</div>
+                                    </div>
+                                </td>
                                 <td className="whitespace-nowrap px-4 py-3">
                                     <p>{user.email}</p>
                                     {activeSection === 'lgu' && <p className="text-xs font-bold text-slate-400">{user.email?.split('@')[0]}</p>}
@@ -198,7 +227,7 @@ export default function Index({ users, deletedUsers = [], roleOptions, requestab
                         columns={['Name', 'Email', 'Previous Role', 'Status', 'Archived', { label: 'Actions', align: 'right', actionColumn: true }]}
                         rows={deletedUsers.map((user) => (
                             <tr key={user.id} className="bg-slate-50/70 text-slate-600 dark:bg-zinc-900/60 dark:text-zinc-300">
-                                <td className="whitespace-nowrap px-4 py-3 font-bold">{user.name}</td>
+                                <td className="whitespace-nowrap px-4 py-3 font-bold"><div className="flex items-center gap-3"><EmployeeAvatar user={user} /><span>{user.name}</span></div></td>
                                 <td className="whitespace-nowrap px-4 py-3">{user.email}</td>
                                 <td className="whitespace-nowrap px-4 py-3">{user.roles.join(', ') || '-'}</td>
                                 <td className="whitespace-nowrap px-4 py-3"><StatusPill status={user.access_status} /></td>
@@ -262,16 +291,19 @@ function AccessModal({ user, roleOptions, onClose }) {
         });
     };
 
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
+    return createPortal(
+        <div className="fixed inset-0 z-[240] flex items-center justify-center overflow-y-auto bg-slate-950/65 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="user-access-modal-title">
             <form onSubmit={submit} className="w-full max-w-2xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
-                <div className="flex items-start justify-between border-b border-slate-200 bg-slate-50 p-5 dark:border-zinc-800 dark:bg-zinc-900">
-                    <div>
-                        <p className="text-xs font-bold uppercase tracking-wide text-brand-700 dark:text-brand-100">User-level access</p>
-                        <h3 className="mt-1 text-xl font-black">{user.name}</h3>
-                        <p className="text-sm text-slate-500 dark:text-zinc-400">{user.email}</p>
+                <div className="flex items-start justify-between border-b border-slate-200 bg-gradient-to-r from-emerald-50 via-slate-50 to-sky-50 p-5 dark:border-zinc-800 dark:from-emerald-950/30 dark:via-zinc-900 dark:to-sky-950/30">
+                    <div className="flex items-center gap-4">
+                        <EmployeeAvatar user={user} size="modal" />
+                        <div>
+                            <p className="text-xs font-bold uppercase tracking-wide text-brand-700 dark:text-brand-100">User-level access</p>
+                            <h3 id="user-access-modal-title" className="mt-1 text-xl font-black">{user.name}</h3>
+                            <p className="text-sm text-slate-500 dark:text-zinc-400">{user.email}</p>
+                        </div>
                     </div>
-                    <button type="button" onClick={onClose} className="rounded-md p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-zinc-800 dark:hover:text-white">
+                    <button type="button" onClick={onClose} aria-label="Close user access" data-tip="Close user access" data-tip-side="bottom" data-tip-preferred-side="bottom" data-tip-locked="true" className="dromis-tip rounded-md p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-zinc-800 dark:hover:text-white">
                         <X className="h-5 w-5" />
                     </button>
                 </div>
@@ -316,7 +348,8 @@ function AccessModal({ user, roleOptions, onClose }) {
                     </button>
                 </div>
             </form>
-        </div>
+        </div>,
+        document.body,
     );
 }
 

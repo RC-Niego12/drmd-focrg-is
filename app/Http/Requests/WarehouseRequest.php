@@ -8,7 +8,14 @@ class WarehouseRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user()?->can('manage warehouses') ?? false;
+        $user = $this->user();
+
+        if (! $user) {
+            return false;
+        }
+
+        return $user->hasAnyRole(['Super Admin', 'RROS', 'RROS AA'])
+            || $user->can('manage warehouses');
     }
 
     public function rules(): array
@@ -75,6 +82,7 @@ class WarehouseRequest extends FormRequest
             foreach (['category', 'ownership', 'partnership'] as $field) {
                 if (! $this->filled($field)) {
                     $validator->errors()->add($field, ucfirst(str_replace('_', ' ', $field)).' is required. Please select a value before saving.');
+
                     continue;
                 }
 
