@@ -13,14 +13,17 @@ class InventoryBalanceService
 {
     public function availableTotalsByItem(): Collection
     {
+        // Match Warehouse Stockpile / WIT current stockpile (receipts − issuances).
+        // Do not sum per-row available_balance: negative batch rows floor to 0 there and
+        // overstate item totals versus the inventory cards.
         return $this->balanceRows()
             ->groupBy(fn (array $row): string => $this->itemKey($row['item'] ?? ''))
-            ->map(fn (Collection $rows): float => $rows->sum(
-                fn (array $row): float => (float) ($row['available_balance'] ?? 0)
-            ));
+            ->map(fn (Collection $rows): float => max(0, $rows->sum(
+                fn (array $row): float => (float) ($row['current_balance'] ?? 0)
+            )));
     }
 
-    public function balanceRows(?int $warehouseId = null, ?int $year = null): Collection
+    public function balanceRows(?int $warehouseId = null, ?int $year = null, bool $includeSystemOnly = true): Collection
     {
         $sheetImports = WarehouseSheetImport::with(['batch.item', 'warehouse'])
             ->when($warehouseId, fn ($query) => $query->where('warehouse_id', $warehouseId))
@@ -46,6 +49,7 @@ class InventoryBalanceService
                 $import->raw_payload['item'] ?? $import->batch?->item?->name,
                 $this->brandDescription($import->raw_payload['brand_description'] ?? null, $import->batch),
                 $this->importExpiryLabel($import),
+                $this->storedImportUnitCost($import),
             ]))
             ->map(function ($group): array {
                 /** @var WarehouseSheetImport $first */
@@ -67,16 +71,27 @@ class InventoryBalanceService
                     'warehouse_rtef_capacity' => (float) ($first->warehouse?->rtef_capacity ?? 0),
                     'partnership' => $first->warehouse?->partnership,
                     'item' => $first->raw_payload['item'] ?? $first->batch?->item?->name,
-                    'uom' => $first->raw_payload['uom'] ?? $first->batch?->item?->unit,
+                    'uom' => trim((string) ($first->raw_payload['uom'] ?? ''))
+                        ?: (trim((string) ($first->batch?->item?->unit ?? '')) ?: 'unit'),
                     'brand_description' => $this->brandDescription($first->raw_payload['brand_description'] ?? null, $first->batch),
                     'expiry' => $this->importExpiryLabel($first),
                     'expiry_sort' => $this->expirySortValue($this->importExpiryLabel($first)),
+                    'unit_cost' => $this->storedImportUnitCost($first),
                     'current_balance' => $balance,
                     'reserved_quantity' => $batches->sum('reserved_quantity'),
                     'available_balance' => max(0, $balance - $batches->sum('reserved_quantity')),
-                    'cost' => max(0, $cost),
+                    // Keep signed WIT cost until rows are aggregated. Flooring an
+                    // issuance-only group here discards the WIT deduction and
+                    // overstates the current stockpile value.
+                    'cost' => $cost,
                 ];
             });
+
+        if (! $includeSystemOnly) {
+            return $sheetBalanceRows
+                ->filter(fn (array $row): bool => (float) $row['current_balance'] !== 0.0 || (float) $row['cost'] !== 0.0)
+                ->values();
+        }
 
         $transactions = InventoryTransaction::with(['batch.item', 'batch.warehouse'])
             ->when($warehouseId, fn ($query) => $query->whereHas('batch', fn ($batchQuery) => $batchQuery->where('warehouse_id', $warehouseId)))
@@ -91,6 +106,7 @@ class InventoryBalanceService
                 $transaction->batch?->item?->name,
                 $this->brandDescription(null, $transaction->batch),
                 $transaction->batch?->expiration_date?->format('M Y') ?? 'N/A',
+                (float) ($transaction->unit_cost ?? 0),
             ]))
             ->map(function ($group): array {
                 /** @var InventoryTransaction $first */
@@ -116,6 +132,7 @@ class InventoryBalanceService
                     'brand_description' => $this->brandDescription(null, $first->batch),
                     'expiry' => $first->batch?->expiration_date?->format('M Y') ?? 'N/A',
                     'expiry_sort' => $first->batch?->expiration_date?->timestamp ?? PHP_INT_MAX,
+                    'unit_cost' => (float) ($first->unit_cost ?? 0),
                     'current_balance' => $balance,
                     'reserved_quantity' => $batches->sum('reserved_quantity'),
                     'available_balance' => max(0, $balance - $batches->sum('reserved_quantity')),
@@ -135,6 +152,7 @@ class InventoryBalanceService
                 $row['item'] ?? null,
                 $row['brand_description'] ?? null,
                 $row['expiry'] ?? null,
+                $row['unit_cost'] ?? null,
             ]))
             ->map(function (Collection $rows): array {
                 $first = $rows->first();
@@ -146,7 +164,7 @@ class InventoryBalanceService
                     'current_balance' => $current,
                     'reserved_quantity' => $reserved,
                     'available_balance' => max(0, $current - $reserved),
-                    'cost' => max(0, $rows->sum(fn (array $row): float => (float) ($row['cost'] ?? 0))),
+                    'cost' => $rows->sum(fn (array $row): float => (float) ($row['cost'] ?? 0)),
                 ];
             })
             ->filter(fn (array $row): bool => (float) $row['current_balance'] !== 0.0 || (float) $row['cost'] !== 0.0)
@@ -257,6 +275,26 @@ class InventoryBalanceService
     private function signedImportCost(WarehouseSheetImport $import): float
     {
         return $this->payloadNumber($import, 'receipt_cost') - $this->payloadNumber($import, 'issuance_cost');
+    }
+
+    private function storedImportUnitCost(WarehouseSheetImport $import): ?float
+    {
+        if ($this->payloadNumber($import, 'receipt') !== 0.0) {
+            return $this->payloadOptionalNumber($import, 'receipt_unit_cost');
+        }
+
+        if ($this->payloadNumber($import, 'issuance') !== 0.0) {
+            return $this->payloadOptionalNumber($import, 'issuance_unit_cost');
+        }
+
+        return $this->payloadOptionalNumber($import, 'receipt_unit_cost')
+            ?? $this->payloadOptionalNumber($import, 'issuance_unit_cost');
+    }
+
+    private function payloadOptionalNumber(WarehouseSheetImport $import, string $key): ?float
+    {
+        $value = trim((string) ($import->raw_payload[$key] ?? ''));
+        return $value === '' ? null : (float) str_replace([',', ' '], '', $value);
     }
 
     private function payloadNumber(WarehouseSheetImport $import, string $key): float

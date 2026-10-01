@@ -15,6 +15,7 @@ use App\Models\PsgcAddress;
 use App\Services\AorCoverageService;
 use App\Services\AuditLogger;
 use App\Services\EpirmaDocumentStatusService;
+use App\Services\GroqChatService;
 use App\Services\OfficialAdvisoryService;
 use App\Services\RealtimePublisher;
 use App\Services\WorkflowNotificationService;
@@ -114,6 +115,12 @@ class LguDromicRequestController extends Controller
                 'lgu_relief_correction_resolved_at',
                 'lgu_correction_of_id',
                 'lgu_correction_target',
+                'lgu_amendment_request_status',
+                'lgu_amendment_request_target',
+                'lgu_amendment_request_reason',
+                'lgu_amendment_requested_at',
+                'lgu_amendment_reviewed_at',
+                'lgu_amendment_review_note',
                 'lgu_signed_report_path',
                 'lgu_signed_report_name',
                 'lgu_signed_request_path',
@@ -123,7 +130,10 @@ class LguDromicRequestController extends Controller
                 'created_at',
                 'updated_at',
             ]);
-        $seriesStats = $allReportRows
+        $incidentReportRows = $allReportRows
+            ->reject(fn (AssistanceRequest $row): bool => (bool) data_get($row->lgu_dromic_payload, 'standalone_relief_request'))
+            ->values();
+        $seriesStats = $incidentReportRows
             ->groupBy(fn (AssistanceRequest $row): string => $row->lgu_dromic_series_key ?: 'request-'.$row->id)
             ->map(function ($rows): array {
                 $latest = $rows->first();
@@ -145,9 +155,22 @@ class LguDromicRequestController extends Controller
                 ];
             });
 
-        $incidentGroups = $allReportRows
+        $editingReliefRequestId = (int) $request->integer('editing_relief_request_id');
+
+        $seriesClaimedByLumpRequest = AssistanceRequest::query()
+            ->where('submission_type', 'lgu_dromic_relief_request')
+            ->where('lgu_dromic_payload->standalone_relief_request', true)
+            ->whereNotNull('lgu_relief_request_reference')
+            ->when($editingReliefRequestId > 0, fn ($query) => $query->whereKeyNot($editingReliefRequestId))
+            ->get(['lgu_dromic_payload'])
+            ->flatMap(fn (AssistanceRequest $row): array => array_values((array) data_get($row->lgu_dromic_payload, 'linked_incident_series_keys', [])))
+            ->filter()
+            ->unique()
+            ->values();
+
+        $incidentGroups = $incidentReportRows
             ->groupBy(fn (AssistanceRequest $row): string => $row->lgu_dromic_series_key ?: 'request-'.$row->id)
-            ->map(function ($rows, string $seriesKey): array {
+            ->map(function ($rows, string $seriesKey) use ($seriesClaimedByLumpRequest): array {
                 $logicalReports = $rows
                     ->reject(fn (AssistanceRequest $row): bool => $row->lgu_correction_target === 'request')
                     ->groupBy(fn (AssistanceRequest $row): string => (string) ($row->lgu_dromic_report_number ?? 'draft-'.$row->id))
@@ -174,7 +197,7 @@ class LguDromicRequestController extends Controller
                         ->values()
                         ->all(),
                     'report_count' => $logicalReports->count(),
-                    'finalized_count' => $logicalReports->filter(fn (AssistanceRequest $row): bool => ($row->lgu_report_status ?: $row->status) === 'final')->count(),
+                    'finalized_count' => $logicalReports->filter(fn (AssistanceRequest $row): bool => ($row->lgu_report_status ?: $row->status) !== 'draft')->count(),
                     'draft_count' => $logicalReports->filter(fn (AssistanceRequest $row): bool => ($row->lgu_report_status ?: $row->status) === 'draft')->count(),
                     'advance_count' => $logicalReports->where('lgu_report_status', 'advance_submitted')->count(),
                     'signed_count' => $logicalReports->filter(fn (AssistanceRequest $row): bool => $row->lgu_report_status === 'submitted' && filled($row->lgu_signed_report_path))->count(),
@@ -188,7 +211,8 @@ class LguDromicRequestController extends Controller
                     'request_needs_lgu_action' => (bool) $requestNeedingAction,
                     'report_action_note' => $reportNeedingAction?->lgu_dromic_review_note,
                     'request_action_note' => $requestNeedingAction?->lgu_relief_review_note,
-                    'has_relief_request' => $rows->contains(fn (AssistanceRequest $row): bool => filled($row->lgu_relief_request_reference)),
+                    'has_relief_request' => $rows->contains(fn (AssistanceRequest $row): bool => filled($row->lgu_relief_request_reference))
+                        || $seriesClaimedByLumpRequest->contains($seriesKey),
                     'is_closed' => $rows->contains(fn (AssistanceRequest $row): bool => in_array($row->lgu_dromic_report_classification, ['terminal', 'first_and_final'], true)
                         && $row->lgu_report_status === 'submitted'
                         && filled($row->lgu_signed_report_path)
@@ -211,6 +235,69 @@ class LguDromicRequestController extends Controller
                 ])), $needle);
             }))
             ->sortByDesc('created_at')
+            ->values();
+
+        $reliefRequestIncidentOptions = $incidentReportRows
+            ->filter(fn (AssistanceRequest $row): bool => ($row->lgu_report_status ?: $row->status) !== 'draft')
+            ->groupBy(fn (AssistanceRequest $row): string => $row->lgu_dromic_series_key ?: 'request-'.$row->id)
+            ->map(function ($rows, string $seriesKey) use ($seriesClaimedByLumpRequest): ?array {
+                if ($rows->contains(fn (AssistanceRequest $row): bool => filled($row->lgu_relief_request_reference))) {
+                    return null;
+                }
+                if ($seriesClaimedByLumpRequest->contains($seriesKey)) {
+                    return null;
+                }
+                $latest = $rows->sortByDesc('created_at')->first();
+                if (blank($latest->lgu_signed_report_path)) {
+                    return null;
+                }
+                // Single-incident formal request (Include request) keeps the series out of the lump picker.
+                if ((bool) data_get($latest->lgu_dromic_payload, 'has_relief_request')) {
+                    return null;
+                }
+                $incidentType = trim((string) (data_get($latest->lgu_dromic_payload, 'incident_type') ?: $latest->incident?->name));
+                if ($incidentType === '') {
+                    return null;
+                }
+
+                $affectedBarangays = collect((array) data_get($latest->lgu_dromic_payload, 'affected_barangays', []))
+                    ->map(fn ($name): string => trim((string) $name))
+                    ->filter()
+                    ->unique()
+                    ->values();
+                if ($affectedBarangays->isEmpty()) {
+                    $affectedBarangays = collect((array) data_get($latest->lgu_dromic_payload, 'area_rows', []))
+                        ->map(fn ($row): string => trim((string) (data_get($row, 'area') ?: data_get($row, 'barangay'))))
+                        ->filter()
+                        ->unique()
+                        ->values();
+                }
+                $requestedFniItems = collect(data_get($latest->lgu_dromic_payload, 'requested_fni_items', []))
+                    ->map(fn ($row): array => [
+                        'fni_library_item_id' => (int) data_get($row, 'fni_library_item_id'),
+                        'item_name' => data_get($row, 'item_name'),
+                        'requested_quantity' => (int) data_get($row, 'requested_quantity'),
+                    ])
+                    ->filter(fn (array $row): bool => $row['fni_library_item_id'] > 0 && $row['requested_quantity'] > 0)
+                    ->values()
+                    ->all();
+
+                return [
+                    'series_key' => $seriesKey,
+                    'incident_code' => 'DIS-INC-'.Str::upper(Str::substr($seriesKey, 0, 12)),
+                    'incident_name' => data_get($latest->lgu_dromic_payload, 'incident_name') ?: $latest->incident?->name ?: $incidentType,
+                    'incident_type' => $incidentType,
+                    'occurrence_started_at' => data_get($latest->lgu_dromic_payload, 'occurrence_started_at') ?: $latest->incident?->incident_date,
+                    'municipality' => $latest->municipality,
+                    'province' => $latest->province,
+                    'affected_barangays' => $affectedBarangays->all(),
+                    'affected_families' => (int) ($latest->affected_families ?? data_get($latest->lgu_dromic_payload, 'affected_families', 0)),
+                    'fni_item_count' => count($requestedFniItems),
+                    'requested_fni_items' => $requestedFniItems,
+                ];
+            })
+            ->filter()
+            ->sortByDesc('occurrence_started_at')
             ->values();
 
         $filters = [
@@ -275,7 +362,16 @@ class LguDromicRequestController extends Controller
                 $value,
             ))
             ->when($filters['request_letter'] === 'requested', fn ($query) => $query->whereNotNull('lgu_relief_request_reference'))
-            ->when($filters['request_letter'] === 'not_requested', fn ($query) => $query->whereNull('lgu_relief_request_reference'));
+            ->when($filters['request_letter'] === 'not_requested', fn ($query) => $query->whereNull('lgu_relief_request_reference'))
+            // Standalone lump relief records belong on Requests, not All Reports.
+            ->when($filters['tab'] === 'reports', function ($query): void {
+                $query->where(function ($scope): void {
+                    $scope->whereNull('lgu_dromic_payload->standalone_relief_request')
+                        ->orWhere('lgu_dromic_payload->standalone_relief_request', false)
+                        ->orWhere('lgu_dromic_payload->standalone_relief_request', 0)
+                        ->orWhere('lgu_dromic_payload->standalone_relief_request', 'false');
+                });
+            });
 
         $metricRows = $filters['tab'] === 'incidents'
             ? $allReportRows->filter(fn (AssistanceRequest $row): bool => $incidentGroups->contains(
@@ -375,7 +471,8 @@ class LguDromicRequestController extends Controller
             });
 
         $reportMetricRows = $metricRows
-            ->reject(fn (AssistanceRequest $row): bool => $row->lgu_correction_target === 'request')
+            ->reject(fn (AssistanceRequest $row): bool => $row->lgu_correction_target === 'request'
+                || (bool) data_get($row->lgu_dromic_payload, 'standalone_relief_request'))
             ->groupBy(fn (AssistanceRequest $row): string => ($row->lgu_dromic_series_key ?: 'request-'.$row->id).'|'.($row->lgu_dromic_report_number ?? 'draft-'.$row->id))
             ->map(fn ($versions) => $versions->sortByDesc(fn (AssistanceRequest $version): array => [(int) $version->lgu_dromic_revision_number, $version->created_at?->timestamp ?? 0])->first())
             ->values();
@@ -453,6 +550,7 @@ class LguDromicRequestController extends Controller
             'requests' => $paginatedRequests,
             'correctionDraft' => $correctionDraft,
             'incidentGroups' => $incidentGroups,
+            'reliefRequestIncidentOptions' => $reliefRequestIncidentOptions,
             'reportFilters' => $filters,
         ]);
     }
@@ -542,11 +640,482 @@ class LguDromicRequestController extends Controller
             ->with('preview_report_id', $record->id);
     }
 
+    public function storeConsolidatedReliefRequest(Request $request, AuditLogger $audit): RedirectResponse
+    {
+        $user = $request->user();
+        abort_if($this->isProvinceLgu($user->lgu_level), 403, 'PLGU accounts are for monitoring and cannot create relief augmentation requests.');
+
+        $data = $request->validate([
+            'incident_series_keys' => ['required', 'array', 'min:1', 'max:50'],
+            'incident_series_keys.*' => ['required', 'string', 'size:64', 'distinct', 'regex:/^[a-f0-9]{64}$/'],
+            'requested_fni_items' => ['required', 'array', 'min:1', 'max:100'],
+            'requested_fni_items.*.fni_library_item_id' => ['required', 'integer', 'distinct', 'exists:fni_library_items,id'],
+            'requested_fni_items.*.requested_quantity' => ['required', 'integer', 'min:1', 'max:999999999'],
+            'signed_request' => ['required', 'file', 'mimes:pdf', 'max:10240'],
+        ]);
+        $signedRequest = $request->file('signed_request');
+        unset($data['signed_request']);
+
+        $seriesKeys = collect($data['incident_series_keys'])->values();
+        $rows = AssistanceRequest::query()
+            ->with('incident:id,name,incident_date,province,municipality,barangay')
+            ->where('submission_type', 'lgu_dromic_relief_request')
+            ->whereIn('lgu_dromic_series_key', $seriesKeys)
+            ->where(function ($query) use ($user): void {
+                $query->where('lgu_submitted_by', $user->id)
+                    ->orWhere('encoded_by', $user->id)
+                    ->when(filled($user->lgu_psgc_code), fn ($query) => $query->orWhere('lgu_psgc_code', $user->lgu_psgc_code));
+            })
+            ->get();
+
+        $series = $rows
+            ->reject(fn (AssistanceRequest $row): bool => (bool) data_get($row->lgu_dromic_payload, 'standalone_relief_request'))
+            ->groupBy('lgu_dromic_series_key');
+        if ($seriesKeys->contains(fn (string $key): bool => ! $series->has($key))) {
+            throw ValidationException::withMessages(['incident_series_keys' => 'One or more selected incidents are unavailable to this LGU.']);
+        }
+        if ($seriesKeys->contains(fn (string $key): bool => $series->get($key)->contains(fn (AssistanceRequest $row): bool => filled($row->lgu_relief_request_reference)))) {
+            throw ValidationException::withMessages(['incident_series_keys' => 'A selected incident already has a relief augmentation request. Remove it before continuing.']);
+        }
+        if ($seriesKeys->contains(fn (string $key): bool => $series->get($key)->contains(fn (AssistanceRequest $row): bool => (bool) data_get($row->lgu_dromic_payload, 'has_relief_request')))) {
+            throw ValidationException::withMessages(['incident_series_keys' => 'A selected incident already carries a single-incident request letter. Remove it before continuing.']);
+        }
+        $alreadyClaimed = AssistanceRequest::query()
+            ->where('submission_type', 'lgu_dromic_relief_request')
+            ->where('lgu_dromic_payload->standalone_relief_request', true)
+            ->whereNotNull('lgu_relief_request_reference')
+            ->get(['lgu_dromic_payload'])
+            ->flatMap(fn (AssistanceRequest $row): array => array_values((array) data_get($row->lgu_dromic_payload, 'linked_incident_series_keys', [])))
+            ->unique();
+        if ($seriesKeys->contains(fn (string $key): bool => $alreadyClaimed->contains($key))) {
+            throw ValidationException::withMessages(['incident_series_keys' => 'A selected incident is already covered by an existing lump relief request.']);
+        }
+
+        $latestRows = $seriesKeys->map(function (string $key) use ($series): AssistanceRequest {
+            $eligible = $series->get($key)
+                ->filter(fn (AssistanceRequest $row): bool => ($row->lgu_report_status ?: $row->status) !== 'draft')
+                ->sortByDesc('created_at');
+            if ($eligible->isEmpty()) {
+                throw ValidationException::withMessages(['incident_series_keys' => 'Every selected incident must have at least one finalized report.']);
+            }
+            if (blank($eligible->first()->lgu_signed_report_path)) {
+                throw ValidationException::withMessages(['incident_series_keys' => 'Every selected incident must have an uploaded signed DROMIC report.']);
+            }
+
+            return $eligible->first();
+        });
+        $incidentTypes = $latestRows
+            ->map(fn (AssistanceRequest $row): string => trim((string) (data_get($row->lgu_dromic_payload, 'incident_type') ?: $row->incident?->name)))
+            ->filter()
+            ->map(fn (string $type): string => Str::lower($type))
+            ->unique();
+        if ($incidentTypes->count() !== 1) {
+            throw ValidationException::withMessages(['incident_series_keys' => 'All incidents in one relief augmentation request must have the same incident type.']);
+        }
+
+        $incidentType = trim((string) (data_get($latestRows->first()->lgu_dromic_payload, 'incident_type') ?: $latestRows->first()->incident?->name));
+        $linkedIncidents = $latestRows->map(fn (AssistanceRequest $row): array => [
+            'series_key' => $row->lgu_dromic_series_key,
+            'incident_code' => 'DIS-INC-'.Str::upper(Str::substr($row->lgu_dromic_series_key, 0, 12)),
+            'incident_name' => data_get($row->lgu_dromic_payload, 'incident_name') ?: $row->incident?->name ?: $incidentType,
+            'incident_type' => $incidentType,
+            'occurrence_started_at' => data_get($row->lgu_dromic_payload, 'occurrence_started_at') ?: $row->incident?->incident_date?->toDateString(),
+            'province' => $row->province,
+            'municipality' => $row->municipality,
+            'affected_barangays' => array_values((array) data_get($row->lgu_dromic_payload, 'affected_barangays', [])),
+            'affected_families' => (int) ($row->affected_families ?? data_get($row->lgu_dromic_payload, 'affected_families', 0)),
+            'affected_persons' => (int) (
+                data_get($row->lgu_dromic_payload, 'affected_persons')
+                ?: collect((array) data_get($row->lgu_dromic_payload, 'area_rows', []))
+                    ->sum(fn ($area): int => (int) data_get($area, 'affected_persons', 0))
+            ),
+        ])->values();
+        $data = $this->withRequestedFniItemDetails([
+            ...$data,
+            'has_relief_request' => true,
+        ]);
+        $requestingLgu = $user->lgu_name ?: $latestRows->first()->requesting_agency ?: 'LGU';
+        $firstOccurrence = $linkedIncidents->pluck('occurrence_started_at')->filter()->sort()->first() ?: now()->toDateString();
+        $affectedBarangays = $linkedIncidents->flatMap(fn (array $incident): array => $incident['affected_barangays'])->filter()->unique()->values();
+        $incidentSummary = 'Relief augmentation is requested for '.Str::lower($incidentType).' incidents recorded under '
+            .$linkedIncidents->pluck('incident_code')->implode(', ').'. The requested quantities cover the consolidated needs of the selected incidents.';
+        $seriesKey = hash('sha256', $user->id.'|consolidated-relief|'.Str::uuid());
+        $payload = [
+            ...$data,
+            'standalone_relief_request' => true,
+            'request_mode' => 'consolidated_multi_incident',
+            'linked_incident_series_keys' => $seriesKeys->all(),
+            'linked_incidents' => $linkedIncidents->all(),
+            'requesting_lgu' => $requestingLgu,
+            'incident_name' => 'Consolidated '.$incidentType.' Relief Augmentation Request',
+            'incident_type' => $incidentType,
+            'incident_types' => [$incidentType],
+            'incident_date' => Str::substr((string) $firstOccurrence, 0, 10),
+            'occurrence_started_at' => $firstOccurrence,
+            'affected_barangays' => $affectedBarangays->all(),
+            'affected_areas' => $affectedBarangays->implode(', '),
+            'affected_families' => $linkedIncidents->sum('affected_families'),
+            'affected_persons' => $linkedIncidents->sum('affected_persons'),
+            'requester_name' => $user->name,
+            'requester_position' => $user->position,
+            'contact_number' => $user->contact_number ?: $user->mobile_no,
+            'narrative' => $incidentSummary,
+            'remarks' => null,
+            'report_series_key' => $seriesKey,
+            'report_classification' => 'regular',
+            'related_incident_rows' => $linkedIncidents->map(fn (array $incident): array => [
+                'city_municipality' => $incident['municipality'],
+                'barangay' => implode(', ', $incident['affected_barangays']),
+                'incident_type' => $incidentType,
+                'occurrence_at' => $incident['occurrence_started_at'],
+                'description' => $incident['incident_name'].' ('.$incident['incident_code'].')',
+            ])->all(),
+        ];
+
+        $record = DB::transaction(function () use ($user, $payload, $requestingLgu, $latestRows, $seriesKey, $signedRequest): AssistanceRequest {
+            $record = AssistanceRequest::create([
+                'reference_number' => 'LGU-RELIEF-'.now()->format('Ymd').'-'.Str::upper(Str::random(5)),
+                'submission_type' => 'lgu_dromic_relief_request',
+                'incident_id' => $latestRows->first()->incident_id,
+                'encoded_by' => $user->id,
+                'lgu_submitted_by' => $user->id,
+                'requesting_agency' => $requestingLgu,
+                'lgu' => $requestingLgu,
+                'lgu_level' => $user->lgu_level ?: 'LGU',
+                'lgu_psgc_code' => $user->lgu_psgc_code,
+                'province' => $latestRows->first()->province,
+                'municipality' => $latestRows->first()->municipality,
+                'barangay' => data_get($payload, 'affected_areas'),
+                'requester' => $payload['requester_name'],
+                'requester_position' => $payload['requester_position'] ?? null,
+                'requester_address' => $payload['requester_address'] ?? null,
+                'contact_number' => $payload['contact_number'] ?? null,
+                'date_requested' => now()->toDateString(),
+                'purpose' => 'Relief Augmentation',
+                'assessment_summary' => $payload['narrative'],
+                'remarks' => $payload['remarks'] ?? null,
+                'affected_families' => $payload['affected_families'],
+                'assessment_form_data' => $payload,
+                'lgu_dromic_payload' => $payload,
+                'lgu_dromic_narrative' => $payload['narrative'],
+                'status' => 'final',
+                'lgu_routing_status' => 'final_for_submission',
+                'lgu_report_status' => 'final',
+                'lgu_dromic_validation_status' => null,
+                'lgu_dromic_series_key' => $seriesKey,
+                'lgu_dromic_report_number' => 1,
+                'lgu_dromic_report_classification' => 'regular',
+                'lgu_relief_request_reference' => $this->newLguReliefRequestReference(),
+                'lgu_finalized_at' => now(),
+            ]);
+            $record->update([
+                'lgu_signed_request_path' => $signedRequest->store("lgu-dromic/{$record->id}/signed", 'public'),
+                'lgu_signed_request_name' => $signedRequest->getClientOriginalName(),
+                'lgu_signed_request_uploaded_at' => now(),
+            ]);
+            $this->syncRequestedFniItems($record, $payload);
+
+            return $record;
+        });
+
+        $audit->log('lgu_relief.consolidated_request_created', $record, [], $record->toArray());
+
+        return redirect('/lgu/dromic-sitrep?tab=requests')
+            ->with('success', "{$record->lgu_relief_request_reference} created for {$latestRows->count()} {$incidentType} incident(s). Review the signed letter, then submit it to DSWD. You can still revise the request until it is submitted.")
+            ->with('preview_report_id', $record->id)
+            ->with('preview_mode', 'incident');
+    }
+
+    public function updateConsolidatedReliefRequest(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit): RedirectResponse
+    {
+        $this->authorizeLguOwner($request, $assistanceRequest);
+        $user = $request->user();
+        abort_unless(
+            (bool) data_get($assistanceRequest->lgu_dromic_payload, 'standalone_relief_request'),
+            422,
+            'Only consolidated lump relief requests can be updated through this action.',
+        );
+        abort_unless(
+            ($assistanceRequest->lgu_report_status ?: $assistanceRequest->status) === 'draft',
+            422,
+            'Only draft relief requests can be edited. Reopen the finalized request first if it has not been submitted yet.',
+        );
+        abort_unless(
+            blank($assistanceRequest->lgu_submitted_to_dswd_at),
+            422,
+            'Submitted relief requests cannot be edited directly. Request a DRRS amendment instead.',
+        );
+
+        $data = $request->validate([
+            'submission_status' => ['nullable', 'in:draft,final'],
+            'incident_series_keys' => ['required', 'array', 'min:1', 'max:50'],
+            'incident_series_keys.*' => ['required', 'string', 'size:64', 'distinct', 'regex:/^[a-f0-9]{64}$/'],
+            'requested_fni_items' => ['required', 'array', 'min:1', 'max:100'],
+            'requested_fni_items.*.fni_library_item_id' => ['required', 'integer', 'distinct', 'exists:fni_library_items,id'],
+            'requested_fni_items.*.requested_quantity' => ['required', 'integer', 'min:1', 'max:999999999'],
+            'signed_request' => ['nullable', 'file', 'mimes:pdf', 'max:10240'],
+        ]);
+        // Match create: missing submission_status means save as final (Update Request).
+        $isDraft = ($data['submission_status'] ?? 'final') === 'draft';
+        $signedRequest = $request->file('signed_request');
+
+        if (blank($assistanceRequest->lgu_signed_request_path)) {
+            $archived = LguSignedDocumentVersion::query()
+                ->where('request_id', $assistanceRequest->id)
+                ->where('kind', 'request')
+                ->latest('id')
+                ->first();
+            if ($archived && filled($archived->path) && Storage::disk('public')->exists($archived->path)) {
+                $assistanceRequest->forceFill([
+                    'lgu_signed_request_path' => $archived->path,
+                    'lgu_signed_request_name' => $archived->original_name ?: 'Signed request letter.pdf',
+                    'lgu_signed_request_uploaded_at' => $archived->uploaded_at ?: now(),
+                ])->save();
+                $assistanceRequest->refresh();
+            }
+        }
+
+        if (! $isDraft && blank($signedRequest) && blank($assistanceRequest->lgu_signed_request_path)) {
+            throw ValidationException::withMessages([
+                'signed_request' => 'Attach the signed request-letter PDF before saving this request as final.',
+            ]);
+        }
+
+        $seriesKeys = collect($data['incident_series_keys'])->values();
+        $rows = AssistanceRequest::query()
+            ->with('incident:id,name,incident_date,province,municipality,barangay')
+            ->where('submission_type', 'lgu_dromic_relief_request')
+            ->whereIn('lgu_dromic_series_key', $seriesKeys)
+            ->where(function ($query) use ($user): void {
+                $query->where('lgu_submitted_by', $user->id)
+                    ->orWhere('encoded_by', $user->id)
+                    ->when(filled($user->lgu_psgc_code), fn ($query) => $query->orWhere('lgu_psgc_code', $user->lgu_psgc_code));
+            })
+            ->get();
+
+        $series = $rows
+            ->reject(fn (AssistanceRequest $row): bool => (bool) data_get($row->lgu_dromic_payload, 'standalone_relief_request'))
+            ->groupBy('lgu_dromic_series_key');
+        if ($seriesKeys->contains(fn (string $key): bool => ! $series->has($key))) {
+            throw ValidationException::withMessages(['incident_series_keys' => 'One or more selected incidents are unavailable to this LGU.']);
+        }
+        if ($seriesKeys->contains(fn (string $key): bool => $series->get($key)->contains(
+            fn (AssistanceRequest $row): bool => filled($row->lgu_relief_request_reference) && (int) $row->id !== (int) $assistanceRequest->id
+        ))) {
+            throw ValidationException::withMessages(['incident_series_keys' => 'A selected incident already has a relief augmentation request. Remove it before continuing.']);
+        }
+        if ($seriesKeys->contains(fn (string $key): bool => $series->get($key)->contains(fn (AssistanceRequest $row): bool => (bool) data_get($row->lgu_dromic_payload, 'has_relief_request')))) {
+            throw ValidationException::withMessages(['incident_series_keys' => 'A selected incident already carries a single-incident request letter. Remove it before continuing.']);
+        }
+        $alreadyClaimed = AssistanceRequest::query()
+            ->where('submission_type', 'lgu_dromic_relief_request')
+            ->where('lgu_dromic_payload->standalone_relief_request', true)
+            ->whereNotNull('lgu_relief_request_reference')
+            ->whereKeyNot($assistanceRequest->id)
+            ->get(['lgu_dromic_payload'])
+            ->flatMap(fn (AssistanceRequest $row): array => array_values((array) data_get($row->lgu_dromic_payload, 'linked_incident_series_keys', [])))
+            ->unique();
+        if ($seriesKeys->contains(fn (string $key): bool => $alreadyClaimed->contains($key))) {
+            throw ValidationException::withMessages(['incident_series_keys' => 'A selected incident is already covered by an existing lump relief request.']);
+        }
+
+        $latestRows = $seriesKeys->map(function (string $key) use ($series): AssistanceRequest {
+            $eligible = $series->get($key)
+                ->filter(fn (AssistanceRequest $row): bool => ($row->lgu_report_status ?: $row->status) !== 'draft')
+                ->sortByDesc('created_at');
+            if ($eligible->isEmpty()) {
+                throw ValidationException::withMessages(['incident_series_keys' => 'Every selected incident must have at least one finalized report.']);
+            }
+            if (blank($eligible->first()->lgu_signed_report_path)) {
+                throw ValidationException::withMessages(['incident_series_keys' => 'Every selected incident must have an uploaded signed DROMIC report.']);
+            }
+
+            return $eligible->first();
+        });
+        $incidentTypes = $latestRows
+            ->map(fn (AssistanceRequest $row): string => trim((string) (data_get($row->lgu_dromic_payload, 'incident_type') ?: $row->incident?->name)))
+            ->filter()
+            ->map(fn (string $type): string => Str::lower($type))
+            ->unique();
+        if ($incidentTypes->count() !== 1) {
+            throw ValidationException::withMessages(['incident_series_keys' => 'All incidents in one relief augmentation request must have the same incident type.']);
+        }
+
+        $incidentType = trim((string) (data_get($latestRows->first()->lgu_dromic_payload, 'incident_type') ?: $latestRows->first()->incident?->name));
+        $linkedIncidents = $latestRows->map(fn (AssistanceRequest $row): array => [
+            'series_key' => $row->lgu_dromic_series_key,
+            'incident_code' => 'DIS-INC-'.Str::upper(Str::substr($row->lgu_dromic_series_key, 0, 12)),
+            'incident_name' => data_get($row->lgu_dromic_payload, 'incident_name') ?: $row->incident?->name ?: $incidentType,
+            'incident_type' => $incidentType,
+            'occurrence_started_at' => data_get($row->lgu_dromic_payload, 'occurrence_started_at') ?: $row->incident?->incident_date?->toDateString(),
+            'province' => $row->province,
+            'municipality' => $row->municipality,
+            'affected_barangays' => array_values((array) data_get($row->lgu_dromic_payload, 'affected_barangays', [])),
+            'affected_families' => (int) ($row->affected_families ?? data_get($row->lgu_dromic_payload, 'affected_families', 0)),
+            'affected_persons' => (int) (
+                data_get($row->lgu_dromic_payload, 'affected_persons')
+                ?: collect((array) data_get($row->lgu_dromic_payload, 'area_rows', []))
+                    ->sum(fn ($area): int => (int) data_get($area, 'affected_persons', 0))
+            ),
+        ])->values();
+        $enrichedItems = $this->withRequestedFniItemDetails([
+            'has_relief_request' => true,
+            'requested_fni_items' => $data['requested_fni_items'],
+        ]);
+        $requestingLgu = $user->lgu_name ?: $latestRows->first()->requesting_agency ?: $assistanceRequest->requesting_agency ?: 'LGU';
+        $firstOccurrence = $linkedIncidents->pluck('occurrence_started_at')->filter()->sort()->first() ?: now()->toDateString();
+        $affectedBarangays = $linkedIncidents->flatMap(fn (array $incident): array => $incident['affected_barangays'])->filter()->unique()->values();
+        $incidentSummary = 'Relief augmentation is requested for '.Str::lower($incidentType).' incidents recorded under '
+            .$linkedIncidents->pluck('incident_code')->implode(', ').'. The requested quantities cover the consolidated needs of the selected incidents.';
+        $payload = [
+            ...((array) $assistanceRequest->lgu_dromic_payload),
+            ...$enrichedItems,
+            'standalone_relief_request' => true,
+            'request_mode' => 'consolidated_multi_incident',
+            'linked_incident_series_keys' => $seriesKeys->all(),
+            'linked_incidents' => $linkedIncidents->all(),
+            'requesting_lgu' => $requestingLgu,
+            'incident_name' => 'Consolidated '.$incidentType.' Relief Augmentation Request',
+            'incident_type' => $incidentType,
+            'incident_types' => [$incidentType],
+            'incident_date' => Str::substr((string) $firstOccurrence, 0, 10),
+            'occurrence_started_at' => $firstOccurrence,
+            'affected_barangays' => $affectedBarangays->all(),
+            'affected_areas' => $affectedBarangays->implode(', '),
+            'affected_families' => $linkedIncidents->sum('affected_families'),
+            'affected_persons' => $linkedIncidents->sum('affected_persons'),
+            'narrative' => $incidentSummary,
+            'related_incident_rows' => $linkedIncidents->map(fn (array $incident): array => [
+                'city_municipality' => $incident['municipality'],
+                'barangay' => implode(', ', $incident['affected_barangays']),
+                'incident_type' => $incidentType,
+                'occurrence_at' => $incident['occurrence_started_at'],
+                'description' => $incident['incident_name'].' ('.$incident['incident_code'].')',
+            ])->all(),
+        ];
+        $old = $assistanceRequest->toArray();
+
+        DB::transaction(function () use ($assistanceRequest, $payload, $requestingLgu, $latestRows, $isDraft, $signedRequest, $user): void {
+            $updates = [
+                'incident_id' => $latestRows->first()->incident_id,
+                'requesting_agency' => $requestingLgu,
+                'lgu' => $requestingLgu,
+                'province' => $latestRows->first()->province,
+                'municipality' => $latestRows->first()->municipality,
+                'barangay' => data_get($payload, 'affected_areas'),
+                'requester' => $payload['requester_name'] ?? $assistanceRequest->requester ?? $user->name,
+                'purpose' => 'Relief Augmentation',
+                'assessment_summary' => $payload['narrative'],
+                'affected_families' => $payload['affected_families'],
+                'assessment_form_data' => $payload,
+                'lgu_dromic_payload' => $payload,
+                'lgu_dromic_narrative' => $payload['narrative'],
+                'status' => $isDraft ? 'draft' : 'final',
+                'lgu_routing_status' => $isDraft ? 'draft' : 'final_for_submission',
+                'lgu_report_status' => $isDraft ? 'draft' : 'final',
+                'lgu_finalized_at' => $isDraft ? null : now(),
+                'lgu_dromic_draft_save_count' => $isDraft
+                    ? ((int) $assistanceRequest->lgu_dromic_draft_save_count) + 1
+                    : (int) $assistanceRequest->lgu_dromic_draft_save_count,
+            ];
+
+            if ($signedRequest) {
+                if (filled($assistanceRequest->lgu_signed_request_path)) {
+                    LguSignedDocumentVersion::query()->create([
+                        'request_id' => $assistanceRequest->id,
+                        'kind' => 'request',
+                        'path' => $assistanceRequest->lgu_signed_request_path,
+                        'original_name' => $assistanceRequest->lgu_signed_request_name,
+                        'uploaded_at' => $assistanceRequest->lgu_signed_request_uploaded_at ?: now(),
+                        'archived_by' => $user->id,
+                    ]);
+                }
+                $updates['lgu_signed_request_path'] = $signedRequest->store("lgu-dromic/{$assistanceRequest->id}/signed", 'public');
+                $updates['lgu_signed_request_name'] = $signedRequest->getClientOriginalName();
+                $updates['lgu_signed_request_uploaded_at'] = now();
+            }
+
+            $assistanceRequest->update($updates);
+            $this->syncRequestedFniItems($assistanceRequest, $payload);
+        });
+
+        $audit->log(
+            $isDraft ? 'lgu_relief.consolidated_request_draft_updated' : 'lgu_relief.consolidated_request_final_saved',
+            $assistanceRequest,
+            $old,
+            $assistanceRequest->fresh()->toArray(),
+        );
+
+        $label = $assistanceRequest->lgu_relief_request_reference ?: $assistanceRequest->reference_number;
+        $response = redirect('/lgu/dromic-sitrep?tab=requests')->with('success', $isDraft
+            ? "{$label} draft updated."
+            : "{$label} saved as final. Review the signed letter, then submit it to DSWD.");
+
+        // Use incident mode so the signed-copies / Submit to DSWD panel is shown.
+        return $isDraft ? $response : $response->with('preview_report_id', $assistanceRequest->id)->with('preview_mode', 'incident');
+    }
+
+    public function reopenForRevision(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit): RedirectResponse
+    {
+        $this->authorizeLguOwner($request, $assistanceRequest);
+        abort_unless($assistanceRequest->submission_type === 'lgu_dromic_relief_request', 404);
+
+        $status = $assistanceRequest->lgu_report_status ?: $assistanceRequest->status;
+        abort_unless(
+            $status === 'final' && blank($assistanceRequest->lgu_submitted_to_dswd_at),
+            422,
+            'Only finalized documents that have not yet been submitted to DSWD can be reopened for direct revision.',
+        );
+        abort_unless(
+            blank($assistanceRequest->lgu_correction_of_id),
+            422,
+            'Correction drafts are already editable. Continue editing the open correction draft.',
+        );
+
+        $old = $assistanceRequest->toArray();
+        $standalone = (bool) data_get($assistanceRequest->lgu_dromic_payload, 'standalone_relief_request');
+
+        // Keep already-uploaded signed PDFs so the LGU can revise encoding without re-uploading
+        // the same letter/report. Replacement remains optional in the revise/upload UI.
+        $assistanceRequest->update([
+            'status' => 'draft',
+            'lgu_routing_status' => 'draft',
+            'lgu_report_status' => 'draft',
+            'lgu_finalized_at' => null,
+            'lgu_amendment_request_status' => null,
+            'lgu_amendment_request_target' => null,
+            'lgu_amendment_request_reason' => null,
+            'lgu_amendment_requested_by' => null,
+            'lgu_amendment_requested_at' => null,
+            'lgu_amendment_reviewed_by' => null,
+            'lgu_amendment_reviewed_at' => null,
+            'lgu_amendment_review_note' => null,
+        ]);
+
+        $fresh = $assistanceRequest->fresh();
+        $audit->log('lgu_dromic.reopened_for_revision', $assistanceRequest, $old, $fresh->toArray());
+
+        $label = $standalone
+            ? ($fresh->lgu_relief_request_reference ?: $fresh->reference_number)
+            : $fresh->reference_number;
+        $tab = $standalone ? 'requests' : 'reports';
+
+        return redirect("/lgu/dromic-sitrep?tab={$tab}")
+            ->with('success', "{$label} reopened as a draft. Update the encoded entries and save as final again. Existing signed copies are kept unless you replace them.")
+            ->with('reopen_draft_id', $fresh->id)
+            ->with('reopen_draft_mode', $standalone ? 'request' : 'report');
+    }
+
     public function update(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit): RedirectResponse
     {
         $this->authorizeLguOwner($request, $assistanceRequest);
         abort_unless(($assistanceRequest->lgu_report_status ?: $assistanceRequest->status) === 'draft', 422, 'Only draft reports can be edited.');
 
+        abort_unless(
+            ! (bool) data_get($assistanceRequest->lgu_dromic_payload, 'standalone_relief_request'),
+            422,
+            'Use the relief request editor for consolidated lump requests.',
+        );
         $data = $this->withRequestedFniItemDetails($this->validatedPayload($request));
         $data = $this->restrictCorrectionPayload($data, $assistanceRequest);
         $user = $request->user();
@@ -614,7 +1183,7 @@ class LguDromicRequestController extends Controller
 
         $response = back()->with('success', $isDraft
             ? "{$assistanceRequest->reference_number} draft updated."
-            : "{$assistanceRequest->reference_number} saved as final and locked. Review, attach signed copies, then submit it to DSWD.");
+            : "{$assistanceRequest->reference_number} saved as final. Review, attach signed copies, then submit it to DSWD. You can still revise encoding until it is submitted.");
 
         return $isDraft ? $response : $response->with('preview_report_id', $assistanceRequest->id);
     }
@@ -638,19 +1207,146 @@ class LguDromicRequestController extends Controller
             'DSWD did not return this document for encoded-data correction.',
         );
 
-        $existing = AssistanceRequest::query()
-            ->where('lgu_correction_of_id', $assistanceRequest->id)
-            ->where('lgu_correction_target', $target)
-            ->whereIn('lgu_report_status', ['draft', 'final'])
-            ->latest('created_at')
-            ->first();
+        $existing = $this->openCorrectionDraftFor($assistanceRequest, $target);
         if ($existing) {
             return back()
                 ->with('success', "Continue the existing correction draft {$existing->reference_number}.")
                 ->with('correction_draft_id', $existing->id);
         }
 
-        $draft = DB::transaction(function () use ($assistanceRequest, $target): AssistanceRequest {
+        $draft = $this->createCorrectionDraftRecord($assistanceRequest, $target);
+        $audit->log('lgu_dromic.correction_draft_created', $draft, [], [
+            ...$draft->toArray(),
+            'source_request_id' => $assistanceRequest->id,
+            'correction_target' => $target,
+        ]);
+
+        return back()
+            ->with('success', "Correction draft {$draft->reference_number} created. The submitted version remains preserved.")
+            ->with('correction_draft_id', $draft->id);
+    }
+
+    public function requestAmendment(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit, WorkflowNotificationService $notifications): RedirectResponse
+    {
+        $this->authorizeLguOwner($request, $assistanceRequest);
+        abort_unless($assistanceRequest->submission_type === 'lgu_dromic_relief_request', 404);
+
+        $data = $request->validate([
+            'target' => ['nullable', 'in:report,request'],
+            'reason' => ['required', 'string', 'min:20', 'max:2000'],
+        ]);
+        $target = $data['target'] ?? 'report';
+        $hasReliefRequest = filled($assistanceRequest->lgu_relief_request_reference)
+            || (bool) data_get($assistanceRequest->lgu_dromic_payload, 'has_relief_request')
+            || (bool) data_get($assistanceRequest->lgu_dromic_payload, 'standalone_relief_request');
+
+        $status = $assistanceRequest->lgu_report_status ?: $assistanceRequest->status;
+        abort_unless(
+            in_array($status, ['advance_submitted', 'submitted'], true),
+            422,
+            $target === 'request'
+                ? 'Only relief requests already submitted to DSWD can request an amendment. Reopen the finalized request for direct revision before submit.'
+                : 'Only reports already submitted to DSWD can request an amendment. Reopen the finalized report for direct revision before submit.',
+        );
+        abort_unless(
+            blank($assistanceRequest->lgu_correction_of_id),
+            422,
+            'Correction drafts cannot request another amendment. Continue editing the open correction draft.',
+        );
+        abort_unless(
+            $assistanceRequest->lgu_amendment_request_status !== 'requested',
+            422,
+            $target === 'request'
+                ? 'An amendment request is already pending DRRS review.'
+                : 'An amendment request is already pending DRIMS review.',
+        );
+
+        if ($target === 'request') {
+            abort_unless(
+                $hasReliefRequest,
+                422,
+                'This record has no relief augmentation request to amend.',
+            );
+            abort_unless(
+                $assistanceRequest->lgu_relief_validation_status !== 'needs_lgu_action',
+                422,
+                'DRRS already returned this request for correction. Use the Correct action instead of requesting another amendment.',
+            );
+            abort_unless(
+                ! in_array($assistanceRequest->lgu_relief_validation_status, ['validated_no_findings', 'superseded'], true),
+                422,
+                'This relief request can no longer be amended because DRRS already closed validation.',
+            );
+            abort_unless(
+                blank($this->openCorrectionDraftFor($assistanceRequest, 'request')),
+                422,
+                'An open correction draft already exists for this relief request.',
+            );
+        } else {
+            abort_unless(
+                ! (bool) data_get($assistanceRequest->lgu_dromic_payload, 'standalone_relief_request'),
+                422,
+                'Standalone relief requests use the Requests tab amendment flow.',
+            );
+            abort_unless(
+                $assistanceRequest->lgu_dromic_validation_status !== 'needs_lgu_action',
+                422,
+                'DRIMS/DRRS already returned this report for correction. Use the Correct action instead of requesting another amendment.',
+            );
+            abort_unless(
+                ! in_array($assistanceRequest->lgu_dromic_validation_status, ['validated_no_findings', 'superseded'], true),
+                422,
+                'This report can no longer be amended because DSWD already closed validation.',
+            );
+            abort_unless(
+                blank($this->openCorrectionDraftFor($assistanceRequest, 'report')),
+                422,
+                'An open correction draft already exists for this report.',
+            );
+        }
+
+        $old = $assistanceRequest->toArray();
+        $assistanceRequest->update([
+            'lgu_amendment_request_status' => 'requested',
+            'lgu_amendment_request_target' => $target,
+            'lgu_amendment_request_reason' => trim($data['reason']),
+            'lgu_amendment_requested_by' => $request->user()->id,
+            'lgu_amendment_requested_at' => now(),
+            'lgu_amendment_reviewed_by' => null,
+            'lgu_amendment_reviewed_at' => null,
+            'lgu_amendment_review_note' => null,
+        ]);
+
+        $fresh = $assistanceRequest->fresh(['encoder', 'lguSubmitter']);
+        $audit->log(
+            $target === 'request' ? 'lgu_relief.amendment_requested' : 'lgu_dromic.amendment_requested',
+            $assistanceRequest,
+            $old,
+            $fresh->toArray(),
+        );
+        $notifications->notifyLguAmendmentRequested($fresh);
+
+        $office = $target === 'request' ? 'DRRS' : 'DRIMS';
+        $label = $target === 'request'
+            ? ($assistanceRequest->lgu_relief_request_reference ?: $assistanceRequest->reference_number)
+            : $assistanceRequest->reference_number;
+
+        return back()->with('success', "Amendment request sent to {$office} for {$label}.");
+    }
+
+    public function openCorrectionDraftFor(AssistanceRequest $assistanceRequest, string $target): ?AssistanceRequest
+    {
+        return AssistanceRequest::query()
+            ->where('lgu_correction_of_id', $assistanceRequest->id)
+            ->where('lgu_correction_target', $target)
+            ->whereIn('lgu_report_status', ['draft', 'final'])
+            ->latest('created_at')
+            ->first();
+    }
+
+    public function createCorrectionDraftRecord(AssistanceRequest $assistanceRequest, string $target): AssistanceRequest
+    {
+        return DB::transaction(function () use ($assistanceRequest, $target): AssistanceRequest {
             $revisionNumber = ((int) AssistanceRequest::query()
                 ->where('submission_type', 'lgu_dromic_relief_request')
                 ->where('lgu_dromic_series_key', $assistanceRequest->lgu_dromic_series_key)
@@ -683,6 +1379,14 @@ class LguDromicRequestController extends Controller
                 'lgu_signed_request_uploaded_at',
                 'submitted_at',
                 'completed_at',
+                'lgu_amendment_request_status',
+                'lgu_amendment_request_target',
+                'lgu_amendment_request_reason',
+                'lgu_amendment_requested_by',
+                'lgu_amendment_requested_at',
+                'lgu_amendment_reviewed_by',
+                'lgu_amendment_reviewed_at',
+                'lgu_amendment_review_note',
             ]);
             $copy->fill([
                 'reference_number' => 'LGU-DROMIC-'.now()->format('Ymd').'-'.Str::upper(Str::random(5)),
@@ -698,6 +1402,14 @@ class LguDromicRequestController extends Controller
                     ? Str::limit($assistanceRequest->lgu_relief_request_reference, 35, '').'-C'.$revisionNumber
                     : null,
                 'lgu_dromic_draft_save_count' => 1,
+                'lgu_amendment_request_status' => null,
+                'lgu_amendment_request_target' => null,
+                'lgu_amendment_request_reason' => null,
+                'lgu_amendment_requested_by' => null,
+                'lgu_amendment_requested_at' => null,
+                'lgu_amendment_reviewed_by' => null,
+                'lgu_amendment_reviewed_at' => null,
+                'lgu_amendment_review_note' => null,
             ]);
             if ($target === 'request') {
                 $copy->lgu_signed_report_path = $assistanceRequest->lgu_signed_report_path;
@@ -710,16 +1422,6 @@ class LguDromicRequestController extends Controller
 
             return $copy;
         });
-
-        $audit->log('lgu_dromic.correction_draft_created', $draft, [], [
-            ...$draft->toArray(),
-            'source_request_id' => $assistanceRequest->id,
-            'correction_target' => $target,
-        ]);
-
-        return back()
-            ->with('success', "Correction draft {$draft->reference_number} created. The submitted version remains preserved.")
-            ->with('correction_draft_id', $draft->id);
     }
 
     public function uploadSignedCopies(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit, WorkflowNotificationService $notifications): RedirectResponse
@@ -728,9 +1430,19 @@ class LguDromicRequestController extends Controller
         abort_if(($assistanceRequest->lgu_report_status ?: $assistanceRequest->status) === 'draft', 422, 'Save the report as final before uploading signed copies.');
 
         $hasReliefRequest = (bool) data_get($assistanceRequest->lgu_dromic_payload, 'has_relief_request');
+        $standaloneReliefRequest = (bool) data_get($assistanceRequest->lgu_dromic_payload, 'standalone_relief_request');
+        // Accept common PDF client MIME types (Windows often sends application/octet-stream).
+        // Extension/content checks remain via mimes:pdf.
+        $pdfFileRules = ['file', 'mimes:pdf', 'max:10240'];
         $data = $request->validate([
-            'signed_report' => ['nullable', 'file', 'mimes:pdf', 'mimetypes:application/pdf', 'max:10240', 'required_without:signed_request'],
-            'signed_request' => [$hasReliefRequest ? 'nullable' : 'prohibited', 'file', 'mimes:pdf', 'mimetypes:application/pdf', 'max:10240'],
+            'signed_report' => $standaloneReliefRequest
+                ? ['prohibited']
+                : ['nullable', 'required_without:signed_request', ...$pdfFileRules],
+            'signed_request' => ! $hasReliefRequest
+                ? ['prohibited']
+                : ($standaloneReliefRequest
+                    ? ['required', ...$pdfFileRules]
+                    : ['nullable', ...$pdfFileRules]),
         ]);
         abort_if(
             $request->hasFile('signed_report')
@@ -823,23 +1535,48 @@ class LguDromicRequestController extends Controller
     public function submitToDswd(Request $request, AssistanceRequest $assistanceRequest, AuditLogger $audit, WorkflowNotificationService $notifications): RedirectResponse
     {
         $this->authorizeLguOwner($request, $assistanceRequest);
-        abort_unless($assistanceRequest->lgu_report_status === 'final', 422, 'This report was already submitted. Upload any remaining signed copies to complete the submission.');
+
+        $standaloneReliefRequest = (bool) data_get($assistanceRequest->lgu_dromic_payload, 'standalone_relief_request');
+        $status = $assistanceRequest->lgu_report_status ?: $assistanceRequest->status;
+
+        // Standalone lump requests may still be draft after encoding; allow submit when the
+        // signed request letter is already attached (finalize + submit in one step).
+        if ($status === 'draft' && $standaloneReliefRequest && filled($assistanceRequest->lgu_signed_request_path)) {
+            $assistanceRequest->update([
+                'status' => 'final',
+                'lgu_routing_status' => 'final_for_submission',
+                'lgu_report_status' => 'final',
+                'lgu_finalized_at' => $assistanceRequest->lgu_finalized_at ?: now(),
+            ]);
+            $assistanceRequest->refresh();
+            $status = 'final';
+        }
+
+        abort_unless($status === 'final', 422, 'This report was already submitted. Upload any remaining signed copies to complete the submission.');
 
         $old = $assistanceRequest->toArray();
-        $hasReliefRequest = (bool) data_get($assistanceRequest->lgu_dromic_payload, 'has_relief_request');
-        $signedComplete = filled($assistanceRequest->lgu_signed_report_path)
-            && (! $hasReliefRequest || filled($assistanceRequest->lgu_signed_request_path));
-        $routingStatus = ! $hasReliefRequest
-            ? 'report_submitted'
-            : ($signedComplete ? 'for_drmd_aa_review' : 'awaiting_signed_copies');
+        $hasReliefRequest = (bool) data_get($assistanceRequest->lgu_dromic_payload, 'has_relief_request')
+            || $standaloneReliefRequest
+            || filled($assistanceRequest->lgu_relief_request_reference);
+        $signedComplete = $standaloneReliefRequest
+            ? filled($assistanceRequest->lgu_signed_request_path)
+            : filled($assistanceRequest->lgu_signed_report_path)
+                && (! $hasReliefRequest || filled($assistanceRequest->lgu_signed_request_path));
+        $routingStatus = $standaloneReliefRequest
+            ? ($signedComplete ? 'for_drrs_relief_validation' : 'awaiting_signed_copies')
+            : (! $hasReliefRequest
+                ? 'report_submitted'
+                : ($signedComplete ? 'for_drmd_aa_review' : 'awaiting_signed_copies'));
 
         $assistanceRequest->update([
             'status' => $signedComplete ? 'submitted_with_signed_copies' : 'advance_copy_submitted',
             'lgu_report_status' => $signedComplete ? 'submitted' : 'advance_submitted',
             'lgu_routing_status' => $routingStatus,
-            'lgu_dromic_validation_status' => $assistanceRequest->lgu_correction_target === 'request'
+            'lgu_dromic_validation_status' => $standaloneReliefRequest
+                ? null
+                : ($assistanceRequest->lgu_correction_target === 'request'
                 ? $assistanceRequest->lgu_dromic_validation_status
-                : 'pending_review',
+                : 'pending_review'),
             'lgu_relief_validation_status' => $hasReliefRequest ? 'pending_review' : null,
             'submitted_at' => $assistanceRequest->submitted_at ?: now(),
             'lgu_submitted_to_dswd_at' => $assistanceRequest->lgu_submitted_to_dswd_at ?: now(),
@@ -854,12 +1591,16 @@ class LguDromicRequestController extends Controller
         }
         $audit->log('lgu_dromic.submitted_to_dswd', $assistanceRequest, $old, $fresh->toArray());
 
-        return back()->with('success', $signedComplete
-            ? "{$assistanceRequest->reference_number} submitted to DSWD with the required signed copy/copies."
-            : "{$assistanceRequest->reference_number} submitted as an advance copy. Signed copy requirements remain pending and reminders are active.");
+        $label = $standaloneReliefRequest
+            ? ($assistanceRequest->lgu_relief_request_reference ?: $assistanceRequest->reference_number)
+            : $assistanceRequest->reference_number;
+
+        return redirect('/lgu/dromic-sitrep?tab=requests')->with('success', $signedComplete
+            ? "{$label} submitted to DSWD. DRRS will acknowledge and validate the signed request letter."
+            : "{$label} submitted as an advance copy. Signed copy requirements remain pending and reminders are active.");
     }
 
-    public function polish(Request $request): JsonResponse
+    public function polish(Request $request, GroqChatService $groq): JsonResponse
     {
         $data = $request->validate([
             'mode' => ['required', 'in:generate,polish,justification,caption'],
@@ -921,7 +1662,7 @@ class LguDromicRequestController extends Controller
         try {
             $payload = [
                 'model' => config('services.groq.model'),
-                'temperature' => $data['mode'] === 'generate' ? 0.3 : 0.18,
+                'temperature' => $data['mode'] === 'generate' ? 0.3 : ($data['mode'] === 'polish' ? 0.42 : 0.18),
                 'max_completion_tokens' => 1000,
                 'messages' => [
                     ['role' => 'system', 'content' => $data['mode'] === 'justification'
@@ -938,37 +1679,55 @@ class LguDromicRequestController extends Controller
                 ],
             ];
             if (in_array($data['mode'], ['generate', 'polish'], true)) {
-                $payload['messages'][0]['content'] = $this->situationOverviewSystemPrompt($factPayload);
+                $payload['messages'][0]['content'] = $this->situationOverviewSystemPrompt($factPayload, $data['mode'] === 'polish');
                 $payload['messages'][1]['content'] = ($data['mode'] === 'generate'
                     ? 'Write the Situation Overview in exactly four distinct paragraphs using the required paragraph purpose and order. '.$this->situationOverviewUserDirective($incidentProfile)
-                    : 'Rewrite the draft into exactly four distinct paragraphs using the required paragraph purpose and order. Preserve supported facts and remove repetition. '.$this->situationOverviewUserDirective($incidentProfile))
+                    : 'Polish the existing Situation Overview. Keep exactly four paragraphs in the required purpose and order. Keep every supported fact, number, date, place, office, and name. Rewrite the wording of every paragraph so the result is clearly different from the draft, with tighter official prose, better flow, and no copied sentences. Do not invent facts. '.$this->situationOverviewUserDirective($incidentProfile))
                     ."\n\n".($data['mode'] === 'polish' ? 'Existing draft: '.($data['text'] ?? '')."\n\n" : '')
                     ."Encoded data:\n".$facts;
             }
 
-            $response = Http::timeout(45)->retry(1, 500)->withToken($apiKey)->acceptJson()->post(
-                rtrim((string) config('services.groq.base_url'), '/').'/chat/completions',
-                $payload,
-            );
+            ['response' => $response, 'model' => $model] = $groq->complete($payload);
         } catch (\Throwable $exception) {
             report($exception);
 
-            return response()->json(['message' => 'Groq AI could not be reached.'], 503);
+            return response()->json(['message' => $groq->unreachableMessage($exception)], 503);
         }
 
         if (! $response->successful()) {
             report(new \RuntimeException('Groq API error '.$response->status().': '.$response->body()));
 
-            return response()->json(['message' => 'Groq AI could not process the narrative.'], 502);
+            return response()->json(['message' => $groq->errorMessage($response, 'Groq AI could not process the narrative.')], 502);
         }
 
-        $polished = AssessmentNarrative::sanitize((string) data_get($response->json(), 'choices.0.message.content'));
+        $polished = $groq->messageText($response);
 
         if (Str::startsWith($polished, 'NEEDS_USER_INPUT:')) {
             return response()->json([
                 'message' => trim(Str::after($polished, 'NEEDS_USER_INPUT:'))
                     ?: 'Please correct the Situation Overview so it agrees with the encoded report data.',
             ], 422);
+        }
+
+        $draft = trim((string) ($data['text'] ?? ''));
+        if ($data['mode'] === 'polish' && $draft !== '' && $this->situationOverviewTextsEquivalent($draft, $polished)) {
+            $retryPayload = $payload;
+            $retryPayload['temperature'] = 0.55;
+            $retryPayload['messages'][1]['content'] = 'The previous polish copied the existing draft. Rewrite it now. Keep the same four-paragraph purposes and every supported fact, number, date, place, office, and name. Change the wording of every paragraph. Do not return the same sentences. '.$this->situationOverviewUserDirective($incidentProfile)
+                ."\n\nExisting draft:\n".$draft."\n\nEncoded data:\n".$facts;
+
+            try {
+                ['response' => $retryResponse, 'model' => $retryModel] = $groq->complete($retryPayload);
+                if ($retryResponse->successful()) {
+                    $retryText = $groq->messageText($retryResponse);
+                    if ($retryText !== '' && ! Str::startsWith($retryText, 'NEEDS_USER_INPUT:')) {
+                        $polished = $retryText;
+                        $model = $retryModel;
+                    }
+                }
+            } catch (\Throwable $exception) {
+                report($exception);
+            }
         }
 
         if (in_array($data['mode'], ['generate', 'polish'], true) && $polished !== '' && $this->situationOverviewNeedsCorrection($polished, $facts, $factPayload)) {
@@ -978,12 +1737,9 @@ class LguDromicRequestController extends Controller
                 ."\n\nDraft to correct:\n".$polished."\n\nEncoded data:\n".$facts;
 
             try {
-                $correctionResponse = Http::timeout(45)->retry(1, 500)->withToken($apiKey)->acceptJson()->post(
-                    rtrim((string) config('services.groq.base_url'), '/').'/chat/completions',
-                    $correctionPayload,
-                );
+                ['response' => $correctionResponse] = $groq->complete($correctionPayload);
                 if ($correctionResponse->successful()) {
-                    $corrected = AssessmentNarrative::sanitize((string) data_get($correctionResponse->json(), 'choices.0.message.content'));
+                    $corrected = $groq->messageText($correctionResponse);
                     if (! $this->situationOverviewNeedsCorrection($corrected, $facts, $factPayload)) {
                         $polished = $corrected;
                     }
@@ -1000,7 +1756,7 @@ class LguDromicRequestController extends Controller
         }
 
         return $polished !== ''
-            ? response()->json(['polished' => $polished, 'provider' => 'Groq', 'model' => config('services.groq.model')])
+            ? response()->json(['polished' => $polished, 'provider' => 'Groq', 'model' => $model])
             : response()->json(['message' => 'Groq AI returned an empty result.'], 502);
     }
 
@@ -1196,6 +1952,108 @@ PROMPT;
         );
 
         return $request->boolean('inline') ? $pdf->stream($filename) : $pdf->download($filename);
+    }
+
+    public function preview(Request $request): JsonResponse|HttpResponse
+    {
+        $user = $request->user();
+        abort_if($this->isProvinceLgu($user->lgu_level), 403, 'PLGU accounts are for monitoring city/municipal LGU reports.');
+
+        $record = $this->makeLivePreviewReport($request);
+        $payload = (array) ($record->lgu_dromic_payload ?? []);
+        $orientation = $this->dromicPdfOrientation($payload);
+        $wantsPdf = $request->boolean('pdf')
+            || str_contains(strtolower((string) $request->header('Accept', '')), 'application/pdf');
+
+        if ($wantsPdf) {
+            $filename = InlinePdfFilename::fromCandidates(
+                'LGU-DROMIC-Draft-Preview',
+                'LGU-DROMIC-preview',
+            );
+            $pdf = Pdf::loadView('documents.lgu-dromic', [
+                'request' => $record,
+                'reportProfile' => $this->dromicReportProfile($record),
+                'orientation' => $orientation,
+            ])->setPaper('a4', $orientation);
+            $pdf->render();
+
+            $dompdf = $pdf->getDomPDF();
+            $font = $dompdf->getFontMetrics()->getFont('Helvetica', 'normal');
+            $canvas = $dompdf->getCanvas();
+            $canvas->page_text(
+                $canvas->get_width() - 92,
+                $canvas->get_height() - 20,
+                'Page {PAGE_NUM} of {PAGE_COUNT}',
+                $font,
+                8,
+                [0.25, 0.31, 0.39],
+            );
+
+            return $pdf->stream($filename);
+        }
+
+        $html = view('documents.lgu-dromic', [
+            'request' => $record,
+            'reportProfile' => $this->dromicReportProfile($record),
+            'orientation' => $orientation,
+            'screenPreview' => true,
+        ])->render();
+
+        return response()->json([
+            'html' => $html,
+            'orientation' => $orientation,
+        ]);
+    }
+
+    private function makeLivePreviewReport(Request $request): AssistanceRequest
+    {
+        $user = $request->user();
+        $data = $request->except(['_token']);
+        $requestingLgu = $user->lgu_name ?: ($data['requesting_lgu'] ?? 'LGU');
+        $narrative = filled($data['narrative'] ?? null)
+            ? (string) $data['narrative']
+            : '';
+        $incidentName = filled($data['incident_name'] ?? null)
+            ? (string) $data['incident_name']
+            : (filled($data['incident_type'] ?? null) ? (string) $data['incident_type'] : 'Disaster Incident');
+        $province = $data['province'] ?? $this->resolveLguProvince($user);
+        $municipality = $data['municipality'] ?? $user->lgu_name;
+        $data['province'] = $province;
+        $data['municipality'] = $municipality;
+        $data['requesting_lgu'] = $data['requesting_lgu'] ?? $requestingLgu;
+
+        $record = new AssistanceRequest([
+            'reference_number' => 'Draft LGU DROMIC / SitRep',
+            'submission_type' => 'lgu_dromic_relief_request',
+            'requesting_agency' => $requestingLgu,
+            'lgu' => $requestingLgu,
+            'lgu_level' => $user->lgu_level ?: 'LGU',
+            'lgu_psgc_code' => $user->lgu_psgc_code,
+            'province' => $province,
+            'municipality' => $municipality,
+            'barangay' => $data['barangay'] ?? null,
+            'requester' => $data['requester_name'] ?? $data['dromic_reporter'] ?? $user->name,
+            'requester_position' => $data['requester_position'] ?? null,
+            'requester_address' => $data['requester_address'] ?? null,
+            'contact_number' => $data['contact_number'] ?? null,
+            'assessment_summary' => $narrative,
+            'affected_families' => $data['affected_families'] ?? null,
+            'lgu_dromic_payload' => $data,
+            'lgu_dromic_narrative' => $narrative,
+            'lgu_dromic_report_number' => $data['report_number'] ?? $data['lgu_dromic_report_number'] ?? 1,
+            'lgu_dromic_report_classification' => $data['report_classification'] ?? 'regular',
+            'lgu_submitted_to_dswd_at' => null,
+        ]);
+        $record->setRelation('incident', new Incident([
+            'name' => $incidentName,
+            'incident_date' => $data['incident_date'] ?? $data['occurrence_started_at'] ?? now()->toDateString(),
+            'province' => $province,
+            'municipality' => $municipality,
+            'barangay' => $data['barangay'] ?? null,
+            'summary' => $data['incident_summary'] ?? null,
+        ]));
+
+        return $record;
     }
 
     private function dromicPdfOrientation(array $payload): string
@@ -1507,9 +2365,13 @@ PROMPT;
             'damaged_houses' => ['nullable', 'integer', 'min:0'],
             'casualties' => ['nullable', 'string', 'max:1000'],
             'needs' => ['nullable', 'string', 'max:3000'],
-            'requested_fni_items' => $isDraft
-                ? ['exclude_unless:has_relief_request,true', 'nullable', 'array', 'max:100']
-                : ['exclude_unless:has_relief_request,true', 'required_if:has_relief_request,true', 'array', 'min:1', 'max:100'],
+            'requested_fni_items' => array_values(array_filter([
+                'nullable',
+                'array',
+                'max:100',
+                (! $isDraft && $request->boolean('has_relief_request')) ? 'required' : null,
+                (! $isDraft && $request->boolean('has_relief_request')) ? 'min:1' : null,
+            ])),
             'requested_fni_items.*.fni_library_item_id' => ['required', 'integer', 'distinct', 'exists:fni_library_items,id'],
             'requested_fni_items.*.requested_quantity' => $isDraft
                 ? ['nullable', 'integer', 'min:1', 'max:999999999']
@@ -2917,7 +3779,7 @@ PROMPT;
         ])));
     }
 
-    private function situationOverviewSystemPrompt(array $factPayload = []): string
+    private function situationOverviewSystemPrompt(array $factPayload = [], bool $forPolish = false): string
     {
         $profile = $this->situationOverviewIncidentProfile($factPayload);
 
@@ -2936,10 +3798,12 @@ PROMPT;
             ? 'Official PAGASA/PHIVOLCS advisory screenshots are marked not applicable or were not supplied. Treat warning-agency content as absent: do not mention PAGASA, PHIVOLCS, weather advisories, earthquake bulletins, or write that those agencies are irrelevant or unused.'
             : 'Treat the encoded form data and readable text extracted from pasted warning-agency screenshots as the only sources of truth. Never invent, infer, or complete missing facts. Never treat a forecast, warning, or hazard statement as an observed local impact. Never mix PAGASA/PHIVOLCS figures with LGU-validated affected-population figures. Use an advisory only when it includes a verified relevant excerpt or extracted summary.';
 
-        return <<<PROMPT
-Write as the LGU employee responsible for the current DROMIC/Situational Report. Sound human, direct, observant, and professional. {$agencyTruth} Never invent, infer, or complete missing facts.
+        $lead = $forPolish
+            ? "You are the LGU employee polishing an existing Situation Overview, not writing a new one. Sound human, direct, observant, and professional. {$agencyTruth} Never invent, infer, or complete missing facts. Keep the draft's meaning, facts, numbers, dates, names, offices, and four-paragraph purposes. Rewrite the wording of every paragraph so grammar, flow, concision, and official tone improve. It is a failure to return the existing draft verbatim or with only trivial punctuation changes. Reject any draft that is merely N/A, NA, Not Applicable, To Follow, TBA, TBD, pending, none, no data, random text, generic filler, or another placeholder, or that materially contradicts the encoded report data, and return exactly: NEEDS_USER_INPUT: Please replace the placeholder or correct the Situation Overview so it agrees with the encoded report data."
+            : "Write as the LGU employee responsible for the current DROMIC/Situational Report. Sound human, direct, observant, and professional. {$agencyTruth} Never invent, infer, or complete missing facts. Before writing, identify the encoded incident type and write only an overview appropriate to that type. Reject any draft that is merely N/A, NA, Not Applicable, To Follow, TBA, TBD, pending, none, no data, random text, generic filler, or another placeholder. Also reject a draft that materially contradicts the encoded incident type, incident status, dates, affected-population totals, displacement totals, damage, casualties, assistance, gaps, or response actions. Do not silently turn contradictory or meaningless input into plausible official prose. In either case, return exactly: NEEDS_USER_INPUT: Please replace the placeholder or correct the Situation Overview so it agrees with the encoded report data. When generating without an existing draft, use only coherent supported facts and omit unavailable facts.";
 
-Before writing, identify the encoded incident type and write only an overview appropriate to that type. Reject any draft that is merely N/A, NA, Not Applicable, To Follow, TBA, TBD, pending, none, no data, random text, generic filler, or another placeholder. Also reject a draft that materially contradicts the encoded incident type, incident status, dates, affected-population totals, displacement totals, damage, casualties, assistance, gaps, or response actions. Do not silently turn contradictory or meaningless input into plausible official prose. In either case, return exactly: NEEDS_USER_INPUT: Please replace the placeholder or correct the Situation Overview so it agrees with the encoded report data. When generating without an existing draft, use only coherent supported facts and omit unavailable facts.
+        return <<<PROMPT
+{$lead}
 
 On the first mention of any acronym, write its complete official term followed by the acronym in parentheses, for example "Local Government Unit (LGU)." Use only the acronym on every succeeding mention, and never spell out the same acronym more than once. Never write "as reported by the local government unit," "as reported by the LGU," or an equivalent attribution to the reporting LGU. Instead, use that sentence to elaborate on the actual local hazard, observed condition, effect on the community, or ongoing response supported by the encoded facts.
 
@@ -2955,6 +3819,17 @@ Paragraph 4 — Report conclusion. For a Regular Report, conclude in the LGU's v
 
 Use readable whole numbers with thousands separators and proper units. Never discuss whether a screenshot, source, section, or value was readable, unreadable, timed out, missing, unavailable, unspecified, unencoded, or not provided; omit it silently. Do not include reporting cut-off times, information-received times, reporter names, form-completion details, database language, or repetitive conclusions. Each fact or idea may appear in only one paragraph. When data is limited, keep the applicable paragraph concise rather than padding it or borrowing content from another paragraph.
 PROMPT;
+    }
+
+    private function situationOverviewTextsEquivalent(string $left, string $right): bool
+    {
+        $normalize = static function (string $text): string {
+            $collapsed = preg_replace('/\s+/u', ' ', trim($text));
+
+            return Str::lower((string) $collapsed);
+        };
+
+        return $normalize($left) !== '' && $normalize($left) === $normalize($right);
     }
 
     private function situationParagraphCount(string $narrative): int
@@ -3397,9 +4272,11 @@ PROMPT;
             return $original;
         }
 
+        // Report corrections edit sitrep encoding, including FNI needs for the incident
+        // (lump path). Keep submitted FNI rows. Do not invent/detach a request letter here —
+        // Include-request remains a request-target concern (unique relief reference).
         $data['has_relief_request'] = false;
         $data['relief_requested'] = '';
-        $data['requested_fni_items'] = [];
 
         return $data;
     }
@@ -3450,8 +4327,10 @@ PROMPT;
                 ->exists();
         // Prefer role checks for DRIMS/DRRS review so a stale Spatie permission cache
         // (or missing role→permission sync after a DB wipe) cannot block advance/signed PDFs.
-        $canViewAsDswd = filled($assistanceRequest->lgu_submitted_to_dswd_at)
-            && (
+        $canViewAsDswd = (
+            filled($assistanceRequest->lgu_submitted_to_dswd_at)
+            || $this->isLinkedSitRepForSubmittedLumpRequest($assistanceRequest)
+        ) && (
                 $user->hasAnyRole(['RROS', 'RROS AA', 'DRIMS', 'DRRS', 'DRRS AA', 'QRT', 'Quick Response Team', 'Super Admin'])
                 || $user->can('route lgu dromic requests')
                 || $user->can('monitor requests')
@@ -3467,11 +4346,27 @@ PROMPT;
         );
     }
 
+    private function isLinkedSitRepForSubmittedLumpRequest(AssistanceRequest $assistanceRequest): bool
+    {
+        $seriesKey = $assistanceRequest->lgu_dromic_series_key;
+        if (blank($seriesKey) || (bool) data_get($assistanceRequest->lgu_dromic_payload, 'standalone_relief_request')) {
+            return false;
+        }
+
+        return AssistanceRequest::query()
+            ->where('submission_type', 'lgu_dromic_relief_request')
+            ->where('lgu_dromic_payload->standalone_relief_request', true)
+            ->whereNotNull('lgu_submitted_to_dswd_at')
+            ->where(function ($query) use ($seriesKey): void {
+                $query->whereJsonContains('lgu_dromic_payload->linked_incident_series_keys', $seriesKey)
+                    ->orWhere('lgu_dromic_payload->linked_incidents', 'like', '%'.$seriesKey.'%');
+            })
+            ->exists();
+    }
+
     private function syncRequestedFniItems(AssistanceRequest $request, array $data): void
     {
-        $rows = (bool) ($data['has_relief_request'] ?? false)
-            ? collect($data['requested_fni_items'] ?? [])
-            : collect();
+        $rows = collect($data['requested_fni_items'] ?? []);
         $fniItemIds = [];
 
         foreach ($rows as $row) {
@@ -3506,12 +4401,6 @@ PROMPT;
 
     private function withRequestedFniItemDetails(array $data): array
     {
-        if (! (bool) ($data['has_relief_request'] ?? false)) {
-            $data['requested_fni_items'] = [];
-
-            return $data;
-        }
-
         $rows = collect($data['requested_fni_items'] ?? []);
         if ($rows->isEmpty()) {
             $data['requested_fni_items'] = [];
@@ -3549,8 +4438,11 @@ PROMPT;
         }
 
         $hasReliefRequest = (bool) data_get($assistanceRequest->lgu_dromic_payload, 'has_relief_request');
-        $signedComplete = filled($assistanceRequest->lgu_signed_report_path)
-            && (! $hasReliefRequest || filled($assistanceRequest->lgu_signed_request_path));
+        $standaloneReliefRequest = (bool) data_get($assistanceRequest->lgu_dromic_payload, 'standalone_relief_request');
+        $signedComplete = $standaloneReliefRequest
+            ? filled($assistanceRequest->lgu_signed_request_path)
+            : filled($assistanceRequest->lgu_signed_report_path)
+                && (! $hasReliefRequest || filled($assistanceRequest->lgu_signed_request_path));
 
         if (! $signedComplete) {
             return;

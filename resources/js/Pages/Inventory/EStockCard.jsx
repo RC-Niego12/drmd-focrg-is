@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import AppLayout, { Card, DataTable, ExportableCard, TableActionButton } from '@/Layouts/AppLayout';
 import LookerMultiSelect from '@/Components/LookerMultiSelect';
 import SectionTabs from '@/Components/SectionTabs';
+import { formatExpiryMonth } from '@/Utils/dateFormat';
 
 const formatNumber = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const formatDate = (value) => value ? new Date(`${value}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '-';
@@ -377,7 +378,7 @@ function renderLedgerRow(row, tab, onView) {
                 <p className="font-black">{row.item}</p>
                 <p className="text-xs text-slate-500 dark:text-zinc-400">{row.brand_specification}</p>
             </td>
-            <td className="whitespace-nowrap px-4 py-3">{row.expiry}</td>
+            <td className="whitespace-nowrap px-4 py-3">{formatExpiryMonth(row.expiry)}</td>
             <td className="whitespace-nowrap px-4 py-3">{row.source_of_goods}</td>
             <td className="whitespace-nowrap px-4 py-3">{row.purpose}</td>
             <td className="whitespace-nowrap px-4 py-3">{row.sender_recipient}</td>
@@ -419,48 +420,108 @@ function renderGrandTotalRow(rows, tab) {
 }
 
 function LedgerDetailModal({ row, onClose }) {
-    const details = [
-        ['Date', formatDate(row.date)],
-        ['Warehouse', row.warehouse],
-        ['Reference Number', row.reference],
-        ['RIS / STF', row.ris],
+    const isReceipt = row.type === 'receipt';
+    const unitCost = isReceipt ? row.receipt_unit_cost : row.issuance_unit_cost;
+    const stockDetails = [
+        ['Warehouse', row.warehouse, 'sm:col-span-2'],
         ['Partnership', row.partnership],
         ['Category', row.category],
-        ['Item', row.item],
-        ['Brand / Specification', row.brand_specification],
-        ['Expiry', row.expiry],
+        ['Brand / Specification', row.brand_specification, 'sm:col-span-2'],
+        ['Expiry', formatExpiryMonth(row.expiry)],
+        ['Unit Cost', formatCurrency(unitCost)],
+    ];
+    const transactionDetails = [
+        ['Transaction Date', formatDate(row.date)],
+        ['Reference Number', row.reference],
+        ['RIS / STF', row.ris],
         ['Source of Goods', row.source_of_goods],
         ['Purpose', row.purpose],
         ['Sender / Recipient', row.sender_recipient],
-        ['Incoming Quantity', row.receipt_quantity ? formatNumber(row.receipt_quantity) : '-'],
-        ['Outgoing Quantity', row.issuance_quantity ? formatNumber(row.issuance_quantity) : '-'],
-        ['Running Balance', formatNumber(row.balance)],
-        ['Unit Cost', formatCurrency(row.type === 'receipt' ? row.receipt_unit_cost : row.issuance_unit_cost)],
-        ['Balance Cost', formatCurrency(row.balance_cost)],
-        ['Personnel', row.personnel],
+        ['Personnel', row.personnel, 'sm:col-span-2'],
     ];
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
-            <div className="max-h-[92vh] w-full max-w-3xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
-                <div className="flex items-start justify-between gap-4 border-b border-slate-200 p-4 dark:border-zinc-800">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+            <div className="max-h-[94vh] w-full max-w-5xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
+                <div className="flex items-start justify-between gap-4 border-b border-slate-200 bg-gradient-to-r from-white via-sky-50 to-cyan-50 px-6 py-5 dark:border-zinc-800 dark:from-zinc-950 dark:via-zinc-950 dark:to-brand-950/30">
                     <div>
                         <p className="text-[11px] font-black uppercase tracking-wide text-brand-700 dark:text-brand-100">E-Stock Card Details</p>
-                        <h2 className="mt-1 text-lg font-black">{row.item}</h2>
+                        <div className="mt-1 flex flex-wrap items-center gap-3">
+                            <h2 className="text-2xl font-black text-slate-950 dark:text-white">{row.item}</h2>
+                            <span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-wide ${isReceipt ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                {isReceipt ? 'Receipt' : 'Issuance'}
+                            </span>
+                        </div>
                     </div>
-                    <button type="button" onClick={onClose} className="rounded-md p-2 text-slate-500 transition hover:bg-slate-100 dark:hover:bg-zinc-800">
+                    <button type="button" onClick={onClose} className="rounded-xl border border-slate-200 bg-white p-2.5 text-slate-500 shadow-sm transition hover:bg-slate-100 hover:text-slate-900 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:bg-zinc-800">
                         <X className="h-5 w-5" />
                     </button>
                 </div>
-                <div className="grid max-h-[70vh] gap-2 overflow-y-auto p-4 sm:grid-cols-2 xl:grid-cols-3">
-                    {details.map(([label, value]) => (
-                        <div key={label} className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs dark:border-zinc-800 dark:bg-zinc-900">
-                            <p className="font-black uppercase tracking-wide text-slate-500 dark:text-zinc-400">{label}</p>
-                            <p className="mt-1 break-words text-sm font-semibold text-slate-900 dark:text-zinc-100">{value || '-'}</p>
-                        </div>
-                    ))}
+                <div className="max-h-[78vh] space-y-5 overflow-y-auto p-5">
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <LedgerMetric icon={ArrowDownToLine} label="Incoming" value={row.receipt_quantity ? formatNumber(row.receipt_quantity) : '-'} tone="emerald" active={isReceipt} />
+                        <LedgerMetric icon={ArrowUpFromLine} label="Outgoing" value={row.issuance_quantity ? formatNumber(row.issuance_quantity) : '-'} tone="rose" active={!isReceipt} />
+                        <LedgerMetric icon={Boxes} label="Running Balance" value={formatNumber(row.balance)} tone="blue" active />
+                        <LedgerMetric icon={Coins} label="Balance Value" value={formatCurrency(row.balance_cost)} tone="amber" active />
+                    </div>
+
+                    <div className="grid gap-5 lg:grid-cols-2">
+                        <DetailSection eyebrow="Stock Information" title="Item and warehouse details">
+                            {stockDetails.map(([label, value, className]) => <LedgerDetailField key={label} label={label} value={value} className={className} />)}
+                        </DetailSection>
+                        <DetailSection eyebrow="Transaction Record" title="References and accountability">
+                            {transactionDetails.map(([label, value, className]) => <LedgerDetailField key={label} label={label} value={value} className={className} />)}
+                        </DetailSection>
+                    </div>
+
+                    <div className={`flex items-center gap-3 rounded-2xl border px-4 py-3 text-xs font-bold ${isReceipt ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
+                        {isReceipt ? <ArrowDownToLine className="h-5 w-5 shrink-0" /> : <ArrowUpFromLine className="h-5 w-5 shrink-0" />}
+                        <span>{isReceipt ? 'This transaction increased the warehouse stock balance.' : 'This transaction reduced the warehouse stock balance.'}</span>
+                    </div>
                 </div>
             </div>
         </div>
+    );
+}
+
+function LedgerMetric({ icon: Icon, label, value, tone, active }) {
+    const tones = {
+        emerald: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+        rose: 'border-rose-200 bg-rose-50 text-rose-700',
+        blue: 'border-blue-200 bg-blue-50 text-blue-800',
+        amber: 'border-amber-200 bg-amber-50 text-amber-800',
+    };
+
+    return (
+        <div className={`relative overflow-hidden rounded-2xl border p-4 shadow-sm ${tones[tone]} ${active ? '' : 'opacity-60'}`}>
+            <div className="flex items-center justify-between gap-3">
+                <p className="text-[10px] font-black uppercase tracking-[0.12em]">{label}</p>
+                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/70 shadow-sm"><Icon className="h-5 w-5" /></span>
+            </div>
+            <p className="mt-3 break-words text-2xl font-black tabular-nums text-slate-950">{value}</p>
+        </div>
+    );
+}
+
+function DetailSection({ eyebrow, title, children }) {
+    return (
+        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="border-b border-slate-200 bg-slate-50 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950">
+                <p className="text-[10px] font-black uppercase tracking-[0.12em] text-brand-700 dark:text-brand-200">{eyebrow}</p>
+                <h3 className="mt-0.5 text-sm font-black text-slate-900 dark:text-white">{title}</h3>
+            </div>
+            <div className="grid gap-3 p-4 sm:grid-cols-2">
+                {children}
+            </div>
+        </section>
+    );
+}
+
+function LedgerDetailField({ label, value, className = '' }) {
+    return (
+        <div className={`rounded-xl border border-slate-200 bg-slate-50/80 p-3 text-xs dark:border-zinc-800 dark:bg-zinc-950 ${className}`}>
+            <p className="font-black uppercase tracking-wide text-slate-500 dark:text-zinc-400">{label}</p>
+            <p className="mt-1.5 break-words text-sm font-bold leading-relaxed text-slate-900 dark:text-zinc-100">{value || '-'}</p>
+                        </div>
     );
 }

@@ -2,6 +2,12 @@ import { Head, router, usePage } from '@inertiajs/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, Eye, FilePenLine, ListChecks, Play, Route, Search, X } from 'lucide-react';
 import AppLayout, { Card, DataTable } from '@/Layouts/AppLayout';
+import {
+    composeDocumentDrn,
+    currentDrnParts,
+    DocumentDrnFields,
+    parseDocumentDrn,
+} from '@/Components/DocumentDrnFields';
 import EpirmaSignedDocumentsModal from '@/Components/EpirmaSignedDocumentsModal';
 import PdfPreviewModal from '@/Components/PdfPreviewModal';
 import SectionTabs from '@/Components/SectionTabs';
@@ -26,29 +32,84 @@ function docBadge(doc) {
     return { label: 'NOT ROUTED', className: 'bg-slate-400 text-white' };
 }
 
-export default function Index({ queue, filters = {}, summary = {} }) {
+function initialAssessmentParts(row, prefixOptions = []) {
+    const existing = String(row?.assessment_drn || '').trim();
+    if (existing) {
+        return parseDocumentDrn(existing, prefixOptions);
+    }
+    const meta = row?.assessment_form_data || {};
+    const defaults = currentDrnParts(prefixOptions[0] || meta.assessment_drn_prefix || currentDrnParts().prefix);
+    return {
+        ...defaults,
+        prefix: meta.assessment_drn_prefix || prefixOptions[0] || defaults.prefix,
+        year: meta.assessment_drn_year || defaults.year,
+        month: meta.assessment_drn_month || defaults.month,
+        specified: meta.assessment_drn_specified || '',
+    };
+}
+
+function initialResponseParts(row, prefixOptions = []) {
+    const existing = String(row?.response_drn || '').trim();
+    if (existing) {
+        return parseDocumentDrn(existing, prefixOptions);
+    }
+    return currentDrnParts(prefixOptions[0] || currentDrnParts().prefix);
+}
+
+export default function Index({ queue, filters = {}, summary = {}, drnPrefixes = [] }) {
     const flash = usePage().props.flash ?? {};
     const [search, setSearch] = useState(filters.search || '');
     const [busyId, setBusyId] = useState(null);
     const [error, setError] = useState(null);
     const [tracker, setTracker] = useState({ open: false, row: null });
-    const [drnEditor, setDrnEditor] = useState({ open: false, row: null, assessment_drn: '', response_drn: '', errors: {}, saving: false });
+    const [drnEditor, setDrnEditor] = useState({
+        open: false,
+        row: null,
+        assessmentParts: currentDrnParts(),
+        responseParts: currentDrnParts(),
+        errors: {},
+        saving: false,
+    });
     const [pdfPreview, setPdfPreview] = useState({ open: false, title: '', subtitle: null, src: null, kind: null, message: null });
-    const openDrnEditor = (row) => setDrnEditor({ open: true, row, assessment_drn: row.assessment_drn || '', response_drn: row.response_drn || '', errors: {}, saving: false });
+    const assessmentPrefixOptions = useMemo(
+        () => drnPrefixes.filter((row) => row.context === 'assessment').map((row) => row.value),
+        [drnPrefixes],
+    );
+    const responsePrefixOptions = useMemo(
+        () => drnPrefixes.filter((row) => row.context === 'response_letter').map((row) => row.value),
+        [drnPrefixes],
+    );
+    const openDrnEditor = (row) => setDrnEditor({
+        open: true,
+        row,
+        assessmentParts: initialAssessmentParts(row, assessmentPrefixOptions),
+        responseParts: initialResponseParts(row, responsePrefixOptions),
+        errors: {},
+        saving: false,
+    });
     const saveDocumentDrns = async (event) => {
         event.preventDefault();
         setDrnEditor((current) => ({ ...current, saving: true, errors: {} }));
+        const assessment_drn = composeDocumentDrn(drnEditor.assessmentParts);
+        const response_drn = composeDocumentDrn(drnEditor.responseParts);
         const response = await fetch(`/requests/${drnEditor.row.id}/epirma/document-drns`, {
             method: 'PATCH', credentials: 'same-origin',
             headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.content || '' },
-            body: JSON.stringify({ assessment_drn: drnEditor.assessment_drn, response_drn: drnEditor.response_drn }),
+            body: JSON.stringify({ assessment_drn, response_drn }),
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
             setDrnEditor((current) => ({ ...current, saving: false, errors: payload.errors || { general: payload.message || 'Unable to save document DRNs.' } }));
             return;
         }
-        setDrnEditor({ open: false, row: null, assessment_drn: '', response_drn: '', errors: {}, saving: false });
+        setDrnEditor({
+            open: false,
+            row: null,
+            assessmentParts: currentDrnParts(),
+            responseParts: currentDrnParts(),
+            errors: {},
+            saving: false,
+        });
         router.reload({ preserveScroll: true });
     };
     const realtimeReloadTimer = useRef(null);
@@ -401,16 +462,48 @@ export default function Index({ queue, filters = {}, summary = {} }) {
 
             {drnEditor.open && (
                 <div className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-sm">
-                    <form onSubmit={saveDocumentDrns} className="w-full max-w-3xl overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-950">
+                    <form onSubmit={saveDocumentDrns} className="w-full max-w-4xl overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-950">
                         <div className="flex items-start justify-between border-b border-slate-200 bg-emerald-50 px-6 py-5">
-                            <div><p className="text-xs font-black uppercase tracking-wide text-emerald-700">DRRS AA document control</p><h2 className="text-xl font-black">Assign Document DRNs</h2><p className="mt-1 text-sm text-slate-600">Both references are required before either document can be routed through e-PIRMA.</p></div>
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-wide text-emerald-700">DRRS AA document control</p>
+                                <h2 className="text-xl font-black">Assign Document DRNs</h2>
+                                <p className="mt-1 text-sm text-slate-600">Prefixes are prefilled from the Assessment and Response Letter DRN library. Complete the specified segment for both documents before e-PIRMA routing.</p>
+                            </div>
                             <button type="button" onClick={() => setDrnEditor((current) => ({ ...current, open: false }))} className="rounded-md border bg-white p-2"><X className="h-4 w-4" /></button>
                         </div>
-                        <div className="grid gap-4 p-6 md:grid-cols-2">
-                            {[['assessment_drn', 'Assessment DRN'], ['response_drn', 'Response Letter DRN']].map(([key, label]) => <label key={key} className="text-xs font-black uppercase text-slate-600">{label} *<input value={drnEditor[key]} onChange={(event) => setDrnEditor((current) => ({ ...current, [key]: event.target.value }))} placeholder="Complete DRN" className="mt-2 w-full normal-case" />{drnEditor.errors[key] && <span className="mt-1 block normal-case text-rose-600">{drnEditor.errors[key][0] || drnEditor.errors[key]}</span>}</label>)}
-                            {drnEditor.errors.general && <p className="md:col-span-2 text-sm font-bold text-rose-700">{drnEditor.errors.general}</p>}
+                        <div className="space-y-5 p-6">
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-wide text-slate-600">Assessment DRN *</p>
+                                <div className="mt-2">
+                                    <DocumentDrnFields
+                                        parts={drnEditor.assessmentParts}
+                                        onChange={(parts) => setDrnEditor((current) => ({ ...current, assessmentParts: parts }))}
+                                        prefixOptions={assessmentPrefixOptions}
+                                        errors={{
+                                            prefix: drnEditor.errors.assessment_drn,
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-wide text-slate-600">Response Letter DRN *</p>
+                                <div className="mt-2">
+                                    <DocumentDrnFields
+                                        parts={drnEditor.responseParts}
+                                        onChange={(parts) => setDrnEditor((current) => ({ ...current, responseParts: parts }))}
+                                        prefixOptions={responsePrefixOptions}
+                                        errors={{
+                                            prefix: drnEditor.errors.response_drn,
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                            {drnEditor.errors.general && <p className="text-sm font-bold text-rose-700">{drnEditor.errors.general}</p>}
                         </div>
-                        <div className="flex justify-end gap-2 border-t bg-slate-50 px-6 py-4"><button type="button" onClick={() => setDrnEditor((current) => ({ ...current, open: false }))} className="rounded-md border bg-white px-4 py-2 text-sm font-bold">Cancel</button><button disabled={drnEditor.saving} className="rounded-md bg-emerald-700 px-5 py-2 text-sm font-black text-white disabled:opacity-60">{drnEditor.saving ? 'Saving...' : 'Save DRNs'}</button></div>
+                        <div className="flex justify-end gap-2 border-t bg-slate-50 px-6 py-4">
+                            <button type="button" onClick={() => setDrnEditor((current) => ({ ...current, open: false }))} className="rounded-md border bg-white px-4 py-2 text-sm font-bold">Cancel</button>
+                            <button disabled={drnEditor.saving} className="rounded-md bg-emerald-700 px-5 py-2 text-sm font-black text-white disabled:opacity-60">{drnEditor.saving ? 'Saving...' : 'Save DRNs'}</button>
+                        </div>
                     </form>
                 </div>
             )}

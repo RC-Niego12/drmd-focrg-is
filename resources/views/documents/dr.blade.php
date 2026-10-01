@@ -112,15 +112,17 @@ td.dr-sig-transport .dr-sig-transport-value {
   text-align: left !important;
 }
 td.dr-sig-transport .dr-sig-transport-label {
+  display: block;
   font-style: italic;
   font-weight: 400;
   font-size: 5.5pt;
 }
 td.dr-sig-transport .dr-sig-transport-value {
+  display: block;
   font-style: normal;
   font-weight: 700;
   text-transform: uppercase;
-  margin-left: 2pt;
+  margin: 1pt 0 0 0;
   font-size: 5.5pt;
   white-space: pre-line;
 }
@@ -210,10 +212,10 @@ td.dr-sig-transport .dr-sig-transport-value {
                 <td class="center">{{ $item['unit'] ?? '' }}</td>
                 <td class="left item-name-cell" colspan="4">{{ $item['item_name'] ?? '' }}</td>
                 <td class="right unit-cost-cell">{{ !($is_google_sheet_transaction ?? false) && $unitCost !== null ? $pdf->formatPeso($unitCost) : '' }}</td>
-                <td></td>
-                <td></td>
-                <td colspan="5"></td>
-                <td class="tiny left remarks-cell">{{ $item ? $pdf->documentDrItemRemarks($item['remarks'] ?? null, $item['expiry'] ?? null) : '' }}</td>
+                <td class="center">{{ $item && isset($item['received_quantity']) ? $pdf->formatQuantity($item['received_quantity']) : '' }}</td>
+                <td class="center">{{ $item['received_unit'] ?? '' }}</td>
+                <td class="left item-name-cell" colspan="5">{{ $item['received_item_name'] ?? '' }}</td>
+                <td class="tiny left remarks-cell">{{ $item['received_remarks'] ?? ($item ? $pdf->documentDrItemRemarks($item['remarks'] ?? null, $item['expiry'] ?? null) : '') }}</td>
             </tr>
         @endforeach
         <tr>
@@ -252,9 +254,6 @@ td.dr-sig-transport .dr-sig-transport-value {
                                     @if (! empty($tracking['driver_name']))
                                         <span class="dr-sig-transport-value">{!! nl2br(e(mb_strtoupper((string) $tracking['driver_name']))) !!}</span>
                                     @endif
-                                    @if (! empty($tracking['escort_name']))
-                                        <span class="dr-sig-transport-value"><br>ESCORT: {!! nl2br(e(mb_strtoupper((string) $tracking['escort_name']))) !!}</span>
-                                    @endif
                                 </div>
                             </td>
                             <td></td>
@@ -269,9 +268,6 @@ td.dr-sig-transport .dr-sig-transport-value {
                                     @php $driverContact = $tracking['driver_contact'] ?? ($tracking['driver_contact_number'] ?? null); @endphp
                                     @if (! empty($driverContact))
                                         <span class="dr-sig-transport-value">{!! nl2br(e((string) $driverContact)) !!}</span>
-                                    @endif
-                                    @if (! empty($tracking['escort_contact_number']))
-                                        <span class="dr-sig-transport-value"><br>ESCORT: {!! nl2br(e((string) $tracking['escort_contact_number'])) !!}</span>
                                     @endif
                                 </div>
                             </td>

@@ -9,6 +9,7 @@ use App\Services\AorCoverageService;
 use App\Services\AuditLogger;
 use App\Services\LguReliefRequestHandoffService;
 use App\Services\WorkflowNotificationService;
+use App\Support\LinkedLguDromicIncidentReports;
 use App\Support\LguDromicReportTitle;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -50,12 +51,18 @@ class DromicReportController extends Controller
                 'lguReliefViewer:id,name,office',
                 'lguDromicAcker:id,name,office',
                 'lguReliefAcker:id,name,office',
+                'lguAmendmentRequester:id,name',
+                'lguAmendmentReviewer:id,name',
                 'reliefAugmentationRequest:id,source_lgu_dromic_request_id,reference_number,status',
                 'signedDocumentVersions:id,request_id,kind,path,original_name,uploaded_at,created_at',
             ])
             ->where('submission_type', 'lgu_dromic_relief_request')
             ->whereNotNull('lgu_submitted_to_dswd_at')
-            ->whereIn('lgu_report_status', ['advance_submitted', 'submitted']);
+            ->whereIn('lgu_report_status', ['advance_submitted', 'submitted'])
+            ->where(function ($query): void {
+                $query->whereNull('lgu_dromic_payload->standalone_relief_request')
+                    ->orWhere('lgu_dromic_payload->standalone_relief_request', false);
+            });
 
         $incidentRows = AssistanceRequest::query()
             ->with([
@@ -65,12 +72,20 @@ class DromicReportController extends Controller
             ->where('submission_type', 'lgu_dromic_relief_request')
             ->whereNotNull('lgu_submitted_to_dswd_at')
             ->whereIn('lgu_report_status', ['advance_submitted', 'submitted'])
+            ->where(function ($query): void {
+                $query->whereNull('lgu_dromic_payload->standalone_relief_request')
+                    ->orWhere('lgu_dromic_payload->standalone_relief_request', false);
+            })
             ->latest('created_at')
             ->get();
         $requestedTab = $request->string('tab')->toString();
-        $tab = in_array($requestedTab, ['incidents', 'reports', 'requests'], true) ? $requestedTab : 'incidents';
+        $defaultTab = $request->user()?->hasRole('DRRS') && ! $request->user()?->hasRole('DRIMS')
+            ? 'requests'
+            : 'incidents';
+        $tab = in_array($requestedTab, ['incidents', 'reports', 'requests'], true) ? $requestedTab : $defaultTab;
         $search = trim($request->string('search')->toString());
         $validation = $request->string('validation')->toString();
+        $amendmentFilter = $request->string('amendment')->toString();
         $submissionStatus = $request->string('status')->toString();
         $classification = $request->string('classification')->toString();
         $seriesKey = trim($request->string('series_key')->toString());
@@ -79,7 +94,45 @@ class DromicReportController extends Controller
         if ($tab === 'reports') {
             $baseQuery->where(fn ($scope) => $scope->whereNull('lgu_correction_target')->orWhere('lgu_correction_target', 'report'));
         } elseif ($tab === 'requests') {
-            $baseQuery->whereNotNull('lgu_relief_request_reference');
+            // Requests tab includes lump/standalone relief letters and per-incident request letters.
+            $baseQuery = AssistanceRequest::query()
+                ->with([
+                    'incident:id,name,incident_date',
+                    'lguSubmitter:id,name,lgu_name,lgu_psgc_code,area_of_assignment',
+                    'lguDromicReviewer:id,name,office',
+                    'lguReliefReviewer:id,name,office',
+                    'lguDromicViewer:id,name,office',
+                    'lguReliefViewer:id,name,office',
+                    'lguDromicAcker:id,name,office',
+                    'lguReliefAcker:id,name,office',
+                    'lguAmendmentRequester:id,name',
+                    'lguAmendmentReviewer:id,name',
+                    'reliefAugmentationRequest:id,source_lgu_dromic_request_id,reference_number,status',
+                    'signedDocumentVersions:id,request_id,kind,path,original_name,uploaded_at,created_at',
+                ])
+                ->where('submission_type', 'lgu_dromic_relief_request')
+                ->whereNotNull('lgu_relief_request_reference')
+                ->where(function ($query): void {
+                    $query->where(function ($submitted): void {
+                        $submitted->whereNotNull('lgu_submitted_to_dswd_at')
+                            ->whereIn('lgu_report_status', ['advance_submitted', 'submitted']);
+                    })->orWhere(function ($pendingAmendment): void {
+                        $pendingAmendment->where('lgu_amendment_request_status', 'requested')
+                            ->where('lgu_amendment_request_target', 'request')
+                            ->whereNotNull('lgu_submitted_to_dswd_at');
+                    });
+                });
+        }
+        if ($amendmentFilter === 'requested') {
+            $baseQuery->where('lgu_amendment_request_status', 'requested');
+            if ($tab === 'requests') {
+                $baseQuery->where('lgu_amendment_request_target', 'request');
+            } elseif ($tab === 'reports') {
+                $baseQuery->where(function ($query): void {
+                    $query->whereNull('lgu_amendment_request_target')
+                        ->orWhere('lgu_amendment_request_target', 'report');
+                });
+            }
         }
         if (in_array($tab, ['reports', 'requests'], true)) {
             $baseQuery->where(function ($scope) use ($tab): void {
@@ -182,6 +235,16 @@ class DromicReportController extends Controller
             'correction_scope' => $report->lgu_dromic_correction_scope,
             'correction_of_id' => $report->lgu_correction_of_id,
             'correction_target' => $report->lgu_correction_target,
+            'amendment_request_status' => $report->lgu_amendment_request_status,
+            'amendment_request_target' => $report->lgu_amendment_request_target ?: (
+                $report->lgu_amendment_request_status ? 'report' : null
+            ),
+            'amendment_request_reason' => $report->lgu_amendment_request_reason,
+            'amendment_requested_at' => $report->lgu_amendment_requested_at,
+            'amendment_requester' => $report->lguAmendmentRequester?->name,
+            'amendment_reviewed_at' => $report->lgu_amendment_reviewed_at,
+            'amendment_reviewer' => $report->lguAmendmentReviewer?->name,
+            'amendment_review_note' => $report->lgu_amendment_review_note,
             'reviewed_at' => $report->lgu_dromic_reviewed_at,
             'reviewer' => $report->lguDromicReviewer ? [
                 'name' => $report->lguDromicReviewer->name,
@@ -206,6 +269,9 @@ class DromicReportController extends Controller
             'relief_acked_at' => $report->lgu_relief_acked_at,
             'relief_acked_by' => $report->lguReliefAcker?->name,
             'has_relief_request' => filled($report->lgu_relief_request_reference),
+            'standalone_relief_request' => (bool) data_get($report->lgu_dromic_payload, 'standalone_relief_request'),
+            'linked_incidents' => array_values((array) data_get($report->lgu_dromic_payload, 'linked_incidents', [])),
+            'linked_incident_reports' => LinkedLguDromicIncidentReports::for($report),
             'signed_document_versions' => $report->signedDocumentVersions
                 ->map(fn ($version): array => [
                     'id' => $version->id,
@@ -229,9 +295,19 @@ class DromicReportController extends Controller
         ];
         $reports->through($serializeReport);
 
+        $seriesClaimedByLumpRequest = AssistanceRequest::query()
+            ->where('submission_type', 'lgu_dromic_relief_request')
+            ->where('lgu_dromic_payload->standalone_relief_request', true)
+            ->whereNotNull('lgu_relief_request_reference')
+            ->get(['lgu_dromic_payload'])
+            ->flatMap(fn (AssistanceRequest $row): array => array_values((array) data_get($row->lgu_dromic_payload, 'linked_incident_series_keys', [])))
+            ->filter()
+            ->unique()
+            ->values();
+
         $incidentGroups = $incidentRows
             ->groupBy(fn (AssistanceRequest $row): string => $row->lgu_dromic_series_key ?: 'request-'.$row->id)
-            ->map(function ($rows, string $key) use ($barangaysByLguCode): array {
+            ->map(function ($rows, string $key) use ($barangaysByLguCode, $seriesClaimedByLumpRequest): array {
                 $logicalReports = $rows
                     ->reject(fn (AssistanceRequest $row): bool => $row->lgu_correction_target === 'request')
                     ->groupBy(fn (AssistanceRequest $row): string => (string) ($row->lgu_dromic_report_number ?? 'draft-'.$row->id))
@@ -265,7 +341,8 @@ class DromicReportController extends Controller
                     'advance_count' => $receivedReports->where('lgu_report_status', 'advance_submitted')->count(),
                     'signed_count' => $receivedReports->filter(fn (AssistanceRequest $row): bool => $row->lgu_report_status === 'submitted' && filled($row->lgu_signed_report_path))->count(),
                     'latest_report_status' => $latest->lgu_report_status ?: 'advance_submitted',
-                    'has_relief_request' => $rows->contains(fn (AssistanceRequest $row): bool => filled($row->lgu_relief_request_reference)),
+                    'has_relief_request' => $rows->contains(fn (AssistanceRequest $row): bool => filled($row->lgu_relief_request_reference))
+                        || $seriesClaimedByLumpRequest->contains($key),
                     'is_closed' => $rows->contains(fn (AssistanceRequest $row): bool => in_array($row->lgu_dromic_report_classification, ['terminal', 'first_and_final'], true)
                         && $row->lgu_report_status === 'submitted'
                         && filled($row->lgu_signed_report_path)
@@ -310,9 +387,23 @@ class DromicReportController extends Controller
             ->groupBy(fn (AssistanceRequest $row): string => ($row->lgu_dromic_series_key ?: 'request-'.$row->id).'|'.($row->lgu_dromic_report_number ?? 'draft-'.$row->id))
             ->map(fn ($versions) => $versions->sortByDesc(fn (AssistanceRequest $version): array => [(int) $version->lgu_dromic_revision_number, $version->created_at?->timestamp ?? 0])->first())
             ->values();
+        $pendingLumpRequestCount = 0;
+        if ($tab === 'incidents') {
+            // Keep incidents metrics aligned with the incident list. Lump/standalone
+            // request letters live on the Requests tab — surface only a count for CTA copy.
+            $pendingLumpRequestCount = AssistanceRequest::query()
+                ->where('submission_type', 'lgu_dromic_relief_request')
+                ->where('lgu_dromic_payload->standalone_relief_request', true)
+                ->whereNotNull('lgu_relief_request_reference')
+                ->whereNotNull('lgu_submitted_to_dswd_at')
+                ->whereIn('lgu_report_status', ['advance_submitted', 'submitted'])
+                ->count();
+        }
 
         $reportDashboard = [
-            'incident_count' => $metricRows->groupBy(fn (AssistanceRequest $row): string => $row->lgu_dromic_series_key ?: 'request-'.$row->id)->count(),
+            'incident_count' => $tab === 'incidents'
+                ? $incidentGroups->count()
+                : $metricRows->groupBy(fn (AssistanceRequest $row): string => $row->lgu_dromic_series_key ?: 'request-'.$row->id)->count(),
             'submitted' => $reportMetricRows->count(),
             'signed_submitted' => $reportMetricRows->filter(fn (AssistanceRequest $row): bool => filled($row->lgu_signed_report_path))->count(),
             'pending_signed_copies' => $reportMetricRows->filter(fn (AssistanceRequest $row): bool => blank($row->lgu_signed_report_path))->count(),
@@ -320,6 +411,9 @@ class DromicReportController extends Controller
                 || $this->dromicSignedReviewPending($row))->count(),
             'validated_no_findings' => $reportMetricRows->where('lgu_dromic_validation_status', 'validated_no_findings')->count(),
             'with_findings' => $reportMetricRows->where('lgu_dromic_validation_status', 'needs_lgu_action')->count(),
+            'amendment_requested' => $reportMetricRows->filter(fn (AssistanceRequest $row): bool => $row->lgu_amendment_request_status === 'requested'
+                && ($row->lgu_amendment_request_target === null || $row->lgu_amendment_request_target === 'report'))->count(),
+            'pending_lump_requests' => $pendingLumpRequestCount,
         ];
         $requestDashboard = [
             'total' => $requestMetricRows->count(),
@@ -329,21 +423,35 @@ class DromicReportController extends Controller
             'awaiting_review' => $requestMetricRows->filter(fn (AssistanceRequest $row): bool => filled($row->lgu_signed_request_path) && in_array($row->lgu_relief_validation_status, [null, 'pending_review', 'under_review'], true))->count(),
             'validated_no_findings' => $requestMetricRows->where('lgu_relief_validation_status', 'validated_no_findings')->count(),
             'with_findings' => $requestMetricRows->where('lgu_relief_validation_status', 'needs_lgu_action')->count(),
+            'amendment_requested' => $requestMetricRows->where('lgu_amendment_request_status', 'requested')->where('lgu_amendment_request_target', 'request')->count(),
             'routed' => $requestMetricRows->where('lgu_routing_status', 'routed_to_drrs')->count(),
+            'pending_lump_requests' => $pendingLumpRequestCount,
         ];
+
+        $reliefGateBase = AssistanceRequest::query()
+            ->where('submission_type', 'lgu_dromic_relief_request')
+            ->whereNotNull('lgu_relief_request_reference')
+            ->whereNotNull('lgu_submitted_to_dswd_at')
+            ->whereNotNull('lgu_signed_request_path')
+            ->whereIn('lgu_report_status', ['advance_submitted', 'submitted']);
 
         return Inertia::render('Dromic/LguReports', [
             'reports' => $reports,
             'incidentGroups' => $incidentGroups,
             'activeTab' => $tab,
-            'filters' => ['search' => $search, 'validation' => $validation, 'status' => $submissionStatus, 'classification' => $classification, 'series_key' => $seriesKey],
+            'filters' => ['search' => $search, 'validation' => $validation, 'status' => $submissionStatus, 'classification' => $classification, 'series_key' => $seriesKey, 'amendment' => $amendmentFilter],
             'reportDashboard' => $reportDashboard,
             'requestDashboard' => $requestDashboard,
             'canReviewDromic' => $request->user()->hasAnyRole(['DRIMS', 'DRRS', 'QRT', 'Quick Response Team', 'Super Admin']),
             'canReviewRelief' => $request->user()->hasAnyRole(['DRRS', 'Super Admin']),
             'reliefAssessmentGate' => [
-                'awaiting_validation' => (int) ($requestDashboard['awaiting_review'] ?? 0),
-                'needs_lgu_action' => (int) ($requestDashboard['with_findings'] ?? 0),
+                'awaiting_validation' => (clone $reliefGateBase)
+                    ->where(fn ($query) => $query->whereNull('lgu_relief_validation_status')
+                        ->orWhereIn('lgu_relief_validation_status', ['pending_review', 'under_review']))
+                    ->count(),
+                'needs_lgu_action' => (clone $reliefGateBase)
+                    ->where('lgu_relief_validation_status', 'needs_lgu_action')
+                    ->count(),
             ],
         ]);
     }
@@ -439,6 +547,163 @@ class DromicReportController extends Controller
         return back()->with('success', $success);
     }
 
+    public function decideLguAmendmentRequest(
+        Request $request,
+        AssistanceRequest $assistanceRequest,
+        AuditLogger $audit,
+        WorkflowNotificationService $notifications,
+        LguDromicRequestController $lguDromic,
+    ): RedirectResponse {
+        abort_unless($assistanceRequest->submission_type === 'lgu_dromic_relief_request', 404);
+        abort_unless(
+            $assistanceRequest->lgu_amendment_request_status === 'requested',
+            422,
+            'There is no pending amendment request for this document.',
+        );
+
+        $target = $assistanceRequest->lgu_amendment_request_target ?: 'report';
+        if ($target === 'request') {
+            abort_unless(
+                $request->user()?->hasAnyRole(['DRRS', 'Super Admin']),
+                403,
+            );
+        } else {
+            abort_unless(
+                $request->user()?->hasAnyRole(['DRIMS', 'DRRS', 'QRT', 'Quick Response Team', 'Super Admin']),
+                403,
+            );
+        }
+
+        $data = $request->validate([
+            'decision' => ['required', 'in:approve,deny'],
+            'review_note' => ['nullable', 'required_if:decision,deny', 'string', 'min:10', 'max:3000'],
+        ]);
+
+        $status = $assistanceRequest->lgu_report_status ?: $assistanceRequest->status;
+        abort_unless(
+            in_array($status, ['advance_submitted', 'submitted'], true),
+            422,
+            $target === 'request'
+                ? 'Only relief requests already submitted to DSWD can receive an amendment decision.'
+                : 'Only reports already submitted to DSWD can receive an amendment decision.',
+        );
+
+        if ($target === 'request') {
+            abort_unless(
+                $assistanceRequest->lgu_relief_validation_status !== 'needs_lgu_action',
+                422,
+                'This relief request was already returned for correction.',
+            );
+            abort_unless(
+                ! in_array($assistanceRequest->lgu_relief_validation_status, ['validated_no_findings', 'superseded'], true),
+                422,
+                'This relief request can no longer be amended because validation is already closed.',
+            );
+        } else {
+            abort_unless(
+                $assistanceRequest->lgu_dromic_validation_status !== 'needs_lgu_action',
+                422,
+                'This report was already returned for correction.',
+            );
+            abort_unless(
+                ! in_array($assistanceRequest->lgu_dromic_validation_status, ['validated_no_findings', 'superseded'], true),
+                422,
+                'This report can no longer be amended because validation is already closed.',
+            );
+        }
+
+        $old = $assistanceRequest->toArray();
+        $approved = $data['decision'] === 'approve';
+        $correctionDraftId = null;
+
+        if ($approved) {
+            $existingDraft = $lguDromic->openCorrectionDraftFor($assistanceRequest, $target);
+            abort_unless(
+                blank($existingDraft),
+                422,
+                $target === 'request'
+                    ? 'An open correction draft already exists for this relief request.'
+                    : 'An open correction draft already exists for this report.',
+            );
+
+            $reason = trim((string) $assistanceRequest->lgu_amendment_request_reason);
+
+            if ($target === 'request') {
+                $scope = filled($assistanceRequest->lgu_signed_request_path) ? 'both' : 'encoding';
+                $reviewNote = 'DRRS approved an LGU amendment request so omitted request/FNI data can be encoded on the same request letter without creating a new relief request.'
+                    .($reason !== '' ? " LGU reason: {$reason}" : '');
+
+                $assistanceRequest->update([
+                    'lgu_amendment_request_status' => 'approved',
+                    'lgu_amendment_reviewed_by' => $request->user()->id,
+                    'lgu_amendment_reviewed_at' => now(),
+                    'lgu_amendment_review_note' => filled($data['review_note'] ?? null) ? trim($data['review_note']) : null,
+                    'lgu_relief_validation_status' => 'needs_lgu_action',
+                    'lgu_relief_reviewed_by' => $request->user()->id,
+                    'lgu_relief_reviewed_at' => now(),
+                    'lgu_relief_review_note' => $reviewNote,
+                    'lgu_relief_correction_scope' => $scope,
+                    'lgu_relief_correction_resolved_at' => null,
+                ]);
+            } else {
+                $scope = filled($assistanceRequest->lgu_signed_report_path) ? 'both' : 'encoding';
+                $reviewNote = 'DRIMS approved an LGU amendment request so omitted data can be encoded on the same report number without creating the next SitRep.'
+                    .($reason !== '' ? " LGU reason: {$reason}" : '');
+
+                $assistanceRequest->update([
+                    'lgu_amendment_request_status' => 'approved',
+                    'lgu_amendment_reviewed_by' => $request->user()->id,
+                    'lgu_amendment_reviewed_at' => now(),
+                    'lgu_amendment_review_note' => filled($data['review_note'] ?? null) ? trim($data['review_note']) : null,
+                    'lgu_dromic_validation_status' => 'needs_lgu_action',
+                    'lgu_dromic_reviewed_by' => $request->user()->id,
+                    'lgu_dromic_reviewed_at' => now(),
+                    'lgu_dromic_review_note' => $reviewNote,
+                    'lgu_dromic_correction_scope' => $scope,
+                    'lgu_dromic_correction_resolved_at' => null,
+                ]);
+            }
+
+            $draft = $lguDromic->createCorrectionDraftRecord($assistanceRequest->fresh(), $target);
+            $correctionDraftId = $draft->id;
+            $audit->log('lgu_dromic.correction_draft_created', $draft, [], [
+                ...$draft->toArray(),
+                'source_request_id' => $assistanceRequest->id,
+                'correction_target' => $target,
+                'via' => 'amendment_approval',
+            ]);
+        } else {
+            $assistanceRequest->update([
+                'lgu_amendment_request_status' => 'denied',
+                'lgu_amendment_reviewed_by' => $request->user()->id,
+                'lgu_amendment_reviewed_at' => now(),
+                'lgu_amendment_review_note' => trim($data['review_note']),
+            ]);
+        }
+
+        $fresh = $assistanceRequest->fresh(['encoder', 'lguSubmitter', 'lguAmendmentReviewer']);
+        $audit->log(
+            $approved
+                ? ($target === 'request' ? 'lgu_relief.amendment_approved' : 'lgu_dromic.amendment_approved')
+                : ($target === 'request' ? 'lgu_relief.amendment_denied' : 'lgu_dromic.amendment_denied'),
+            $assistanceRequest,
+            $old,
+            $fresh->toArray(),
+        );
+        $notifications->notifyLguAmendmentDecision($fresh);
+
+        $label = $target === 'request'
+            ? ($assistanceRequest->lgu_relief_request_reference ?: $assistanceRequest->reference_number)
+            : $assistanceRequest->reference_number;
+        $response = back()->with('success', $approved
+            ? "Amendment approved for {$label}. A correction draft is ready for the LGU."
+            : "Amendment request denied for {$label}.");
+
+        return $correctionDraftId
+            ? $response->with('correction_draft_id', $correctionDraftId)
+            : $response;
+    }
+
     public function updateLguReliefValidation(
         Request $request,
         AssistanceRequest $assistanceRequest,
@@ -450,7 +715,10 @@ class DromicReportController extends Controller
         abort_unless(
             $assistanceRequest->submission_type === 'lgu_dromic_relief_request'
                 && filled($assistanceRequest->lgu_submitted_to_dswd_at)
-                && (bool) data_get($assistanceRequest->lgu_dromic_payload, 'has_relief_request'),
+                && (
+                    (bool) data_get($assistanceRequest->lgu_dromic_payload, 'has_relief_request')
+                    || filled($assistanceRequest->lgu_relief_request_reference)
+                ),
             404,
         );
         abort_unless(filled($assistanceRequest->lgu_signed_request_path), 422, 'The LGU must upload the signed relief augmentation request before DRRS can validate it.');

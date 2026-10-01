@@ -10,6 +10,12 @@ const ROLE_ACRONYMS = {
     'DRMD Financial Analyst': 'DRMD FA',
     QRT: 'QRT',
     'Quick Response Team': 'QRT',
+    'Regional Director': 'RD',
+    RD: 'RD',
+    'Assistant Regional Director': 'ARD',
+    ARD: 'ARD',
+    'Assistant Regional Director for Operations': 'ARDO',
+    ARDO: 'ARDO',
     LGU: 'LGU',
     'OCD Caraga': 'OCD',
 };

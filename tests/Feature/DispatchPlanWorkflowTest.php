@@ -7,8 +7,10 @@ use App\Models\InventoryItem;
 use App\Models\InventoryTransaction;
 use App\Models\LguDirectoryEntry;
 use App\Models\OperationalLibraryValue;
+use App\Models\RequisitionIssuanceSlip;
 use App\Models\User;
 use App\Models\Warehouse;
+use App\Http\Controllers\DispatchPlanController;
 use App\Notifications\WorkflowNotification;
 use App\Services\InventoryBalanceService;
 use App\Services\RisDrDocumentPdfService;
@@ -134,8 +136,10 @@ function prepareRisForDispatch(): array
 
 function plannedVehiclePayload(array $overrides = []): array
 {
-    $departure = now()->format('Y-m-d\TH:i');
-    $arrival = now()->addHours(4)->format('Y-m-d\TH:i');
+    // Fixed same-day business hours avoid a midnight rollover making otherwise
+    // unrelated workflow tests intermittently fail the release schedule rule.
+    $departure = now()->addDay()->startOfDay()->addHours(8)->format('Y-m-d\TH:i');
+    $arrival = now()->addDay()->startOfDay()->addHours(12)->format('Y-m-d\TH:i');
 
     return array_merge([
         'vehicle_type' => 'Truck',
@@ -356,6 +360,83 @@ it('rejects past estimated departure on create', function (): void {
         ]);
 
     expect(DispatchPlan::query()->where('request_id', $request->id)->exists())->toBeFalse();
+});
+
+it('assigns DR suffixes by plan confirmation order instead of release order', function (): void {
+    $slip = new RequisitionIssuanceSlip(['dr_number' => 'DR#-08-0009']);
+    $method = new ReflectionMethod(DispatchPlanController::class, 'assignDrNumbersByPlanSequence');
+    $result = $method->invoke(app(DispatchPlanController::class), [
+        'vehicle_details' => [
+            [
+                'source_warehouse_id' => 1,
+                'fulfillment_type' => 'field_delivery',
+                'plan_confirmed_at' => '2026-08-25 10:05:00',
+            ],
+            [
+                'source_warehouse_id' => 2,
+                'fulfillment_type' => 'warehouse_pickup',
+                'plan_confirmed_at' => '2026-08-25 10:00:00',
+            ],
+        ],
+        'items' => [],
+    ], [], [], $slip, [0, 1], false);
+
+    expect($result['vehicle_details'][0]['dr_number'])->toBe('DR#-08-0009-B')
+        ->and($result['vehicle_details'][1]['dr_number'])->toBe('DR#-08-0009-A');
+});
+
+it('includes a no-transport transaction in the alphabetical DR series', function (): void {
+    $slip = new RequisitionIssuanceSlip(['dr_number' => 'DR#-08-0009']);
+    $method = new ReflectionMethod(DispatchPlanController::class, 'assignDrNumbersByPlanSequence');
+    $result = $method->invoke(app(DispatchPlanController::class), [
+        'vehicle_details' => [[
+            'source_warehouse_id' => 2,
+            'fulfillment_type' => 'field_delivery',
+            'plan_confirmed_at' => '2026-08-25 16:18:00',
+        ]],
+        'local_handover_details' => [
+            'source_warehouse_id' => 1,
+            'plan_confirmed_at' => '2026-08-20 17:47:10',
+        ],
+        'items' => [],
+    ], [], [], $slip, [0], true);
+
+    expect($result['local_handover_details']['dr_number'])->toBe('DR#-08-0009-A')
+        ->and($result['vehicle_details'][0]['dr_number'])->toBe('DR#-08-0009-B');
+});
+
+it('allows an unchanged saved estimate after its scheduled time has passed', function (): void {
+    [$rros, $request] = prepareRisForDispatch();
+    $vehicle = plannedVehiclePayload([
+        'estimated_departure' => now()->addHour()->format('Y-m-d\TH:i'),
+        'estimated_arrival' => now()->addHours(2)->format('Y-m-d\TH:i'),
+    ]);
+
+    $this->actingAs($rros)
+        ->post('/dispatches', [
+            'request_id' => $request->id,
+            'status' => 'planned',
+            'destination' => 'Butuan City Hall',
+            'receiving_agency_lgu' => 'Butuan City LGU',
+            'number_of_vehicles' => 1,
+            'vehicle_details' => [$vehicle],
+        ])
+        ->assertRedirect()
+        ->assertSessionDoesntHaveErrors();
+
+    $dispatch = DispatchPlan::query()->where('request_id', $request->id)->firstOrFail();
+    $this->travel(3)->hours();
+
+    $this->actingAs($rros)
+        ->put("/dispatches/{$dispatch->id}", [
+            'status' => 'planned',
+            'destination' => 'Butuan City Hall',
+            'receiving_agency_lgu' => 'Butuan City LGU',
+            'number_of_vehicles' => 1,
+            'vehicle_details' => [$vehicle],
+        ])
+        ->assertRedirect()
+        ->assertSessionDoesntHaveErrors();
 });
 
 it('allows same-day earlier clock times for actual departed and arrival', function (): void {
@@ -763,6 +844,8 @@ it('gives the assigned DSWD escort a scoped workspace and release-to-receipt upd
     $this->actingAs($rros)->post('/dispatches', [
         'request_id' => $request->id,
         'status' => 'planned',
+        'source_of_goods' => 'FO Stockpile/Prepo',
+        'purpose' => 'Relief Augmentation',
         'destination' => 'Butuan City Hall',
         'receiving_agency_lgu' => 'Butuan City LGU',
         'number_of_vehicles' => 1,
@@ -825,6 +908,227 @@ it('gives the assigned DSWD escort a scoped workspace and release-to-receipt upd
     $this->actingAs($unassigned)
         ->put("/dispatches/{$dispatch->id}", ['status' => 'in_transit'])
         ->assertForbidden();
+
+    $arrivalAt = now()->subMinutes(10)->startOfMinute();
+    $vehicles = $dispatch->resolvedVehicleDetails();
+    $vehicles[0]['departed_at'] = now()->subMinutes(30)->format('Y-m-d H:i:s');
+    $dispatch->forceFill([
+        'status' => DispatchPlan::STATUS_IN_TRANSIT,
+        'vehicle_details' => $vehicles,
+    ])->save();
+    $dispatch->deliveryUpdates()->create([
+        'vehicle_index' => 0,
+        'reported_by' => $escort->id,
+        'reporter_role' => 'delivery_escort',
+        'stage' => 'arrived',
+        'occurred_at' => $arrivalAt,
+        'location' => 'Butuan City Hall',
+        'message' => 'Vehicle arrived at the delivery site.',
+        'photo_paths' => [],
+    ]);
+    $dispatch->deliveryUpdates()->create([
+        'vehicle_index' => 0,
+        'reported_by' => $escort->id,
+        'reporter_role' => 'delivery_escort',
+        'stage' => 'unloading_completed',
+        'occurred_at' => now()->subMinutes(5)->startOfMinute(),
+        'location' => 'Butuan City Hall',
+        'message' => 'Vehicle unloading was completed.',
+        'photo_paths' => [],
+    ]);
+
+    $receiptVehicle = [
+        ...$dispatch->fresh()->resolvedVehicleDetails()[0],
+        'received_by' => 'LGU Receiver',
+        'received_by_position' => 'MSWDO',
+        'received_by_office' => 'Butuan City LGU',
+        'receiver_contact' => '09175556666',
+        'receipt_acknowledged' => true,
+    ];
+    unset($receiptVehicle['actual_arrival'], $receiptVehicle['fully_delivered']);
+
+    $this->actingAs($escort)->put("/dispatches/{$dispatch->id}", [
+        'status' => DispatchPlan::STATUS_IN_TRANSIT,
+        'receipt_vehicle_indexes' => [0],
+        'vehicle_details' => [$receiptVehicle],
+    ])->assertRedirect();
+
+    $dispatch->refresh();
+    expect($dispatch->vehicle_details[0]['receipt_acknowledged'] ?? false)->toBeTrue()
+        ->and(str_replace('T', ' ', $dispatch->vehicle_details[0]['actual_arrival'] ?? ''))->toStartWith($arrivalAt->format('Y-m-d H:i'))
+        ->and($dispatch->vehicle_details[0]['fully_delivered'] ?? null)->toBe('Yes');
+});
+
+it('maps an escort workspace receipt to the assigned persisted vehicle index', function (): void {
+    [$rros, $request] = prepareRisForDispatch();
+    $escort = User::where('email', 'drims@example.test')->firstOrFail();
+    $escort->forceFill(['id_number' => '16-12254'])->save();
+    $warehouse = Warehouse::query()->where('name', 'Dispatch Hub')->firstOrFail();
+
+    $this->actingAs($rros)->post('/dispatches', [
+        'request_id' => $request->id,
+        'status' => 'planned',
+        'source_of_goods' => 'FO Stockpile/Prepo',
+        'purpose' => 'Relief Augmentation',
+        'destination' => 'Butuan City Hall',
+        'receiving_agency_lgu' => 'Butuan City LGU',
+        'number_of_vehicles' => 2,
+        'vehicle_details' => [
+            plannedVehiclePayload([
+                'source_warehouse_id' => $warehouse->id,
+                'source_warehouse_name' => $warehouse->name,
+                'driver' => 'First Unassigned Driver',
+                'vehicle_plate_number' => 'FIRST-001',
+                'loaded_items' => [[
+                    'item_name' => 'Family Food Pack',
+                    'loaded_quantity' => 4,
+                    'remarks' => null,
+                ]],
+            ]),
+            plannedVehiclePayload([
+                'source_warehouse_id' => $warehouse->id,
+                'source_warehouse_name' => $warehouse->name,
+                'driver' => 'Assigned Vehicle Driver',
+                'vehicle_plate_number' => 'SECOND-002',
+                'has_dswd_escort' => true,
+                'escort_name' => $escort->name,
+                'escort_id_number' => $escort->id_number,
+                'escort_contact_number' => '09700345594',
+                'escort_position' => 'Administrative Aide IV',
+                'escort_office' => 'Regional Resource Operations Section',
+                'loaded_items' => [[
+                    'item_name' => 'Family Food Pack',
+                    'loaded_quantity' => 4,
+                    'remarks' => null,
+                ]],
+            ]),
+        ],
+    ])->assertRedirect()->assertSessionHasNoErrors();
+
+    $dispatch = DispatchPlan::query()->where('request_id', $request->id)->firstOrFail();
+    $vehicles = $dispatch->resolvedVehicleDetails();
+    $confirmedReleaseAt = now()->subHour()->startOfSecond();
+    $vehicles[1] = [
+        ...$vehicles[1],
+        // Simulate the recovery defect: the release audit survived but the
+        // nested vehicle marker did not.
+        'warehouse_released_at' => null,
+        'departed_at' => now()->subMinutes(45)->format('Y-m-d H:i:s'),
+    ];
+    $dispatch->forceFill(['status_timeline' => [[
+        'type' => 'status_change',
+        'status' => DispatchPlan::STATUS_RELEASED,
+        'at' => $confirmedReleaseAt->toIso8601String(),
+        'note' => 'Warehouse release confirmed; system inventory issuance transaction 100 recorded.',
+    ]]]);
+    $dispatch->forceFill([
+        'status' => DispatchPlan::STATUS_IN_TRANSIT,
+        'vehicle_details' => $vehicles,
+    ])->save();
+    $dispatch->deliveryUpdates()->create([
+        'vehicle_index' => 1,
+        'reported_by' => $escort->id,
+        'reporter_role' => 'delivery_escort',
+        'stage' => 'unloading_completed',
+        'occurred_at' => now()->subMinutes(5)->startOfMinute(),
+        'location' => 'Butuan City Hall',
+        'message' => 'Vehicle unloading was completed.',
+        'photo_paths' => [],
+    ]);
+
+    $scopedVehicle = [
+        ...$dispatch->fresh()->resolvedVehicleDetails()[1],
+        'source_vehicle_index' => 1,
+        'received_by' => 'LGU Receiver',
+        'received_by_position' => 'MSWDO',
+        'received_by_office' => 'Butuan City LGU',
+        'received_at' => now()->format('Y-m-d\TH:i'),
+        'receiver_contact' => '09175556666',
+        'receipt_acknowledged' => true,
+    ];
+
+    // The escort sees one compact row (local index 0), while the saved vehicle
+    // is persisted at source index 1.
+    $this->actingAs($escort)->put("/dispatches/{$dispatch->id}", [
+        'status' => DispatchPlan::STATUS_IN_TRANSIT,
+        'receipt_vehicle_indexes' => [0],
+        'vehicle_details' => [$scopedVehicle],
+    ])->assertRedirect()->assertSessionHasNoErrors();
+
+    $dispatch->refresh();
+    expect($dispatch->vehicle_details[0]['receipt_acknowledged'] ?? false)->toBeFalse()
+        ->and($dispatch->vehicle_details[1]['receipt_acknowledged'] ?? false)->toBeTrue()
+        ->and(str_replace('T', ' ', $dispatch->vehicle_details[1]['warehouse_released_at'] ?? ''))
+        ->toStartWith($confirmedReleaseAt->format('Y-m-d H:i:s'))
+        ->and($dispatch->vehicle_details[1]['received_at'] ?? null)->not->toBeNull()
+        ->and($dispatch->vehicle_details[1]['received_by'] ?? null)->toBe('LGU Receiver');
+
+    $revisedVehicle = [
+        ...$dispatch->resolvedVehicleDetails()[1],
+        'source_vehicle_index' => 1,
+        'receipt_remarks' => 'Corrected receipt remarks from the assigned escort.',
+    ];
+    $this->actingAs($escort)->put("/dispatches/{$dispatch->id}", [
+        'status' => DispatchPlan::STATUS_RECEIVED,
+        'receipt_vehicle_indexes' => [0],
+        'return_to_escort_workspace' => true,
+        'vehicle_details' => [$revisedVehicle],
+    ])->assertRedirect(route('delivery-escort.index', [
+        'bucket' => 'completed',
+        'dispatch_id' => $dispatch->id,
+    ]))->assertSessionHasNoErrors();
+
+    expect($dispatch->fresh()->vehicle_details[1]['receipt_remarks'] ?? null)
+        ->toBe('Corrected receipt remarks from the assigned escort.');
+});
+
+it('returns a dispatch manager to the escort workspace after saving there', function (): void {
+    [$rros, $request] = prepareRisForDispatch();
+
+    $this->actingAs($rros)->post('/dispatches', [
+        'request_id' => $request->id,
+        'status' => DispatchPlan::STATUS_DRAFT,
+        'destination' => 'Butuan City Hall',
+        'receiving_agency_lgu' => 'Butuan City LGU',
+    ])->assertRedirect()->assertSessionHasNoErrors();
+
+    $dispatch = DispatchPlan::query()->where('request_id', $request->id)->firstOrFail();
+
+    $this->actingAs($rros)->put("/dispatches/{$dispatch->id}", [
+        'status' => DispatchPlan::STATUS_DRAFT,
+        'return_to_escort_workspace' => true,
+    ])->assertRedirect(route('delivery-escort.index', [
+        'bucket' => 'in_progress',
+        'dispatch_id' => $dispatch->id,
+    ]))->assertSessionHasNoErrors();
+});
+
+it('shows a received delivery in the escort completed tab despite a deferred dispatch balance', function (): void {
+    [$rros, $request] = prepareRisForDispatch();
+
+    $dispatch = DispatchPlan::create([
+        'request_id' => $request->id,
+        'dispatch_number' => 'DSP-ESCORT-COMPLETE',
+        'status' => DispatchPlan::STATUS_RECEIVED,
+        'destination' => 'Butuan City Hall',
+        'receiving_agency_lgu' => 'Butuan City LGU',
+        'created_by' => $rros->id,
+        'updated_by' => $rros->id,
+    ]);
+    $dispatch->items()->create([
+        'item_name' => 'Family Food Pack',
+        'allocated_quantity' => 10,
+        'received_quantity' => 8,
+        'variance_disposition' => 'returned',
+    ]);
+
+    $this->actingAs($rros)->get(route('delivery-escort.index', [
+        'bucket' => 'completed',
+        'dispatch_id' => $dispatch->id,
+    ]))->assertOk()->assertInertia(fn ($page) => $page
+        ->where('bucket', 'completed')
+        ->where('selectedDispatch.id', $dispatch->id)
+        ->where('counts.completed', 1));
 });
 
 it('requires a same-day schedule to be saved as a plan revision before confirming release', function (): void {
@@ -1680,6 +1984,390 @@ it('requires source warehouse on vehicles when a plan has multiple allocated war
     $this->actingAs($rros)->get("/dispatches/{$dispatch->id}/vehicles/1/dr")->assertOk();
 });
 
+it('does not report a missing delivery arrangement when Vehicle 2 is addressed by source_vehicle_index after compaction', function (): void {
+    [$rros, $request] = prepareRisForDispatch();
+    $hub = Warehouse::query()->where('name', 'Dispatch Hub')->firstOrFail();
+
+    $this->actingAs($rros)
+        ->post('/dispatches', [
+            'request_id' => $request->id,
+            'status' => 'draft',
+            'destination' => 'Butuan City Hall',
+            'receiving_agency_lgu' => 'Butuan City LGU',
+            'number_of_vehicles' => 1,
+            'vehicle_details' => [plannedVehiclePayload([
+                'fulfillment_type' => 'field_delivery',
+                'source_warehouse_id' => $hub->id,
+                'source_warehouse_name' => $hub->name,
+            ])],
+            'items' => [[
+                'item_name' => 'Family Food Pack',
+                'unit' => 'boxes',
+                'warehouse_id' => $hub->id,
+                'warehouse_name' => $hub->name,
+                'allocated_quantity' => 8,
+            ]],
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $dispatch = DispatchPlan::query()->where('request_id', $request->id)->firstOrFail();
+
+    // Reproduce the old client bug: empty/local rows were filtered out before submit,
+    // so Vehicle 2 became payload index 0 while plan_vehicle_indexes still said [1].
+    $this->actingAs($rros)
+        ->from("/dispatches?dispatch_id={$dispatch->id}")
+        ->put("/dispatches/{$dispatch->id}", [
+            'status' => 'planned',
+            'destination' => 'Butuan City Hall',
+            'receiving_agency_lgu' => 'Butuan City LGU',
+            'fulfillment_type' => 'field_delivery',
+            'fulfillment_type_confirmed' => true,
+            'plan_vehicle_indexes' => [1],
+            'number_of_vehicles' => 1,
+            'vehicle_details' => [plannedVehiclePayload([
+                'source_vehicle_index' => 1,
+                'fulfillment_type' => 'field_delivery',
+                'source_warehouse_id' => $hub->id,
+                'source_warehouse_name' => $hub->name,
+            ])],
+            'items' => [[
+                'item_name' => 'Family Food Pack',
+                'unit' => 'boxes',
+                'warehouse_id' => $hub->id,
+                'warehouse_name' => $hub->name,
+                'allocated_quantity' => 8,
+            ]],
+        ])
+        ->assertSessionDoesntHaveErrors(['vehicle_details.1.fulfillment_type']);
+});
+
+it('rejects a scoped vehicle plan confirmation when that vehicle has no delivery arrangement', function (): void {
+    [$rros, $request] = prepareRisForDispatch();
+    $hub = Warehouse::query()->where('name', 'Dispatch Hub')->firstOrFail();
+
+    $this->actingAs($rros)
+        ->post('/dispatches', [
+            'request_id' => $request->id,
+            'status' => 'draft',
+            'destination' => 'Butuan City Hall',
+            'receiving_agency_lgu' => 'Butuan City LGU',
+            'number_of_vehicles' => 1,
+            'vehicle_details' => [plannedVehiclePayload([
+                'source_warehouse_id' => $hub->id,
+                'source_warehouse_name' => $hub->name,
+            ])],
+            'items' => [[
+                'item_name' => 'Family Food Pack',
+                'unit' => 'boxes',
+                'warehouse_id' => $hub->id,
+                'warehouse_name' => $hub->name,
+                'allocated_quantity' => 8,
+            ]],
+        ])
+        ->assertRedirect();
+
+    $dispatch = DispatchPlan::query()->where('request_id', $request->id)->firstOrFail();
+
+    $this->actingAs($rros)
+        ->from("/dispatches?dispatch_id={$dispatch->id}")
+        ->put("/dispatches/{$dispatch->id}", [
+            'status' => 'planned',
+            'destination' => 'Butuan City Hall',
+            'receiving_agency_lgu' => 'Butuan City LGU',
+            'fulfillment_type' => 'field_delivery',
+            'fulfillment_type_confirmed' => true,
+            'plan_vehicle_indexes' => [0],
+            'number_of_vehicles' => 1,
+            'vehicle_details' => [plannedVehiclePayload([
+                'fulfillment_type' => null,
+                'source_warehouse_id' => $hub->id,
+                'source_warehouse_name' => $hub->name,
+            ])],
+            'items' => [[
+                'item_name' => 'Family Food Pack',
+                'unit' => 'boxes',
+                'warehouse_id' => $hub->id,
+                'warehouse_name' => $hub->name,
+                'allocated_quantity' => 8,
+            ]],
+        ])
+        ->assertSessionHasErrors(['vehicle_details.0.fulfillment_type']);
+});
+
+it('notifies DRMD and the concerned LGU only when the full transport plan is confirmed', function (): void {
+    [$rros, $request] = prepareRisForDispatch();
+    $hub = Warehouse::query()->where('name', 'Dispatch Hub')->firstOrFail();
+    $drmdAa = User::where('email', 'drmd-aa@example.test')->firstOrFail();
+    $drmdChief = User::where('email', 'drmd-chief@example.test')->firstOrFail();
+    $drmdFa = User::where('email', 'financial@example.test')->firstOrFail();
+    $lguUser = User::query()->firstOrCreate(
+        ['email' => 'butuan-lgu-plan@example.test'],
+        [
+            'name' => 'Butuan LGU Encoder',
+            'office' => 'Butuan City LGU',
+            'position' => 'Encoder',
+            'password' => bcrypt('password'),
+            'is_active' => true,
+            'access_status' => 'approved',
+            'access_approved_at' => now(),
+            'lgu_psgc_code' => '1602020000',
+        ],
+    );
+    $lguUser->forceFill([
+        'is_active' => true,
+        'access_status' => 'approved',
+        'lgu_psgc_code' => '1602020000',
+    ])->save();
+    $lguUser->syncRoles(['LGU']);
+    $request->forceFill(['lgu_psgc_code' => '1602020000'])->save();
+
+    $this->actingAs($rros)
+        ->post('/dispatches', [
+            'request_id' => $request->id,
+            'status' => 'draft',
+            'destination' => 'Butuan City Hall',
+            'receiving_agency_lgu' => 'Butuan City LGU',
+            'number_of_vehicles' => 2,
+            'vehicle_details' => [
+                plannedVehiclePayload([
+                    'fulfillment_type' => 'field_delivery',
+                    'source_warehouse_id' => $hub->id,
+                    'source_warehouse_name' => $hub->name,
+                    'loaded_items' => [[
+                        'item_name' => 'Family Food Pack',
+                        'planned_quantity' => 5,
+                        'loaded_quantity' => 0,
+                    ]],
+                ]),
+                plannedVehiclePayload([
+                    'fulfillment_type' => 'field_delivery',
+                    'driver' => 'Second Driver',
+                    'vehicle_plate_number' => 'XYZ-9876',
+                    'source_warehouse_id' => $hub->id,
+                    'source_warehouse_name' => $hub->name,
+                    'loaded_items' => [[
+                        'item_name' => 'Family Food Pack',
+                        'planned_quantity' => 3,
+                        'loaded_quantity' => 0,
+                    ]],
+                ]),
+            ],
+            'items' => [[
+                'item_name' => 'Family Food Pack',
+                'unit' => 'boxes',
+                'warehouse_id' => $hub->id,
+                'warehouse_name' => $hub->name,
+                'allocated_quantity' => 8,
+            ]],
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $dispatch = DispatchPlan::query()->where('request_id', $request->id)->firstOrFail();
+    $vehicles = $dispatch->vehicle_details;
+
+    Notification::fake();
+
+    $this->actingAs($rros)
+        ->put("/dispatches/{$dispatch->id}", [
+            'status' => 'planned',
+            'destination' => 'Butuan City Hall',
+            'receiving_agency_lgu' => 'Butuan City LGU',
+            'fulfillment_type' => 'field_delivery',
+            'fulfillment_type_confirmed' => true,
+            'plan_vehicle_indexes' => [0],
+            'number_of_vehicles' => 2,
+            'vehicle_details' => [
+                [
+                    ...$vehicles[0],
+                    'source_vehicle_index' => 0,
+                    'fulfillment_type' => 'field_delivery',
+                ],
+                [
+                    ...$vehicles[1],
+                    'source_vehicle_index' => 1,
+                    'plan_confirmed_at' => null,
+                ],
+            ],
+            'items' => [[
+                'item_name' => 'Family Food Pack',
+                'unit' => 'boxes',
+                'warehouse_id' => $hub->id,
+                'warehouse_name' => $hub->name,
+                'allocated_quantity' => 8,
+            ]],
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    Notification::assertNotSentTo($drmdAa, WorkflowNotification::class, fn (WorkflowNotification $notification): bool =>
+        ($notification->toArray($drmdAa)['action_key'] ?? null) === 'dispatch_plan_ready_for_release');
+    Notification::assertNotSentTo($lguUser, WorkflowNotification::class, fn (WorkflowNotification $notification): bool =>
+        ($notification->toArray($lguUser)['action_key'] ?? null) === 'dispatch_plan_ready_for_release');
+
+    $dispatch->refresh();
+    $vehicles = $dispatch->vehicle_details;
+    Notification::fake();
+
+    $this->actingAs($rros)
+        ->put("/dispatches/{$dispatch->id}", [
+            'status' => 'planned',
+            'destination' => 'Butuan City Hall',
+            'receiving_agency_lgu' => 'Butuan City LGU',
+            'fulfillment_type' => 'field_delivery',
+            'fulfillment_type_confirmed' => true,
+            'plan_vehicle_indexes' => [1],
+            'number_of_vehicles' => 2,
+            'vehicle_details' => [
+                [
+                    ...$vehicles[0],
+                    'source_vehicle_index' => 0,
+                    'fulfillment_type' => 'field_delivery',
+                ],
+                [
+                    ...$vehicles[1],
+                    'source_vehicle_index' => 1,
+                    'fulfillment_type' => 'field_delivery',
+                ],
+            ],
+            'items' => [[
+                'item_name' => 'Family Food Pack',
+                'unit' => 'boxes',
+                'warehouse_id' => $hub->id,
+                'warehouse_name' => $hub->name,
+                'allocated_quantity' => 8,
+            ]],
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    expect($dispatch->fresh()->isTransportPlanComplete())->toBeTrue();
+
+    Notification::assertSentTo(
+        $drmdAa,
+        WorkflowNotification::class,
+        function (WorkflowNotification $notification) use ($drmdAa, $dispatch): bool {
+            $data = $notification->toArray($drmdAa);
+
+            return ($data['action_key'] ?? null) === 'dispatch_plan_ready_for_release'
+                && ($data['action_required'] ?? true) === false
+                && str_contains((string) ($data['url'] ?? ''), '/delivery-monitoring')
+                && str_contains((string) ($data['url'] ?? ''), 'dispatch_id='.$dispatch->id);
+        }
+    );
+    Notification::assertSentTo(
+        $drmdChief,
+        WorkflowNotification::class,
+        fn (WorkflowNotification $notification): bool => ($notification->toArray($drmdChief)['action_key'] ?? null) === 'dispatch_plan_ready_for_release'
+    );
+    Notification::assertSentTo(
+        $drmdFa,
+        WorkflowNotification::class,
+        fn (WorkflowNotification $notification): bool => ($notification->toArray($drmdFa)['action_key'] ?? null) === 'dispatch_plan_ready_for_release'
+    );
+    Notification::assertSentTo(
+        $lguUser,
+        WorkflowNotification::class,
+        function (WorkflowNotification $notification) use ($lguUser, $dispatch): bool {
+            $data = $notification->toArray($lguUser);
+
+            return ($data['action_key'] ?? null) === 'dispatch_plan_ready_for_release'
+                && str_contains((string) ($data['url'] ?? ''), '/lgu/dispatch-plans/'.$dispatch->id);
+        }
+    );
+});
+
+it('lets the concerned LGU open the read-only dispatch plan details page', function (): void {
+    [$rros, $request] = prepareRisForDispatch();
+    $hub = Warehouse::query()->where('name', 'Dispatch Hub')->firstOrFail();
+    $lguUser = User::query()->firstOrCreate(
+        ['email' => 'butuan-lgu-plan-show@example.test'],
+        [
+            'name' => 'Butuan LGU Viewer',
+            'office' => 'Butuan City LGU',
+            'position' => 'Encoder',
+            'password' => bcrypt('password'),
+            'is_active' => true,
+            'access_status' => 'approved',
+            'access_approved_at' => now(),
+            'lgu_psgc_code' => '1602020000',
+        ],
+    );
+    $lguUser->forceFill([
+        'is_active' => true,
+        'access_status' => 'approved',
+        'lgu_psgc_code' => '1602020000',
+    ])->save();
+    $lguUser->syncRoles(['LGU']);
+    $request->forceFill(['lgu_psgc_code' => '1602020000'])->save();
+
+    $this->actingAs($rros)
+        ->post('/dispatches', [
+            'request_id' => $request->id,
+            'status' => 'planned',
+            'destination' => 'Butuan City Hall',
+            'receiving_agency_lgu' => 'Butuan City LGU',
+            'number_of_vehicles' => 1,
+            'vehicle_details' => [
+                plannedVehiclePayload([
+                    'fulfillment_type' => 'field_delivery',
+                    'source_warehouse_id' => $hub->id,
+                    'source_warehouse_name' => $hub->name,
+                    'estimated_departure' => now()->addDay()->toIso8601String(),
+                    'estimated_arrival' => now()->addDays(2)->toIso8601String(),
+                    'plan_confirmed_at' => now()->toIso8601String(),
+                    'loaded_items' => [[
+                        'item_name' => 'Family Food Pack',
+                        'planned_quantity' => 8,
+                        'loaded_quantity' => 0,
+                    ]],
+                ]),
+            ],
+            'items' => [[
+                'item_name' => 'Family Food Pack',
+                'unit' => 'boxes',
+                'warehouse_id' => $hub->id,
+                'warehouse_name' => $hub->name,
+                'allocated_quantity' => 8,
+            ]],
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $dispatch = DispatchPlan::query()->where('request_id', $request->id)->firstOrFail();
+    $outsider = User::query()->firstOrCreate(
+        ['email' => 'outsider-lgu-plan@example.test'],
+        [
+            'name' => 'Other LGU',
+            'office' => 'Other LGU',
+            'position' => 'Encoder',
+            'password' => bcrypt('password'),
+            'is_active' => true,
+            'access_status' => 'approved',
+            'access_approved_at' => now(),
+            'lgu_psgc_code' => '1603010000',
+        ],
+    );
+    $outsider->forceFill(['is_active' => true, 'access_status' => 'approved', 'lgu_psgc_code' => '1603010000'])->save();
+    $outsider->syncRoles(['LGU']);
+
+    $this->actingAs($outsider)
+        ->get("/lgu/dispatch-plans/{$dispatch->id}")
+        ->assertForbidden();
+
+    $this->actingAs($lguUser)
+        ->get("/lgu/dispatch-plans/{$dispatch->id}")
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('Lgu/DispatchPlans/Show')
+            ->where('plan.id', $dispatch->id)
+            ->where('plan.dispatch_number', $dispatch->dispatch_number)
+            ->where('plan.destination', 'Butuan City Hall')
+            ->has('plan.vehicles', 1)
+            ->has('plan.items', 1));
+});
+
 it('rejects loaded quantities from a different source warehouse than the vehicle assignment', function (): void {
     [$rros, $request] = prepareRisForDispatch();
     $hub = Warehouse::query()->where('name', 'Dispatch Hub')->firstOrFail();
@@ -2395,7 +3083,8 @@ it('releases one warehouse at a time without blocking the other, then flips to r
     expect($dispatch->status)->toBe('planned')
         ->and($dispatch->vehicle_details)->toHaveCount(2);
 
-    // Release warehouse A only — plan stays planned; inventory only for A.
+    // Release warehouse A only — the dispatch summary is released while B
+    // remains independently planned; inventory is posted only for A.
     $this->actingAs($rros)
         ->put("/dispatches/{$dispatch->id}", [
             'status' => 'planned',
@@ -2418,7 +3107,7 @@ it('releases one warehouse at a time without blocking the other, then flips to r
         ->where('type', 'release')
         ->get();
 
-    expect($dispatch->status)->toBe('planned')
+    expect($dispatch->status)->toBe('released')
         ->and(filled($dispatch->vehicle_details[0]['warehouse_released_at'] ?? null))->toBeTrue()
         ->and(filled($dispatch->vehicle_details[1]['warehouse_released_at'] ?? null))->toBeFalse()
         ->and($issuances)->toHaveCount(1)

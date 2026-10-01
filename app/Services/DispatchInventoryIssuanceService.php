@@ -38,11 +38,14 @@ class DispatchInventoryIssuanceService
                 continue;
             }
 
-            // Idempotent re-confirm: this DR was already posted for this dispatch.
-            if (filled($line['dr_number']) && $this->alreadyPostedForDr($dispatch, (string) $line['dr_number'])) {
+            // Idempotency is per DR item line. A DR normally contains several
+            // items, so checking the DR number alone incorrectly caused the
+            // first posted item (often FFPs) to suppress every later item.
+            if (filled($line['dr_number']) && $this->alreadyPostedForLine($dispatch, $line)) {
                 continue;
             }
 
+            $allocationExpiry = $this->expiryDate($allocation?->expiry);
             $batches = InventoryBatch::query()
                 ->with('item')
                 ->where('warehouse_id', $line['warehouse_id'])
@@ -50,7 +53,13 @@ class DispatchInventoryIssuanceService
                     ->whereRaw('LOWER(name) = ?', [Str::lower(trim((string) $item->item_name))]))
                 ->when($this->hasDimension($allocation?->brand_description), fn ($query) => $query
                     ->whereRaw('LOWER(TRIM(COALESCE(brand_description, \'\'))) = ?', [Str::lower(trim((string) $allocation->brand_description))]))
-                ->when($this->expiryDate($allocation?->expiry), fn ($query, $expiry) => $query->whereDate('expiration_date', $expiry))
+                // RIS/WIT expiry is a month-level value (for example "Mar 2027"),
+                // while inventory batches store the actual end-of-month date.
+                // Match the same calendar month instead of incorrectly comparing
+                // March 1 against a stored March 31 batch.
+                ->when($allocationExpiry, fn ($query, $expiry) => $query
+                    ->whereYear('expiration_date', Carbon::parse($expiry)->year)
+                    ->whereMonth('expiration_date', Carbon::parse($expiry)->month))
                 ->orderByRaw('CASE WHEN expiration_date IS NULL THEN 1 ELSE 0 END')
                 ->orderBy('expiration_date')
                 ->orderBy('id')
@@ -82,11 +91,13 @@ class DispatchInventoryIssuanceService
                     ->oldest('id')
                     ->first();
                 if ($existingWit) {
+                    $lineMarker = '[Dispatch Item:'.$item->id.']';
                     $existingWit->update([
                         'transactionable_type' => DispatchPlan::class,
                         'transactionable_id' => $dispatch->id,
                         'reconciliation_status' => 'reconciled',
                         'reconciled_at' => now(),
+                        'remarks' => trim(implode(' ', array_filter([$existingWit->remarks, $lineMarker]))),
                     ]);
                     $created[] = $existingWit->id;
                     $required -= (int) $existingWit->quantity;
@@ -99,7 +110,12 @@ class DispatchInventoryIssuanceService
                     continue;
                 }
 
-                $unitCost = $this->unitCost($batch);
+                // The RIS allocation snapshots the RROS unit cost. Dispatch may
+                // deliberately override it during physical release; use that
+                // persisted value for both the release ledger and DR totals.
+                $unitCost = $item->unit_cost !== null
+                    ? round((float) $item->unit_cost, 2)
+                    : $this->unitCost($batch);
                 $releaseAt = $vehicle['warehouse_released_at'] ?? $dispatch->warehouse_released_at ?? now();
                 $expectedAt = $vehicle['estimated_departure'] ?? $dispatch->dispatch_date;
 
@@ -134,6 +150,7 @@ class DispatchInventoryIssuanceService
                     'transactionable_id' => $dispatch->id,
                     'remarks' => trim(implode(' ', array_filter([
                         $dispatch->remarks,
+                        '[Dispatch Item:'.$item->id.']',
                         '[Vehicle DR:'.($line['dr_number'] ?: 'N/A').']',
                         '[DROMIS:'.$dispatch->dispatch_number.']',
                     ]))),
@@ -166,13 +183,28 @@ class DispatchInventoryIssuanceService
         return $created;
     }
 
-    private function alreadyPostedForDr(DispatchPlan $dispatch, string $drNumber): bool
+    /** @param array<string, mixed> $line */
+    private function alreadyPostedForLine(DispatchPlan $dispatch, array $line): bool
     {
-        return InventoryTransaction::query()
+        $item = $line['item'];
+        $drNumber = (string) $line['dr_number'];
+        $marker = '[Dispatch Item:'.$item->id.']';
+
+        $base = InventoryTransaction::query()
             ->where('transactionable_type', DispatchPlan::class)
             ->where('transactionable_id', $dispatch->id)
             ->where('type', 'release')
-            ->where('reference_number', $drNumber)
+            ->where('reference_number', $drNumber);
+
+        if ((clone $base)->where('remarks', 'like', '%'.$marker.'%')->exists()) {
+            return true;
+        }
+
+        // Compatibility for releases created before line markers were added.
+        return (clone $base)->whereHas('batch', fn ($query) => $query
+            ->where('warehouse_id', $line['warehouse_id'])
+            ->whereHas('item', fn ($itemQuery) => $itemQuery
+                ->whereRaw('LOWER(name) = ?', [Str::lower(trim((string) $item->item_name))])))
             ->exists();
     }
 

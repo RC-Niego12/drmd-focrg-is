@@ -36,10 +36,14 @@ class FniLibraryController extends Controller
         $isSuperAdmin = $user?->hasRole('Super Admin') ?? false;
 
         $operationalQuery = OperationalLibraryValue::query();
+        if (! $isSuperAdmin) {
+            $operationalQuery->where('library_type', '!=', 'drims_signatory');
+        }
         if (! $inventoryScope) {
             $libraryTypesToInclude = ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials'];
             if ($isSuperAdmin) {
                 $libraryTypesToInclude[] = 'system_name';
+                $libraryTypesToInclude[] = 'drims_signatory';
             }
             $operationalQuery->whereIn('library_type', $libraryTypesToInclude);
         }
@@ -51,7 +55,9 @@ class FniLibraryController extends Controller
             'warehouseLibraries' => $inventoryScope ? WarehouseLibraryValue::query()->orderBy('library_type')->orderBy('applicability')->orderBy('value')->get() : [],
             'warehouseLibraryTypes' => $inventoryScope ? WarehouseLibraryValue::TYPES : [],
             'operationalLibraries' => $operationalQuery->orderBy('library_type')->orderBy('value')->get(),
-            'operationalLibraryTypes' => $inventoryScope ? OperationalLibraryValue::TYPES : collect(OperationalLibraryValue::TYPES)->only(array_filter(['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials', $isSuperAdmin ? 'system_name' : null]))->all(),
+            'operationalLibraryTypes' => $inventoryScope
+                ? collect(OperationalLibraryValue::TYPES)->when(! $isSuperAdmin, fn ($types) => $types->except('drims_signatory'))->all()
+                : collect(OperationalLibraryValue::TYPES)->only(array_filter(['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials', $isSuperAdmin ? 'system_name' : null, $isSuperAdmin ? 'drims_signatory' : null]))->all(),
             'libraryScope' => $inventoryScope ? 'RROS' : ($isSuperAdmin ? 'Super Admin' : 'DRRS'),
             'lguDirectoryEntries' => $userAdminScope
                 ? LguDirectoryEntry::with(['officials', 'contacts', 'ldrrmoOfficers', 'lswdoAlternates'])
@@ -149,7 +155,11 @@ class FniLibraryController extends Controller
             'rros_ris_signatory' => ['requested_by', 'approved_by', 'issued_by'],
             'rros_dr_signatory' => ['issuance_approved_by', 'released_by'],
             'rros_stf_signatory' => ['requested_by', 'approved_by', 'issued_by'],
+            'drims_signatory' => ['recommended_by', 'approved_by'],
         ];
+        if ($request->input('library_type') === 'drims_signatory') {
+            abort_unless($request->user()?->hasRole('Super Admin'), 403);
+        }
         $data = $request->validate([
             'library_type' => ['required', Rule::in(array_keys($contexts))],
             'signatories' => ['required', 'array'],
@@ -194,7 +204,12 @@ class FniLibraryController extends Controller
             }
         });
 
-        return back()->with('success', 'The complete RROS document signatory set was saved.');
+        return back()->with(
+            'success',
+            $data['library_type'] === 'drims_signatory'
+                ? 'The DRIMS DROMIC report signatories were saved.'
+                : 'The complete RROS document signatory set was saved.'
+        );
     }
 
     public function storeDrrsSignatories(Request $request): RedirectResponse
@@ -286,6 +301,7 @@ class FniLibraryController extends Controller
         $allowedTypes = ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials'];
         if ($isSuperAdmin) {
             $allowedTypes[] = 'system_name';
+            $allowedTypes[] = 'drims_signatory';
         }
         abort_if(! $this->canManageInventory($request->user()) && ! in_array($operationalLibraryValue->library_type, $allowedTypes, true), 403);
         $previousEmployeeName = data_get($operationalLibraryValue->metadata, 'employee_name')
@@ -319,6 +335,7 @@ class FniLibraryController extends Controller
         $allowedTypes = ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials'];
         if ($isSuperAdmin) {
             $allowedTypes[] = 'system_name';
+            $allowedTypes[] = 'drims_signatory';
         }
         abort_if(! $this->canManageInventory(request()->user()) && ! in_array($operationalLibraryValue->library_type, $allowedTypes, true), 403);
         $operationalLibraryValue->delete();
@@ -328,7 +345,7 @@ class FniLibraryController extends Controller
 
     private function validatedOperationalValue(Request $request, ?OperationalLibraryValue $row = null): array
     {
-        $signatoryTypes = ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory'];
+        $signatoryTypes = ['drrs_signatory', 'drims_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory'];
         $isSignatory = in_array($request->input('library_type'), $signatoryTypes, true);
         $employeeName = $this->normalizeText($request->input('value'));
         $position = $this->normalizeText($request->input('position'));
@@ -343,6 +360,9 @@ class FniLibraryController extends Controller
         $contactNumber = $request->input('library_type') === 'dispatch_driver'
             ? $this->normalizeText($request->input('contact_number'))
             : '';
+        $idNumber = in_array($request->input('library_type'), ['dispatch_driver', 'dispatch_received_by'], true)
+            ? $this->normalizeText($request->input('id_number'))
+            : '';
         $documentType = $request->input('library_type') === 'drrs_signatory'
             ? ($request->input('document_type') ?: data_get($row?->metadata, 'document_type', 'assessment'))
             : null;
@@ -353,6 +373,7 @@ class FniLibraryController extends Controller
             'initials' => $initials,
             'office' => $office,
             'contact_number' => $contactNumber !== '' ? $contactNumber : null,
+            'id_number' => $idNumber !== '' ? $idNumber : null,
             'document_type' => $documentType,
             'suffix' => $suffix,
             'short_name' => $this->normalizeText($request->input('short_name')),
@@ -363,6 +384,7 @@ class FniLibraryController extends Controller
         $allowedTypes = $canManageInventory ? array_keys(OperationalLibraryValue::TYPES) : ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials'];
         if ($isSuperAdmin && ! $canManageInventory) {
             $allowedTypes[] = 'system_name';
+            $allowedTypes[] = 'drims_signatory';
         }
         $data = $request->validate([
             'library_type' => ['required', Rule::in($allowedTypes)],
@@ -374,6 +396,7 @@ class FniLibraryController extends Controller
             'position' => [Rule::requiredIf($isSignatory), 'nullable', 'string', 'max:255'],
             'office' => ['nullable', 'string', 'max:255'],
             'contact_number' => [Rule::requiredIf($request->input('library_type') === 'dispatch_driver'), 'nullable', 'string', 'max:80'],
+            'id_number' => ['nullable', 'string', 'max:80'],
             'initials' => [Rule::requiredIf($request->input('library_type') === 'drrs_signatory'), 'nullable', 'string', 'max:40'],
             'suffix' => ['nullable', 'string', 'max:80'],
             'document_type' => [Rule::requiredIf($request->input('library_type') === 'drrs_signatory'), 'nullable', Rule::in(['assessment', 'response_letter'])],
@@ -387,14 +410,16 @@ class FniLibraryController extends Controller
                         'contact_number' => $data['contact_number'] ?? null,
                         'position' => $data['position'] ?? null,
                         'office' => $data['office'] ?? null,
+                        'id_number' => $data['id_number'] ?? null,
                     ], fn ($value) => filled($value))
                     : ($data['library_type'] === 'dispatch_received_by'
-                        ? [
+                        ? array_filter([
                             'position' => $data['position'] ?? '',
                             'office' => $data['office'] ?? '',
-                        ]
+                            'id_number' => $data['id_number'] ?? null,
+                        ], fn ($value) => $value !== null && $value !== '')
                         : ($row?->metadata ?? null))));
-        unset($data['short_name'], $data['document_type'], $data['position'], $data['suffix'], $data['designation'], $data['office'], $data['initials'], $data['contact_number']);
+        unset($data['short_name'], $data['document_type'], $data['position'], $data['suffix'], $data['designation'], $data['office'], $data['initials'], $data['contact_number'], $data['id_number']);
         if ($data['library_type'] === 'drrs_signatory' && ! in_array($data['context'], ['reviewed_by', 'approved_by'], true)) {
             throw ValidationException::withMessages(['context' => 'Use reviewed_by or approved_by as the signatory role.']);
         }
@@ -402,6 +427,7 @@ class FniLibraryController extends Controller
             'rros_ris_signatory' => ['requested_by', 'approved_by', 'issued_by'],
             'rros_dr_signatory' => ['issuance_approved_by', 'released_by'],
             'rros_stf_signatory' => ['requested_by', 'approved_by', 'issued_by'],
+            'drims_signatory' => ['recommended_by', 'approved_by'],
         ];
         if (isset($rrosContexts[$data['library_type']]) && ! in_array($data['context'], $rrosContexts[$data['library_type']], true)) {
             throw ValidationException::withMessages(['context' => 'Select a valid signatory role for this document.']);

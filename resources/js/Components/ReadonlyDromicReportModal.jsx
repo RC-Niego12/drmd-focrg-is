@@ -22,7 +22,7 @@ const labels = {
     preemptive_evacuation_rows: 'Pre-emptive Evacuation',
     cluster_gap_rows: 'Gaps, Challenges and Actions Undertaken',
     response_action_rows: 'Response Actions and Interventions',
-    requested_fni_items: 'Request Letter (Relief Augmentation)',
+    requested_fni_items: 'FNI needs for this incident',
     official_advisory_rows: 'Advisory Screenshots and Extracted Information',
     photo_documentation_rows: 'Photo Documentation',
 };
@@ -429,7 +429,7 @@ export function DromicEncodedReportBody({ report, className = '' }) {
             <Section title="Response Actions and Interventions">
                 <ReadonlyTable rows={payload.response_action_rows || []} columns={['acted_by_office', 'acted_by_office_other', 'action_intervention']} />
             </Section>
-            <Section title="Request Letter (Relief Augmentation)" na={!payload.has_relief_request}>
+            <Section title={payload.has_relief_request ? 'Request for Relief Augmentation' : 'FNI needs for this incident'}>
                 <ReadonlyTable rows={payload.requested_fni_items || []} columns={['item_name', 'requested_quantity', 'unit_of_measure']} totalColumns={['requested_quantity']} />
             </Section>
             <Section title="PAGASA / PHIVOLCS Advisory Screenshots" na={notApplicable.has('advisory_screenshots')}>

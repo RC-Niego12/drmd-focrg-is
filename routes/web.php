@@ -6,11 +6,13 @@ use App\Http\Controllers\AiRogerController;
 use App\Http\Controllers\AuditTrailController;
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\Auth\ForgotPasswordController;
+use App\Http\Controllers\Auth\LguCredentialSetupController;
 use App\Http\Controllers\Auth\MfaController;
 use App\Http\Controllers\Auth\NewPasswordController;
 use App\Http\Controllers\Auth\SSOController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DispatchPlanController;
+use App\Http\Controllers\DispatchMonitoringController;
 use App\Http\Controllers\DistributionPlanController;
 use App\Http\Controllers\DrmdAaRequestController;
 use App\Http\Controllers\DrmdLguRoutingController;
@@ -18,17 +20,26 @@ use App\Http\Controllers\DromicReportController;
 use App\Http\Controllers\DrrsAaEpirmaController;
 use App\Http\Controllers\EpirmaSigningController;
 use App\Http\Controllers\EStockCardController;
+use App\Http\Controllers\EvacuationCenterController;
 use App\Http\Controllers\FniIssuanceController;
 use App\Http\Controllers\FniLibraryController;
 use App\Http\Controllers\InventoryController;
 use App\Http\Controllers\LguDirectoryController;
+use App\Http\Controllers\LguDispatchPlanController;
 use App\Http\Controllers\LguDromicRequestController;
+use App\Http\Controllers\LguEvacuationCenterController;
+use App\Http\Controllers\LguInventoryController;
+use App\Http\Controllers\LguNearExpiryController;
+use App\Http\Controllers\LguPopulationController;
 use App\Http\Controllers\LguProfileController;
 use App\Http\Controllers\LguResponseLetterController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\OcdAlertController;
 use App\Http\Controllers\PasswordController;
 use App\Http\Controllers\PopulationController;
+use App\Http\Controllers\PreparednessForResponseController;
+use App\Http\Controllers\PreparednessDataController;
+use App\Http\Controllers\PreparednessReportController;
 use App\Http\Controllers\PsgcAddressController;
 use App\Http\Controllers\PsgcController;
 use App\Http\Controllers\RealtimeAuthController;
@@ -42,6 +53,7 @@ use App\Http\Controllers\SystemMessageController;
 use App\Http\Controllers\UserProfileController;
 use App\Http\Controllers\WarehouseController;
 use App\Http\Controllers\WitSyncController;
+use App\Http\Middleware\EnsureLguCredentialsReviewed;
 use App\Http\Middleware\EnsureMfaSatisfied;
 use App\Http\Middleware\EnsureUserAccessApproved;
 use Illuminate\Http\Request;
@@ -99,7 +111,11 @@ Route::middleware('auth')->group(function (): void {
 
     Route::patch('/settings/password', [PasswordController::class, 'update'])->name('settings.password');
 
-    Route::middleware(EnsureMfaSatisfied::class)->group(function (): void {
+    Route::get('/lgu/credentials', [LguCredentialSetupController::class, 'edit'])->name('lgu.credentials.edit');
+    Route::post('/lgu/credentials', [LguCredentialSetupController::class, 'update'])->name('lgu.credentials.update');
+    Route::post('/lgu/credentials/retain', [LguCredentialSetupController::class, 'retain'])->name('lgu.credentials.retain');
+
+    Route::middleware([EnsureMfaSatisfied::class, EnsureLguCredentialsReviewed::class])->group(function (): void {
         Route::get('/realtime/auth', RealtimeAuthController::class)
             ->middleware('throttle:60,1')
             ->name('realtime.auth');
@@ -124,6 +140,22 @@ Route::middleware('auth')->group(function (): void {
         Route::middleware(EnsureUserAccessApproved::class)->group(function (): void {
             Route::get('/', DashboardController::class)->name('dashboard');
             Route::get('/dashboard', DashboardController::class);
+            Route::get('/preparedness-for-response', [PreparednessReportController::class, 'index'])
+                ->name('preparedness-for-response.index')
+                ->middleware('role:Super Admin|DRIMS');
+            Route::post('/preparedness-for-response/reports', [PreparednessReportController::class, 'store'])->name('preparedness-for-response.reports.store')->middleware('role:Super Admin|DRIMS');
+            Route::get('/preparedness-for-response/ec-photos/{center}', [PreparednessForResponseController::class, 'evacuationPhoto'])->name('preparedness-for-response.ec-photo')->middleware('role:Super Admin|DRIMS');
+            Route::get('/preparedness-for-response/reports/{report}', PreparednessForResponseController::class)->name('preparedness-for-response.reports.show')->middleware('role:Super Admin|DRIMS');
+            Route::patch('/preparedness-for-response/reports/{report}/finalize', [PreparednessReportController::class, 'finalize'])->name('preparedness-for-response.reports.finalize')->middleware('role:Super Admin|DRIMS');
+            Route::patch('/preparedness-for-response/reports/{report}/revise', [PreparednessReportController::class, 'revise'])->name('preparedness-for-response.reports.revise')->middleware('role:Super Admin|DRIMS');
+            Route::delete('/preparedness-for-response/reports/{report}', [PreparednessReportController::class, 'destroy'])->name('preparedness-for-response.reports.destroy')->middleware('role:Super Admin|DRIMS');
+            Route::patch('/preparedness-for-response/reports/{report}/data/{section}', [PreparednessDataController::class, 'update'])
+                ->name('preparedness-for-response.data.update')
+                ->middleware('role:Super Admin|DRIMS')
+                ->whereIn('section', ['briefing-intro', 'response-assets', 'qrt-coverage', 'qrt-specializations']);
+            Route::post('/preparedness-for-response/reports/{report}/action-pages', [PreparednessDataController::class, 'storeActionPage']);
+            Route::patch('/preparedness-for-response/reports/{report}/action-pages/{actionPage}', [PreparednessDataController::class, 'updateActionPage']);
+            Route::delete('/preparedness-for-response/reports/{report}/action-pages/{actionPage}', [PreparednessDataController::class, 'destroyActionPage']);
             Route::get('/rros-dashboard', [DashboardController::class, 'rros'])->name('dashboard.rros');
 
             // Role fallbacks match sidebar / seeded product intent when Spatie permission pivots/cache drift.
@@ -184,16 +216,27 @@ Route::middleware('auth')->group(function (): void {
             Route::get('/drrs-aa/epirma', [DrrsAaEpirmaController::class, 'index'])->name('drrs-aa.epirma.index')->middleware('role_or_permission:Super Admin|DRRS AA|route epirma documents');
             Route::post('/drrs-aa/epirma/sync-open', [DrrsAaEpirmaController::class, 'syncOpen'])->name('drrs-aa.epirma.sync-open')->middleware('role_or_permission:Super Admin|DRRS AA|route epirma documents');
             Route::post('/drrs-aa/epirma/{assistanceRequest}/sync', [DrrsAaEpirmaController::class, 'sync'])->name('drrs-aa.epirma.sync')->middleware('role_or_permission:Super Admin|DRRS AA|route epirma documents');
+            Route::get('/lgu/inventory', [LguInventoryController::class, 'index'])->name('lgu.inventory.index')->middleware('role_or_permission:LGU|submit lgu dromic requests');
+            Route::get('/lgu/near-expiry', [LguNearExpiryController::class, 'index'])->name('lgu.near-expiry.index')->middleware('role_or_permission:LGU|submit lgu dromic requests');
+            Route::get('/lgu/population', [LguPopulationController::class, 'index'])->name('lgu.population.index')->middleware('role_or_permission:LGU|submit lgu dromic requests');
+            Route::get('/lgu/evacuation-centers', [LguEvacuationCenterController::class, 'index'])->name('lgu.evacuation-centers.index')->middleware('role_or_permission:LGU|submit lgu dromic requests');
+            Route::get('/evacuation-centers', [EvacuationCenterController::class, 'index'])->name('evacuation-centers.index')->middleware('role_or_permission:Super Admin|DRIMS|manage dromic reports');
             Route::get('/lgu/response-letters', [LguResponseLetterController::class, 'index'])->name('lgu.response-letters.index')->middleware('role_or_permission:Super Admin|LGU|submit lgu dromic requests');
             Route::get('/lgu/response-letters/{assistanceRequest}', [LguResponseLetterController::class, 'show'])->name('lgu.response-letters.show')->middleware('role_or_permission:Super Admin|LGU|submit lgu dromic requests');
             Route::post('/lgu/response-letters/{assistanceRequest}/acknowledge', [LguResponseLetterController::class, 'acknowledge'])->name('lgu.response-letters.acknowledge')->middleware('role_or_permission:Super Admin|LGU|submit lgu dromic requests');
+            Route::get('/lgu/dispatch-plans/{dispatch}', [LguDispatchPlanController::class, 'show'])->name('lgu.dispatch-plans.show')->middleware('role_or_permission:Super Admin|LGU|submit lgu dromic requests');
             Route::get('/lgu/dromic-sitrep', [LguDromicRequestController::class, 'index'])->name('lgu.dromic-requests.index')->middleware('role_or_permission:LGU|submit lgu dromic requests');
             Route::post('/lgu/dromic-sitrep', [LguDromicRequestController::class, 'store'])->name('lgu.dromic-requests.store')->middleware('role_or_permission:LGU|submit lgu dromic requests');
+            Route::post('/lgu/dromic-sitrep/relief-requests', [LguDromicRequestController::class, 'storeConsolidatedReliefRequest'])->name('lgu.dromic-requests.relief-requests.store')->middleware('role_or_permission:LGU|submit lgu dromic requests');
             Route::patch('/lgu/dromic-sitrep/{assistanceRequest}', [LguDromicRequestController::class, 'update'])->name('lgu.dromic-requests.update')->middleware('role_or_permission:LGU|submit lgu dromic requests');
+            Route::post('/lgu/dromic-sitrep/{assistanceRequest}/reopen', [LguDromicRequestController::class, 'reopenForRevision'])->name('lgu.dromic-requests.reopen')->middleware('role_or_permission:LGU|submit lgu dromic requests');
+            Route::patch('/lgu/dromic-sitrep/{assistanceRequest}/relief-request', [LguDromicRequestController::class, 'updateConsolidatedReliefRequest'])->name('lgu.dromic-requests.relief-requests.update')->middleware('role_or_permission:LGU|submit lgu dromic requests');
             Route::post('/lgu/dromic-sitrep/{assistanceRequest}/correction-draft', [LguDromicRequestController::class, 'startCorrectionDraft'])->name('lgu.dromic-requests.correction-draft')->middleware('role_or_permission:LGU|submit lgu dromic requests');
+            Route::post('/lgu/dromic-sitrep/{assistanceRequest}/amendment-request', [LguDromicRequestController::class, 'requestAmendment'])->name('lgu.dromic-requests.amendment-request')->middleware('role_or_permission:LGU|submit lgu dromic requests');
             Route::post('/lgu/dromic-sitrep/{assistanceRequest}/signed-copies', [LguDromicRequestController::class, 'uploadSignedCopies'])->name('lgu.dromic-requests.signed-copies')->middleware('role_or_permission:LGU|submit lgu dromic requests');
             Route::post('/lgu/dromic-sitrep/{assistanceRequest}/submit', [LguDromicRequestController::class, 'submitToDswd'])->name('lgu.dromic-requests.submit')->middleware('role_or_permission:LGU|submit lgu dromic requests');
             Route::post('/lgu/dromic-sitrep/polish', [LguDromicRequestController::class, 'polish'])->name('lgu.dromic-requests.polish')->middleware('role_or_permission:LGU|submit lgu dromic requests');
+            Route::post('/lgu/dromic-sitrep/preview', [LguDromicRequestController::class, 'preview'])->name('lgu.dromic-requests.preview')->middleware('role_or_permission:LGU|submit lgu dromic requests');
             Route::post('/lgu/dromic-sitrep/official-advisories', [LguDromicRequestController::class, 'officialAdvisories'])->name('lgu.dromic-requests.official-advisories')->middleware('role_or_permission:LGU|submit lgu dromic requests');
             Route::post('/lgu/dromic-sitrep/official-advisories/import', [LguDromicRequestController::class, 'importOfficialAdvisory'])->name('lgu.dromic-requests.official-advisories.import')->middleware('role_or_permission:LGU|submit lgu dromic requests');
             Route::post('/lgu/dromic-sitrep/official-advisories/extract-screenshot', [LguDromicRequestController::class, 'extractOfficialAdvisoryScreenshot'])->name('lgu.dromic-requests.official-advisories.extract-screenshot')->middleware(['role_or_permission:LGU|submit lgu dromic requests', 'throttle:12,1']);
@@ -225,7 +268,9 @@ Route::middleware('auth')->group(function (): void {
             Route::get('/requests/{assistanceRequest}/assessment-form', [RequestController::class, 'assessmentForm'])->name('requests.assessment');
             Route::get('/requests/{assistanceRequest}/source-document', [RequestController::class, 'sourceDocument'])->name('requests.source-document')->middleware('role_or_permission:Super Admin|DRMD AA|DRRS|DRIMS|RROS|RROS AA|submit drmd aa requests|encode requests|monitor requests|process requests');
             Route::get('/requests/{assistanceRequest}/assessment-pdf', [RequestController::class, 'assessmentPdf'])->name('requests.assessment-pdf');
+            Route::post('/requests/assessment-draft-pdf', [RequestController::class, 'assessmentDraftPdf'])->name('requests.assessment-draft-pdf')->middleware('role_or_permission:Super Admin|DRRS|encode requests');
             Route::patch('/requests/{assistanceRequest}/assessment-form', [RequestController::class, 'updateAssessment'])->name('requests.assessment.update')->middleware('role_or_permission:Super Admin|DRRS|encode requests|monitor requests|process requests');
+            Route::patch('/requests/{assistanceRequest}/response-letter-body', [RequestController::class, 'updateResponseLetterBody'])->name('requests.response-letter-body.update')->middleware('role_or_permission:Super Admin|DRRS|encode requests');
             Route::patch('/requests/{assistanceRequest}/complete-assessment', [RequestController::class, 'completeAssessment'])->name('requests.assessment.complete')->middleware('role_or_permission:Super Admin|DRRS|encode requests');
             Route::patch('/requests/{assistanceRequest}/assessment-status', [RequestController::class, 'assessmentStatus'])->name('requests.assessment.status')->middleware('role_or_permission:Super Admin|DRRS|encode requests');
             Route::post('/requests/{assistanceRequest}/epirma/sign', [EpirmaSigningController::class, 'startSign'])->name('requests.epirma.sign')->middleware('role_or_permission:Super Admin|DRRS AA|route epirma documents');
@@ -245,6 +290,7 @@ Route::middleware('auth')->group(function (): void {
             Route::patch('/requests/{assistanceRequest}/response-drn', [RequestController::class, 'updateResponseDrn'])->name('requests.response-drn.update')->middleware('role_or_permission:Super Admin|DRRS AA|route epirma documents');
 
             Route::get('/dispatches', [DispatchPlanController::class, 'index'])->name('dispatches.index')->middleware('role_or_permission:Super Admin|RROS|RROS AA|manage dispatches');
+            Route::get('/delivery-monitoring', [DispatchMonitoringController::class, 'index'])->name('delivery-monitoring.index');
             Route::get('/delivery-escort', [DispatchPlanController::class, 'deliveryEscortWorkspace'])->name('delivery-escort.index');
             Route::post('/dispatches', [DispatchPlanController::class, 'store'])->name('dispatches.store')->middleware('role_or_permission:Super Admin|RROS|RROS AA|manage dispatches');
             Route::post('/dispatches/{dispatch}/follow-up', [DispatchPlanController::class, 'followUp'])->name('dispatches.follow-up')->middleware('role_or_permission:Super Admin|RROS|RROS AA|manage dispatches');
@@ -256,6 +302,7 @@ Route::middleware('auth')->group(function (): void {
             Route::get('/dispatches/{dispatch}/vehicles/{vehicleIndex}/dr', [DispatchPlanController::class, 'vehicleDr'])->whereNumber('vehicleIndex')->name('dispatches.vehicles.dr');
             Route::get('/dispatches/{dispatch}/local-handover/dr', [DispatchPlanController::class, 'localHandoverDr'])->name('dispatches.local-handover.dr');
             Route::post('/dispatches/{dispatch}/delivery-updates', [DispatchPlanController::class, 'storeDeliveryUpdate'])->name('dispatches.delivery-updates.store');
+            Route::patch('/dispatches/{dispatch}/delivery-updates/{update}/message', [DispatchPlanController::class, 'updateDeliveryUpdateMessage'])->name('dispatches.delivery-updates.message.update');
             Route::get('/dispatches/reverse-location', [DispatchPlanController::class, 'reverseLocation'])->name('dispatches.reverse-location');
             Route::get('/dispatches/{dispatch}/delivery-updates/{update}/photos/{photoIndex}', [DispatchPlanController::class, 'deliveryUpdatePhoto'])->whereNumber('photoIndex')->name('dispatches.delivery-updates.photos.show');
             Route::put('/dispatches/{dispatch}', [DispatchPlanController::class, 'update'])->name('dispatches.update');
@@ -276,11 +323,15 @@ Route::middleware('auth')->group(function (): void {
             Route::put('/operational-library/{operationalLibraryValue}', [FniLibraryController::class, 'updateOperationalValue'])->name('operational-library.update')->middleware('role_or_permission:Super Admin|RROS|RROS AA|DRRS|manage inventory|encode requests');
             Route::delete('/operational-library/{operationalLibraryValue}', [FniLibraryController::class, 'destroyOperationalValue'])->name('operational-library.destroy')->middleware('role_or_permission:Super Admin|RROS|RROS AA|DRRS|manage inventory|encode requests');
 
-            Route::get('/dromic', [DromicReportController::class, 'index'])->name('dromic.index')->middleware('role_or_permission:Super Admin|DRIMS|manage dromic reports');
-            Route::post('/dromic', [DromicReportController::class, 'store'])->name('dromic.store')->middleware('role_or_permission:Super Admin|DRIMS|manage dromic reports');
+            Route::get('/dromic', [\App\Http\Controllers\DswdDromicReportController::class, 'index'])->name('dromic.index')->middleware('role_or_permission:Super Admin|DRIMS|manage dromic reports');
+            Route::post('/dromic', [\App\Http\Controllers\DswdDromicReportController::class, 'store'])->name('dromic.store')->middleware('role_or_permission:Super Admin|DRIMS|manage dromic reports');
+            Route::get('/dromic/reports/{report}/{format}', [\App\Http\Controllers\DswdDromicReportController::class, 'download'])->whereIn('format', ['pdf', 'xlsx'])->name('dromic.download')->middleware('role_or_permission:Super Admin|DRIMS|manage dromic reports');
+            Route::get('/dromic/reports/{report}', [\App\Http\Controllers\DswdDromicReportController::class, 'show'])->name('dromic.show')->middleware('role_or_permission:Super Admin|DRIMS|manage dromic reports');
             Route::get('/dromic/lgu-reports', [DromicReportController::class, 'lguReports'])->name('dromic.lgu-reports')->middleware('role_or_permission:Super Admin|DRIMS|DRRS|QRT|Quick Response Team|OCD Caraga|monitor requests|manage regional alerts');
             Route::patch('/dromic/lgu-reports/{assistanceRequest}/validation', [DromicReportController::class, 'updateLguReportValidation'])->name('dromic.lgu-reports.validation.update')->middleware('role_or_permission:Super Admin|DRIMS|DRRS|QRT|Quick Response Team|monitor requests');
             Route::post('/dromic/lgu-reports/{assistanceRequest}/validation', [DromicReportController::class, 'updateLguReportValidation'])->middleware('role_or_permission:Super Admin|DRIMS|DRRS|QRT|Quick Response Team|monitor requests');
+            Route::patch('/dromic/lgu-reports/{assistanceRequest}/amendment-request', [DromicReportController::class, 'decideLguAmendmentRequest'])->name('dromic.lgu-reports.amendment-request.update')->middleware('role_or_permission:Super Admin|DRIMS|DRRS|QRT|Quick Response Team|monitor requests');
+            Route::post('/dromic/lgu-reports/{assistanceRequest}/amendment-request', [DromicReportController::class, 'decideLguAmendmentRequest'])->middleware('role_or_permission:Super Admin|DRIMS|DRRS|QRT|Quick Response Team|monitor requests');
             Route::patch('/dromic/lgu-reports/{assistanceRequest}/relief-validation', [DromicReportController::class, 'updateLguReliefValidation'])->name('dromic.lgu-reports.relief-validation.update')->middleware('role_or_permission:Super Admin|DRRS|encode requests|monitor requests');
             Route::post('/dromic/lgu-reports/{assistanceRequest}/relief-validation', [DromicReportController::class, 'updateLguReliefValidation'])->middleware('role_or_permission:Super Admin|DRRS|encode requests|monitor requests');
 

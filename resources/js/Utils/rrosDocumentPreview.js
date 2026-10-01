@@ -269,6 +269,8 @@ export function buildRrosDocumentPreviewTabs(row, options = {}) {
 
     includeRdsCsmr = false,
 
+    preferOperationalRis = false,
+
   } = options;
 
 
@@ -367,9 +369,11 @@ export function buildRrosDocumentPreviewTabs(row, options = {}) {
 
   if (hasRis) {
 
-    const risSrc = risEpirmaSignedUrl || risUploadedUrl || risAdvanceUrl;
+    const risSrc = preferOperationalRis && risAdvanceUrl
+      ? risAdvanceUrl
+      : risEpirmaSignedUrl || risUploadedUrl || risAdvanceUrl;
 
-    const risKind = risEpirmaSignedUrl || risUploadedUrl ? "signed" : risAdvanceUrl ? "draft" : null;
+    const risKind = risSrc === risEpirmaSignedUrl || risSrc === risUploadedUrl ? "signed" : risAdvanceUrl ? "draft" : null;
 
     tabs.push({
 
@@ -381,7 +385,9 @@ export function buildRrosDocumentPreviewTabs(row, options = {}) {
 
       kind: risKind,
 
-      message: risEpirmaSignedUrl
+      message: preferOperationalRis && risAdvanceUrl
+        ? "Operational RIS updated from the confirmed receipt and returned/cancelled item outcomes."
+        : risEpirmaSignedUrl
         ? "Official signed RIS retrieved through e-PIRMA."
         : risUploadedUrl
 
@@ -394,6 +400,16 @@ export function buildRrosDocumentPreviewTabs(row, options = {}) {
           : "RIS advance printable is unavailable for this request.",
 
     });
+
+    if (preferOperationalRis && risEpirmaSignedUrl) {
+      tabs.push({
+        key: "signed-ris",
+        label: "Signed RIS (Original)",
+        src: risEpirmaSignedUrl,
+        kind: "signed",
+        message: "Immutable official RIS retrieved through e-PIRMA.",
+      });
+    }
 
   }
 

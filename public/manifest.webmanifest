@@ -1,16 +1,17 @@
 {
-    "name": "Disaster Response Operations Management Integrated System",
+    "name": "DROMIS – Disaster Response Operations",
     "short_name": "DROMIS",
     "description": "DSWD Field Office Caraga disaster response operations, DROMIC/SitRep, inventory, requests, and coordination system.",
     "id": "/",
-    "start_url": "/",
+    "start_url": "/login?source=pwa",
     "scope": "/",
     "display": "standalone",
-    "display_override": ["window-controls-overlay", "standalone", "browser"],
+    "display_override": ["standalone", "minimal-ui"],
     "orientation": "any",
     "background_color": "#f8fafc",
     "theme_color": "#0f766e",
     "categories": ["productivity", "government", "utilities"],
+    "prefer_related_applications": false,
     "icons": [
         {
             "src": "/images/pwa-icon-192.png",
@@ -22,7 +23,13 @@
             "src": "/images/pwa-icon-512.png",
             "sizes": "512x512",
             "type": "image/png",
-            "purpose": "any maskable"
+            "purpose": "any"
+        },
+        {
+            "src": "/images/pwa-icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable"
         }
     ],
     "shortcuts": [

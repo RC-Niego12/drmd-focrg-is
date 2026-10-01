@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Models\Warehouse;
 use App\Models\WarehouseLibraryValue;
 use App\Services\AuditLogger;
+use App\Services\PsgcDistrictService;
 use App\Services\WarehouseIdentityService;
 use App\Services\WarehouseMasterSheetImportService;
 use Illuminate\Http\JsonResponse;
@@ -177,7 +178,12 @@ class WarehouseController extends Controller
             return back()->with('error', $exception->getMessage() ?: 'Warehouse master sync failed. Please try again.');
         }
 
-        return back()->with('success', "Warehouse sync complete: {$summary['warehouses_synced']} synced, {$summary['rows_skipped']} skipped.");
+        $storekeepersUpdated = (int) ($summary['storekeepers_updated'] ?? 0);
+        $storekeepersNote = $storekeepersUpdated > 0
+            ? ", {$storekeepersUpdated} storekeepers from ".($summary['storekeepers_worksheet'] ?? 'storekeepers sheet')
+            : '';
+
+        return back()->with('success', "Warehouse sync complete: {$summary['warehouses_synced']} synced, {$summary['rows_skipped']} skipped{$storekeepersNote}.");
     }
 
     public function generateIdentity(Request $request, WarehouseIdentityService $identity): JsonResponse
@@ -209,21 +215,38 @@ class WarehouseController extends Controller
             || $user->can('manage warehouses');
     }
 
-    public function store(WarehouseRequest $request, AuditLogger $audit, WarehouseIdentityService $identity): RedirectResponse
+    public function store(WarehouseRequest $request, AuditLogger $audit, WarehouseIdentityService $identity, PsgcDistrictService $districts): RedirectResponse
     {
-        $warehouse = Warehouse::create($identity->fillMissing($request->validated()));
+        $payload = $this->withShortDistrict($identity->fillMissing($request->validated()), $districts);
+        $warehouse = Warehouse::create($payload);
         $audit->log('warehouse.created', $warehouse, [], $warehouse->toArray());
 
         return back()->with('success', 'Warehouse created.');
     }
 
-    public function update(WarehouseRequest $request, Warehouse $warehouse, AuditLogger $audit, WarehouseIdentityService $identity): RedirectResponse
+    public function update(WarehouseRequest $request, Warehouse $warehouse, AuditLogger $audit, WarehouseIdentityService $identity, PsgcDistrictService $districts): RedirectResponse
     {
         $old = $warehouse->toArray();
-        $warehouse->update($identity->fillMissing($request->validated(), $warehouse));
+        $payload = $this->withShortDistrict($identity->fillMissing($request->validated(), $warehouse), $districts);
+        $warehouse->update($payload);
         $audit->log('warehouse.updated', $warehouse, $old, $warehouse->fresh()->toArray());
 
         return back()->with('success', 'Warehouse updated.');
+    }
+
+    private function withShortDistrict(array $payload, PsgcDistrictService $districts): array
+    {
+        $resolved = $districts->resolveForLocality(
+            $payload['province'] ?? null,
+            $payload['district'] ?? null,
+            $payload['municipality'] ?? null,
+        );
+
+        if ($resolved !== null) {
+            $payload['district'] = $resolved;
+        }
+
+        return $payload;
     }
 
     public function destroy(Warehouse $warehouse, AuditLogger $audit): RedirectResponse

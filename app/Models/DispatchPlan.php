@@ -68,6 +68,7 @@ class DispatchPlan extends Model
         'mode_of_transportation',
         'vehicle_types',
         'number_of_vehicles',
+        'vehicles_needed',
         'vehicle_details',
         'dispatch_date',
         'estimated_arrival',
@@ -120,6 +121,7 @@ class DispatchPlan extends Model
             'has_returned_items' => 'boolean',
             'fulfillment_type_confirmed' => 'boolean',
             'number_of_vehicles' => 'integer',
+            'vehicles_needed' => 'boolean',
             'returned_quantity' => 'integer',
             'delivery_sequence' => 'integer',
             'dr_series_offset' => 'integer',
@@ -204,6 +206,10 @@ class DispatchPlan extends Model
     {
         $fromVehicles = collect($this->resolvedVehicleDetails())
             ->map(function (array $row) use ($vehicleKey) {
+                if ($vehicleKey === 'source_warehouse_name' && ! empty($row['source_warehouses'])) {
+                    return collect($row['source_warehouses'])
+                        ->pluck('name')->filter()->unique()->implode(' + ');
+                }
                 $value = $row[$vehicleKey] ?? null;
                 if ($value === null || $value === '') {
                     return null;
@@ -322,7 +328,16 @@ class DispatchPlan extends Model
             ->values()
             ->all();
 
+        $hasConfirmedVehicleWorkflow = filled($row['plan_confirmed_at'] ?? null)
+            || filled($row['warehouse_released_at'] ?? null)
+            || filled($row['received_at'] ?? null);
         $normalized = [
+            'fulfillment_type' => in_array($row['fulfillment_type'] ?? null, self::FULFILLMENT_TYPES, true)
+                ? $row['fulfillment_type']
+                : ($hasConfirmedVehicleWorkflow
+                    ? ($this->fulfillment_type ?: self::FULFILLMENT_FIELD_DELIVERY)
+                    : null),
+            'plan_confirmed_at' => $this->dateTimeLocal($row['plan_confirmed_at'] ?? null),
             'dr_number' => filled($row['dr_number'] ?? null) ? trim((string) $row['dr_number']) : null,
             'source_warehouse_id' => filled($row['source_warehouse_id'] ?? null)
                 ? (int) $row['source_warehouse_id']
@@ -330,6 +345,12 @@ class DispatchPlan extends Model
             'source_warehouse_name' => filled($row['source_warehouse_name'] ?? null)
                 ? trim((string) $row['source_warehouse_name'])
                 : null,
+            'source_warehouses' => collect($row['source_warehouses'] ?? [])
+                ->filter(fn ($warehouse) => is_array($warehouse) && (filled($warehouse['id'] ?? null) || filled($warehouse['name'] ?? null)))
+                ->map(fn (array $warehouse): array => [
+                    'id' => filled($warehouse['id'] ?? null) ? (int) $warehouse['id'] : null,
+                    'name' => filled($warehouse['name'] ?? null) ? trim((string) $warehouse['name']) : null,
+                ])->values()->all(),
             'vehicle_type' => filled($row['vehicle_type'] ?? null) ? trim((string) $row['vehicle_type']) : null,
             'driver' => filled($row['driver'] ?? null) ? trim((string) $row['driver']) : null,
             'driver_contact_number' => filled($row['driver_contact_number'] ?? null)
@@ -368,6 +389,9 @@ class DispatchPlan extends Model
                     ?? (filled($row['dispatch_date'] ?? null) ? (string) $row['dispatch_date'] : null)
             ),
             'estimated_arrival' => $this->dateTimeLocal($row['estimated_arrival'] ?? null),
+            'planning_remarks' => filled($row['planning_remarks'] ?? null)
+                ? trim((string) $row['planning_remarks'])
+                : null,
             'allows_multi_day_run' => $this->truthyFlag($row['allows_multi_day_run'] ?? false),
             'mode_of_transportation' => filled($mode) ? (string) $mode : null,
             'land_transportation_source' => filled($row['land_transportation_source'] ?? null) ? trim((string) $row['land_transportation_source']) : null,
@@ -543,6 +567,46 @@ class DispatchPlan extends Model
         }
 
         return 'still_for_action';
+    }
+
+    /**
+     * Whether every applicable transport / no-transport transaction has a confirmed plan.
+     * Mirrors the Plan tracker on the dispatch editor (not the same as status === planned,
+     * which flips as soon as any one module is confirmed).
+     *
+     * @param  list<array<string, mixed>>|null  $vehicleDetails
+     * @param  array<string, mixed>|null  $localHandover
+     */
+    public static function transportPlanIsComplete(?array $vehicleDetails, ?array $localHandover = null): bool
+    {
+        $vehicles = collect($vehicleDetails ?? [])
+            ->filter(fn ($row): bool => is_array($row)
+                && (filled($row['source_warehouse_id'] ?? null) || filled($row['source_warehouse_name'] ?? null)))
+            ->values();
+        $local = is_array($localHandover)
+            && (filled($localHandover['source_warehouse_id'] ?? null) || filled($localHandover['source_warehouse_name'] ?? null))
+                ? $localHandover
+                : null;
+
+        $transactionTotal = $vehicles->count() + ($local ? 1 : 0);
+        if ($transactionTotal === 0) {
+            return false;
+        }
+
+        $plannedCount = $vehicles
+            ->filter(fn (array $row): bool => filled($row['plan_confirmed_at'] ?? null))
+            ->count()
+            + ($local && filled($local['plan_confirmed_at'] ?? null) ? 1 : 0);
+
+        return $plannedCount === $transactionTotal;
+    }
+
+    public function isTransportPlanComplete(): bool
+    {
+        return self::transportPlanIsComplete(
+            $this->resolvedVehicleDetails(),
+            is_array($this->local_handover_details) ? $this->local_handover_details : null,
+        );
     }
 
     /**

@@ -1,6 +1,10 @@
 <?php
 
 return [
+    'geoapify' => [
+        'api_key' => env('GEOAPIFY_API_KEY'),
+    ],
+
     'google_sheets' => [
         'url' => env('GOOGLE_SHEETS_URL'),
         'worksheet' => env('GOOGLE_SHEETS_WORKSHEET', 'Warehouse Inventory'),
@@ -9,6 +13,8 @@ return [
         'wit_libraries_gid' => env('GOOGLE_SHEETS_WIT_LIBRARIES_GID', '1184007888'),
         'warehouse_master_url' => env('GOOGLE_WAREHOUSE_MASTER_URL'),
         'warehouse_master_worksheet' => env('GOOGLE_WAREHOUSE_MASTER_WORKSHEET', 'Managed Warehouses'),
+        // Storekeeper columns are maintained on this companion tab and overlaid after master sync.
+        'warehouse_storekeepers_worksheet' => env('GOOGLE_WAREHOUSE_STOREKEEPERS_WORKSHEET', 'Managed Warehouses 2'),
         'standby_fund_url' => env('GOOGLE_STANDBY_FUND_URL', 'https://docs.google.com/spreadsheets/d/1fAKrf4Fu5DVYaT2whEYlrgZRMy7sJFFG1ZWS-HE3WgI/edit?gid=1369006359#gid=1369006359'),
         'standby_fund_cell' => env('GOOGLE_STANDBY_FUND_CELL', 'M2'),
         'district_reference_url' => env('GOOGLE_DISTRICT_REFERENCE_URL', 'https://docs.google.com/spreadsheets/d/1ZCOQYF1HPXwdQwqNHtuzoHC6L4NdAYdGhL-t6DqKxKg/edit?gid=1320368843#gid=1320368843'),
@@ -16,10 +22,12 @@ return [
         'ldrrmo_directory_url' => env('GOOGLE_LDRRMO_DIRECTORY_URL', 'https://docs.google.com/spreadsheets/d/1ZCOQYF1HPXwdQwqNHtuzoHC6L4NdAYdGhL-t6DqKxKg/export?format=csv&gid=781563561'),
         'population_url' => env('GOOGLE_POPULATION_URL', 'https://docs.google.com/spreadsheets/d/1tm2qSQ_luMhvxuFlOLVN5TEZXONHqzq4JXjADyX11X0/edit?gid=1923148867#gid=1923148867'),
         'ris_tracking_spreadsheet_id' => env('GOOGLE_RIS_TRACKING_SPREADSHEET_ID', '1SBk2PJyS44KS4ftAsjvV9q31GdIEodanrHZOWMScsEw'),
+        'ris_auto_sync_enabled' => (bool) env('GOOGLE_RIS_AUTO_SYNC_ENABLED', true),
         // RIS tracking tab (gid 1905199506): AU Name of Driver, AV Driver Contact, AW Plate, AX Received By
         'ris_tracking_gid' => env('GOOGLE_RIS_TRACKING_GID', '1905199506'),
         'ris_items_gid' => env('GOOGLE_RIS_ITEMS_GID', '482002664'),
         'stf_tracking_spreadsheet_id' => env('GOOGLE_STF_TRACKING_SPREADSHEET_ID', '1SBk2PJyS44KS4ftAsjvV9q31GdIEodanrHZOWMScsEw'),
+        'stf_auto_sync_enabled' => (bool) env('GOOGLE_STF_AUTO_SYNC_ENABLED', true),
         'stf_tracking_gid' => env('GOOGLE_STF_TRACKING_GID', '1367120220'),
         'stf_items_gid' => env('GOOGLE_STF_ITEMS_GID', '1927904915'),
         'connect_timeout' => (int) env('GOOGLE_SHEETS_CONNECT_TIMEOUT', 15),
@@ -36,7 +44,11 @@ return [
 
     'groq' => [
         'api_key' => env('GROQ_API_KEY'),
-        'model' => env('GROQ_MODEL', 'llama-3.3-70b-versatile'),
+        'model' => env('GROQ_MODEL', 'openai/gpt-oss-120b'),
+        'fallback_models' => array_values(array_filter(preg_split(
+            '/\s*,\s*/',
+            (string) env('GROQ_FALLBACK_MODELS', 'openai/gpt-oss-20b,qwen/qwen3.6-27b'),
+        ) ?: [])),
         'vision_model' => env('GROQ_VISION_MODEL', 'qwen/qwen3.6-27b'),
         'base_url' => env('GROQ_BASE_URL', 'https://api.groq.com/openai/v1'),
     ],

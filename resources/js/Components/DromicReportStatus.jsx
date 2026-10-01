@@ -145,7 +145,7 @@ export function RequestSubmissionMark({ hasSignedRequest = false }) {
 }
 
 export function ReliefRequestMark({ included = false }) {
-    return <StatusMark checked={included} tone="slate" label={included ? 'Request Letter (Relief Augmentation) included' : 'No Request Letter (Relief Augmentation) included'} />;
+    return <StatusMark checked={included} tone="slate" label={included ? 'Request for Relief Augmentation included' : 'No Request for Relief Augmentation included'} />;
 }
 
 export function RequestValidationMark({ hasSignedRequest = false, validationStatus }) {

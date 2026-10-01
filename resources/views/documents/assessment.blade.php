@@ -29,12 +29,30 @@
     $affectedFamilies = max(0, (int) ($request->affected_families ?? 0));
     $affectedPersons = max(0, (int) $request->resolvedAffectedPersons());
     $incidentRows = collect($meta['incidents'] ?? [])->filter(fn ($row) => is_array($row) && filled($row['incident_type'] ?? null))->values();
-    $incidentSummary = $incidentRows->map(function ($row, $index) {
-        $date = filled($row['occurrence_at'] ?? null) ? date('M j, Y', strtotime($row['occurrence_at'])) : 'date not encoded';
-        $place = collect([$row['barangay'] ?? null, $row['city_municipality'] ?? null])->filter()->implode(', ');
-        $population = number_format((int) ($row['affected_families'] ?? 0)).' '.((int) ($row['affected_families'] ?? 0) === 1 ? 'family' : 'families');
-        return ($index + 1).'. '.($row['incident_type'] ?? 'Incident').' — '.$date.($place !== '' ? ', '.$place : '').' ('.$population.')';
-    })->implode('; ');
+    $occurrenceStart = \Illuminate\Support\Str::substr((string) ($meta['occurrence_started_at'] ?? $request->incident?->incident_date?->toDateString() ?? ''), 0, 10);
+    $occurrenceEnd = \Illuminate\Support\Str::substr((string) ($meta['occurrence_ended_span'] ?? $occurrenceStart), 0, 10);
+    if ($incidentRows->isNotEmpty()) {
+        $bounds = $incidentRows
+            ->map(fn ($row) => \Illuminate\Support\Str::substr((string) ($row['occurrence_at'] ?? ''), 0, 10))
+            ->filter(fn ($value) => (bool) preg_match('/^\d{4}-\d{2}-\d{2}$/', $value))
+            ->unique()
+            ->sort()
+            ->values();
+        if ($bounds->isNotEmpty()) {
+            $occurrenceStart = $bounds->first();
+            $occurrenceEnd = $bounds->last();
+        }
+    }
+    $occurrenceDisplay = filled($meta['incident_occurrence_display'] ?? null)
+        ? (string) $meta['incident_occurrence_display']
+        : \App\Support\IncidentOccurrenceDisplay::format($occurrenceStart, $occurrenceEnd);
+    if ($occurrenceDisplay !== '' && preg_match('/^\d{4}-\d{2}-\d{2}\s+to\s+\d{4}-\d{2}-\d{2}$/i', $occurrenceDisplay)) {
+        [$fromIso, $toIso] = preg_split('/\s+to\s+/i', $occurrenceDisplay);
+        $occurrenceDisplay = \App\Support\IncidentOccurrenceDisplay::format($fromIso, $toIso);
+    }
+    if ($occurrenceDisplay === '' && filled($request->incident?->incident_date)) {
+        $occurrenceDisplay = $request->incident->incident_date->format('m/d/Y');
+    }
     $familyWord = $affectedFamilies === 1 ? 'family' : 'families';
     $personWord = $affectedPersons === 1 ? 'person' : 'persons';
     $narrativeWordCount = str_word_count(strip_tags((string) $assessmentNarrative));
@@ -69,6 +87,21 @@
     $otherRemarksHeight = $compact ? 10 : 12;
     $approvedHeight = $veryCompact ? 62 : ($compact ? 70 : 84);
     $approvedSignaturePad = max(28, $approvedHeight - 28);
+    $disasterTypeLabel = $isDisaster
+        ? trim((string) ($request->incident?->name ?: data_get($meta, 'incident_type') ?: ''))
+        : '';
+    $affectedBarangayLabel = $isDisaster
+        ? trim((string) (
+            $request->incident_details
+            ?: data_get($meta, 'incident_specific_details')
+            ?: \App\Support\AffectedAreaList::format(array_values((array) data_get($meta, 'affected_areas', [])))
+        ))
+        : '';
+    if ($disasterTypeLabel !== '' && $affectedBarangayLabel !== '') {
+        $disasterTypeLabel .= ' — '.$affectedBarangayLabel;
+    } elseif ($disasterTypeLabel === '' && $affectedBarangayLabel !== '') {
+        $disasterTypeLabel = $affectedBarangayLabel;
+    }
 @endphp
 <style>
 @page { size: A4 portrait; margin: {{ $pageMargin ?? 18 }}pt; }
@@ -148,7 +181,7 @@ th, .label { white-space: nowrap; }
     <tr class="request-row">
         <td colspan="2" class="label">Purpose</td>
         <td>Disaster</td><td class="mark">{!! $isDisaster ? '&#10003;' : '' !!}</td>
-        <td colspan="2" class="label">Type of Disaster</td><td colspan="3">{{ $isDisaster ? $request->incident?->name : '' }}</td>
+        <td colspan="2" class="label">Type of Disaster</td><td colspan="3">{{ $disasterTypeLabel }}</td>
         <td colspan="3">{{ $meta['response_purpose'] ?? $request->purpose }}</td>
     </tr>
     <tr class="request-row"><td colspan="2" class="label">Date of Request</td><td colspan="10">{{ optional($request->date_requested)->format('F j, Y') }}</td></tr>
@@ -160,8 +193,8 @@ th, .label { white-space: nowrap; }
     @endforeach
 
     <tr><th colspan="12" class="section">ASSESSMENT AND VALIDATION</th></tr>
-    <tr class="validation-row"><td colspan="12"><b>{{ $incidentRows->count() > 1 ? 'Separate Incidents Covered:' : 'Date of Disaster Occurrence:' }}</b> {{ $incidentRows->isNotEmpty() ? $incidentSummary : optional($request->incident?->incident_date)->format('F j, Y') }}</td></tr>
-    <tr class="validation-row"><td colspan="6">Actual Affected Families: {{ number_format($affectedFamilies) }} {{ $familyWord }} ({{ number_format($affectedPersons) }} {{ $personWord }})</td><td colspan="6">No. of Families Served: {{ is_numeric($meta['families_served'] ?? null) ? number_format((float) $meta['families_served']) : ($meta['families_served'] ?? '') }}</td></tr>
+    <tr class="validation-row"><td colspan="12"><b>Date of Disaster Occurrence:</b> {{ $occurrenceDisplay }}</td></tr>
+    <tr class="validation-row"><td colspan="6">Actual Affected Families: {{ number_format($affectedFamilies) }} {{ $familyWord }}@if($affectedPersons > 0) ({{ number_format($affectedPersons) }} {{ $personWord }})@endif</td><td colspan="6">No. of Families Served: {{ is_numeric($meta['families_served'] ?? null) ? number_format((float) $meta['families_served']) : ($meta['families_served'] ?? '') }}</td></tr>
     <tr class="validation-row"><td colspan="6">Source of Information: {{ $meta['information_source'] ?? '' }}</td><td colspan="6">Date of Information: {{ filled($meta['information_date'] ?? null) ? date('F j, Y', strtotime($meta['information_date'])) : '' }}</td></tr>
 
     <tr><th colspan="12" class="section">PREVIOUS AUGMENTATION</th></tr>
@@ -230,10 +263,10 @@ th, .label { white-space: nowrap; }
     </td></tr>
     <tr>
         <td colspan="6" class="signature-cell">Prepared by:<div class="signature"><b>{{ \Illuminate\Support\Str::upper(trim((string) ($meta['prepared_by'] ?? $request->assigned_social_worker ?? ''))) }}</b><br>{{ collect([$meta['prepared_by_position'] ?? null, $meta['prepared_by_designation'] ?? null])->filter()->unique()->implode(' / ') }}<br>Date / Time: {{ filled($meta['prepared_at'] ?? null) ? date('F j, Y, g:i A', strtotime($meta['prepared_at'])) : '' }}</div></td>
-        <td colspan="6" class="signature-cell">Reviewed by:<div class="signature"><b>{{ $reviewed[0] ?? '' }}</b><br>{{ $reviewed[1] ?? '' }}<br>Date / Time: ____________________</div></td>
+        <td colspan="6" class="signature-cell">Reviewed by:<div class="signature"><b>{{ \Illuminate\Support\Str::upper(trim((string) ($reviewed[0] ?? ''))) }}</b><br>{{ $reviewed[1] ?? '' }}<br>Date / Time: ____________________</div></td>
     </tr>
     <tr><td colspan="12" class="other-remarks"><b>Other Remarks:</b><br>{{ $request->remarks }}</td></tr>
-    <tr><td colspan="12" class="approved"><b>Approved by:</b><div class="signature" style="padding-top:{{ $approvedSignaturePad }}pt"><b>{{ $approved[0] ?? '' }}</b><br>{{ $approved[1] ?? '' }}<br>Date / Time: ____________________</div></td></tr>
+    <tr><td colspan="12" class="approved"><b>Approved by:</b><div class="signature" style="padding-top:{{ $approvedSignaturePad }}pt"><b>{{ \Illuminate\Support\Str::upper(trim((string) ($approved[0] ?? ''))) }}</b><br>{{ $approved[1] ?? '' }}<br>Date / Time: ____________________</div></td></tr>
 </table>
 </body>
 </html>

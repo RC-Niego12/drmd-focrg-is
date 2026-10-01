@@ -28,7 +28,14 @@ Schedule::command('wit:sync --trigger=automatic')
 Schedule::command('ris:sync --trigger=automatic')
     ->everyFiveMinutes()
     ->withoutOverlapping(10)
-    ->runInBackground();
+    ->runInBackground()
+    ->when(fn (): bool => (bool) config('services.google_sheets.ris_auto_sync_enabled', false));
+
+Schedule::command('stf:sync --trigger=automatic')
+    ->everyFiveMinutes()
+    ->withoutOverlapping(10)
+    ->runInBackground()
+    ->when(fn (): bool => (bool) config('services.google_sheets.stf_auto_sync_enabled', true));
 
 Schedule::command('dispatch:sync-contacts')
     ->hourly()

@@ -128,3 +128,32 @@ it('syncs designation and person fields across signatory libraries for the same 
         ->and($other->value)->toBe('OTHER PERSON | Different Role')
         ->and(data_get($other->metadata, 'designation'))->toBe('Different Role');
 });
+
+it('lets only super administrators configure the two DRIMS DROMIC principals', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    $superAdmin = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $details = fn (string $name, string $designation): array => [
+        'name' => $name,
+        'position' => 'Director',
+        'suffix' => '',
+        'designation' => $designation,
+        'office' => 'DSWD Field Office Caraga',
+    ];
+
+    $payload = [
+        'library_type' => 'drims_signatory',
+        'signatories' => [
+            'recommended_by' => $details('DROMIC DRMD CHIEF', 'OIC-Chief, DRMD'),
+            'approved_by' => $details('DROMIC REGIONAL DIRECTOR', 'Regional Director'),
+        ],
+    ];
+
+    $this->actingAs($superAdmin)->post('/operational-library/rros-signatories', $payload)
+        ->assertRedirect()->assertSessionHasNoErrors();
+
+    expect(OperationalLibraryValue::where('library_type', 'drims_signatory')->pluck('context')->sort()->values()->all())
+        ->toBe(['approved_by', 'recommended_by']);
+
+    $nonAdmin = User::where('email', 'drrs@example.test')->firstOrFail();
+    $this->actingAs($nonAdmin)->post('/operational-library/rros-signatories', $payload)->assertForbidden();
+});

@@ -6,6 +6,7 @@ use App\Console\Commands\ReconcileInventoryBalances;
 use App\Console\Commands\RegisterEpirmaClient;
 use App\Console\Commands\RemindLguDromicSignedCopies;
 use App\Console\Commands\RemindLguRegionalAlertDeadlines;
+use App\Console\Commands\SeedLguRoleAccounts;
 use App\Console\Commands\SyncDispatchContacts;
 use App\Console\Commands\SyncRisData;
 use App\Console\Commands\TestMyPortalConnection;
@@ -33,6 +34,7 @@ return Application::configure(basePath: dirname(__DIR__))
         TestMyPortalConnection::class,
         SyncRisData::class,
         SyncDispatchContacts::class,
+        SeedLguRoleAccounts::class,
     ])
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->validateCsrfTokens(except: [

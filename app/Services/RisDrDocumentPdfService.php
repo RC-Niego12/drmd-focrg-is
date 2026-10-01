@@ -33,6 +33,9 @@ class RisDrDocumentPdfService
         abort_unless(in_array($kind, ['ris', 'dr'], true), 404);
 
         $payload = $this->payloadFromSlip($slip);
+        if ($kind === 'ris') {
+            $payload = $this->withDispatchReceiptSummary($slip, $payload);
+        }
         if ($kind === 'dr' && ! ($payload['has_dr'] ?? false)) {
             abort(404, 'DR advance printable is unavailable for this RIS.');
         }
@@ -75,17 +78,28 @@ class RisDrDocumentPdfService
         $payload = $this->payloadFromSlip($slip);
         $slipItems = collect($payload['items']);
         $loaded = collect($vehicle['loaded_items'] ?? [])->filter(fn ($row) => is_array($row));
-        $items = $loaded->map(function (array $row) use ($slipItems): array {
+        $warehouseId = $vehicle['source_warehouse_id'] ?? null;
+        $warehouseName = trim((string) ($vehicle['source_warehouse_name'] ?? ''));
+        $outcomes = $dispatch->items->filter(fn ($item): bool =>
+            ($warehouseId && (int) $item->warehouse_id === (int) $warehouseId)
+            || ($warehouseName !== '' && strcasecmp(trim((string) $item->warehouse_name), $warehouseName) === 0)
+        );
+        $items = $loaded->map(function (array $row) use ($slipItems, $outcomes): array {
             $id = $row['requisition_issuance_item_id'] ?? null;
             $name = trim((string) ($row['item_name'] ?? ''));
             $source = $slipItems->first(fn (array $item): bool => ($id && (int) ($item['requisition_issuance_item_id'] ?? 0) === (int) $id)
                 || ($name !== '' && strcasecmp(trim((string) ($item['item_name'] ?? '')), $name) === 0)
             ) ?? [];
 
+            $outcome = $outcomes->first(fn ($item): bool =>
+                ($id && (int) $item->requisition_issuance_item_id === (int) $id)
+                || ($name !== '' && strcasecmp(trim((string) $item->item_name), $name) === 0)
+            );
             return [
                 ...$source,
                 'item_name' => $name !== '' ? $name : ($source['item_name'] ?? 'Item'),
                 'quantity' => (int) ($row['loaded_quantity'] ?? 0),
+                ...$this->receivedColumns($outcome, (int) ($row['loaded_quantity'] ?? 0)),
                 'remarks' => $row['remarks'] ?? ($source['remarks'] ?? null),
             ];
         })->filter(fn (array $item): bool => (int) ($item['quantity'] ?? 0) > 0)->values()->all();
@@ -97,8 +111,6 @@ class RisDrDocumentPdfService
             'driver_name' => $vehicle['driver'] ?? null,
             'driver_contact_number' => $vehicle['driver_contact_number'] ?? null,
             'vehicle_plate_number' => $vehicle['vehicle_plate_number'] ?? null,
-            'escort_name' => $vehicle['escort_name'] ?? null,
-            'escort_contact_number' => $vehicle['escort_contact_number'] ?? null,
             'mode_of_transportation' => $modes,
             'transport_mode' => $modes,
             'received_by' => $vehicle['received_by'] ?? null,
@@ -152,6 +164,7 @@ class RisDrDocumentPdfService
                 'item_name' => $item->item_name,
                 'unit' => $item->unit,
                 'quantity' => (int) $item->allocated_quantity,
+                ...$this->receivedColumns($item, (int) $item->allocated_quantity),
             ];
         })->filter(fn (array $item): bool => (int) ($item['quantity'] ?? 0) > 0)->values()->all();
         $payload['tracking'] = [
@@ -185,6 +198,87 @@ class RisDrDocumentPdfService
         $filename = InlinePdfFilename::fromCandidates($drNumber, 'DR-'.$dispatch->id.'-LOCAL');
 
         return $inline ? $pdf->stream($filename) : $pdf->download($filename);
+    }
+
+    /** Add the latest saved receipt outcomes to the operational RIS copy. */
+    private function withDispatchReceiptSummary(RequisitionIssuanceSlip $slip, array $payload): array
+    {
+        $dispatches = DispatchPlan::query()
+            ->where('requisition_issuance_slip_id', $slip->id)
+            ->with('items')
+            ->orderBy('delivery_sequence')
+            ->orderBy('id')
+            ->get();
+        if ($dispatches->isEmpty()) return $payload;
+
+        // A replacement dispatch changes the original variance disposition to
+        // fulfilled_followup. The physical return remains a historical fact,
+        // proven by its return date/condition/stock disposition, and must stay
+        // visible on the operational RIS.
+        $returned = $dispatches->flatMap->items->filter(function ($item): bool {
+            $balance = max(0, (int) $item->allocated_quantity - (int) $item->received_quantity);
+            $hasReturnEvidence = filled($item->return_received_at)
+                || filled($item->return_condition)
+                || filled($item->return_stock_disposition)
+                || filled($item->return_inspected_by);
+            return $balance > 0 && ($hasReturnEvidence
+                || in_array($item->variance_disposition, ['returned', 'cancelled', 'lost_damaged', 'other'], true));
+        });
+        if ($returned->isEmpty()) return $payload;
+
+        $latestReturn = $returned->pluck('return_received_at')->filter()->sortDesc()->first();
+        $receiptDates = $dispatches->flatMap(function (DispatchPlan $dispatch): Collection {
+            return collect($dispatch->resolvedVehicleDetails())->pluck('received_at')
+                ->push(data_get($dispatch->local_handover_details, 'received_at'));
+        })->filter()->sortDesc();
+        $latestDispatch = $dispatches->last();
+        $payload['tracking'] = [
+            ...$payload['tracking'],
+            'returned_at' => $latestReturn ?: $receiptDates->first(),
+            'returned_particulars' => $returned->map(fn ($item): string => trim($item->item_name.' ('.$item->unit.')'))->implode(', '),
+            'returned_quantity' => $returned->sum(fn ($item): int => max(0, (int) $item->allocated_quantity - (int) $item->received_quantity)),
+            'returned_certified_by' => $returned->pluck('return_inspected_by')->filter()->unique()->implode(', ')
+                ?: ($latestDispatch->received_by ?: data_get($latestDispatch->local_handover_details, 'received_by')),
+            'returned_reason' => $returned->map(function ($item): string {
+                $quantity = max(0, (int) $item->allocated_quantity - (int) $item->received_quantity);
+                $details = collect([
+                    $item->variance_resolution ?: $item->return_reason,
+                    $item->return_condition ? 'Condition: '.str_replace('_', ' ', $item->return_condition) : null,
+                    $item->return_stock_disposition ? 'Disposition: '.str_replace('_', ' ', $item->return_stock_disposition) : null,
+                ])->filter()->implode('; ');
+                return $item->item_name.' ('.$quantity.' '.$item->unit.')'.($details !== '' ? ': '.$details : '');
+            })->implode(' | '),
+            'delivered_at' => $receiptDates->first() ?: ($payload['tracking']['delivered_at'] ?? null),
+        ];
+
+        return $payload;
+    }
+
+    /** @return array{received_quantity:?int,received_unit:string,received_item_name:string,received_remarks:string} */
+    private function receivedColumns(mixed $outcome, int $issuedQuantity): array
+    {
+        if (! $outcome || $outcome->received_quantity === null) {
+            return ['received_quantity' => null, 'received_unit' => '', 'received_item_name' => '', 'received_remarks' => ''];
+        }
+        $received = min($issuedQuantity, max(0, (int) $outcome->received_quantity));
+        $returned = max(0, $issuedQuantity - $received);
+        $hasReturnEvidence = filled($outcome->return_received_at)
+            || filled($outcome->return_condition)
+            || filled($outcome->return_stock_disposition)
+            || filled($outcome->return_inspected_by);
+        $details = collect([
+            $returned > 0 ? $returned.' '.$outcome->unit.' '.($hasReturnEvidence ? 'returned' : str_replace('_', ' ', (string) ($outcome->variance_disposition ?: 'not received'))) : null,
+            $outcome->variance_resolution ?: $outcome->return_reason,
+            $outcome->return_condition ? 'Condition: '.str_replace('_', ' ', $outcome->return_condition) : null,
+            $outcome->return_stock_disposition ? 'Disposition: '.str_replace('_', ' ', $outcome->return_stock_disposition) : null,
+        ])->filter()->implode('; ');
+
+        return [
+            'received_quantity' => $received,
+            'received_unit' => (string) $outcome->unit,
+            'received_item_name' => (string) $outcome->item_name,
+            'received_remarks' => $details,
+        ];
     }
 
     /**

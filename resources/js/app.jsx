@@ -6,6 +6,7 @@ import { createInertiaApp } from '@inertiajs/react';
 import { router } from '@inertiajs/react';
 import { createRoot } from 'react-dom/client';
 import { useEffect } from 'react';
+import PwaInstallPrompt from './Components/PwaInstallPrompt';
 
 let systemName = window.__SYSTEM_NAME__ || 'Disaster Response Information Management System (DRIMS)';
 
@@ -37,6 +38,7 @@ createInertiaApp({
         createRoot(el).render(
             <FilterResetBoundary>
                 <App {...props} />
+                <PwaInstallPrompt />
             </FilterResetBoundary>
         );
     },

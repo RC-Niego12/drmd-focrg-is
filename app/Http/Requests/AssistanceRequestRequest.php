@@ -42,11 +42,35 @@ class AssistanceRequestRequest extends FormRequest
                 ]);
             }
         }
+
+        if (filled($meta['prepared_by'] ?? null)) {
+            $meta['prepared_by'] = \Illuminate\Support\Str::upper(trim((string) $meta['prepared_by']));
+        }
+        if (array_key_exists('reviewed_by', $meta)) {
+            $meta['reviewed_by'] = $this->uppercaseSignatoryValue($meta['reviewed_by']);
+        }
+        if (array_key_exists('approved_by', $meta)) {
+            $meta['approved_by'] = $this->uppercaseSignatoryValue($meta['approved_by']);
+        }
+
         $this->merge([
             'assessment_form_data' => $meta,
             'assessment_drn' => DocumentReferenceNumber::compose(...$parts),
             'recommendations' => AssessmentNarrative::sanitize($this->input('recommendations')),
         ]);
+    }
+
+    private function uppercaseSignatoryValue(mixed $value): string
+    {
+        $raw = trim((string) $value);
+        if ($raw === '') {
+            return '';
+        }
+
+        $parts = explode('|', $raw, 2);
+        $parts[0] = \Illuminate\Support\Str::upper(trim($parts[0]));
+
+        return implode('|', $parts);
     }
 
     public function authorize(): bool
@@ -104,6 +128,17 @@ class AssistanceRequestRequest extends FormRequest
             'assessment_form_data.incidents.*.affected_persons' => ['nullable', 'integer', 'min:0'],
             'assessment_form_data.incidents.*.description' => ['nullable', 'string', 'max:3000'],
             'assessment_form_data.incidents.*.source_reference' => ['nullable', 'string', 'max:255'],
+            'assessment_form_data.incident_fni_allocations' => ['nullable', 'array', 'max:25'],
+            'assessment_form_data.incident_fni_allocations.*.incident_key' => ['required', 'string', 'max:255'],
+            'assessment_form_data.incident_fni_allocations.*.source_reference' => ['nullable', 'string', 'max:255'],
+            'assessment_form_data.incident_fni_allocations.*.series_key' => ['nullable', 'string', 'max:255'],
+            'assessment_form_data.incident_fni_allocations.*.incident_type' => ['nullable', 'string', 'max:255'],
+            'assessment_form_data.incident_fni_allocations.*.barangay' => ['nullable', 'string', 'max:255'],
+            'assessment_form_data.incident_fni_allocations.*.items' => ['required', 'array'],
+            'assessment_form_data.incident_fni_allocations.*.items.*.item_key' => ['required', 'string', 'max:255'],
+            'assessment_form_data.incident_fni_allocations.*.items.*.fni_library_item_id' => ['nullable', 'integer'],
+            'assessment_form_data.incident_fni_allocations.*.items.*.item_name' => ['nullable', 'string', 'max:255'],
+            'assessment_form_data.incident_fni_allocations.*.items.*.quantity' => ['required', 'integer', 'min:0'],
             'assessment_form_data.assessment_date' => ['nullable', 'date'],
             'assessment_form_data.information_source' => ['nullable', 'required_if:assessment_form_data.request_type,Disaster', 'string', 'max:255'],
             'assessment_form_data.information_date' => ['nullable', 'required_if:assessment_form_data.request_type,Disaster', 'date'],
@@ -134,7 +169,7 @@ class AssistanceRequestRequest extends FormRequest
             'remarks' => ['nullable', 'string'],
             'date_received_by_drmd' => ['required', 'date'], 'request_drn' => ['nullable', 'string', 'max:255'],
             'office_agency_details' => ['nullable', 'string', 'max:255'], 'endorsed_to_drrs' => ['boolean'], 'date_endorsed_to_drrs' => ['nullable', 'date'],
-            'incident_details' => ['nullable', 'string', 'max:255'], 'incident_count' => ['nullable', 'integer', 'min:1'],
+            'incident_details' => ['nullable', 'string', 'max:500'], 'incident_count' => ['nullable', 'integer', 'min:1'],
             'response_drn' => ['nullable', 'string', 'max:255'], 'assessment_drn' => ['nullable', 'string', 'max:255'],
             'source_document_url' => ['nullable', 'string', 'max:2048'], 'response_letter_url' => ['nullable', 'string', 'max:2048'],
             'coordinated_with_rros' => ['boolean'], 'date_coordinated_with_rros' => ['nullable', 'date'],
@@ -160,15 +195,22 @@ class AssistanceRequestRequest extends FormRequest
     {
         return [function ($validator): void {
             $meta = (array) $this->input('assessment_form_data', []);
-            $incidents = collect($meta['incidents'] ?? [])->filter(fn ($row) => is_array($row));
-            if (($meta['request_type'] ?? null) === 'Disaster' && $incidents->isNotEmpty()) {
-                $families = $incidents->sum(fn ($row) => (int) ($row['affected_families'] ?? 0));
-                $persons = $incidents->sum(fn ($row) => (int) ($row['affected_persons'] ?? 0));
-                if ($families !== (int) $this->input('affected_families')) {
-                    $validator->errors()->add('assessment_form_data.incidents', "Incident affected-family subtotal ({$families}) must equal the assessment total (".(int) $this->input('affected_families').').');
+            // Incident rows retain occurrence/area context for narrative and multi-incident
+            // requests, but the worksheet Assessment & Validation totals are authoritative.
+            // Do not require per-incident family/person subtotals to match — Incident Breakdown
+            // is no longer editable on the assessment form.
+            $incidents = collect($meta['incidents'] ?? []);
+            if ($incidents->count() > 1) {
+                $allocations = collect($meta['incident_fni_allocations'] ?? []);
+                if ($allocations->count() !== $incidents->count()) {
+                    $validator->errors()->add('assessment_form_data.incident_fni_allocations', 'Enter the FNI breakdown for every separate incident.');
                 }
-                if (filled($meta['affected_persons'] ?? null) && $persons !== (int) $meta['affected_persons']) {
-                    $validator->errors()->add('assessment_form_data.incidents', "Incident affected-person subtotal ({$persons}) must equal the assessment total (".(int) $meta['affected_persons'].').');
+                foreach ((array) $this->input('items', []) as $itemIndex => $item) {
+                    $itemKey = strtolower(trim((string) ($item['fni_library_item_id'] ?? $item['item_name'] ?? 'item-'.$itemIndex)));
+                    $allocated = $allocations->sum(fn ($allocation) => (int) data_get(collect($allocation['items'] ?? [])->firstWhere('item_key', $itemKey), 'quantity', 0));
+                    if ((int) $allocated !== (int) ($item['requested_quantity'] ?? 0)) {
+                        $validator->errors()->add('assessment_form_data.incident_fni_allocations', sprintf('%s allocations must total %d.', $item['item_name'] ?? 'Item '.($itemIndex + 1), (int) ($item['requested_quantity'] ?? 0)));
+                    }
                 }
             }
             if (! filled($meta['prepared_by_position'] ?? null) && ! filled($meta['prepared_by_designation'] ?? null)) {

@@ -19,6 +19,8 @@ class PasswordController extends Controller
 
         $request->user()->forceFill([
             'password' => Hash::make($validated['password']),
+            'must_change_password' => false,
+            'password_is_default' => false,
         ])->save();
 
         $audit->log('user.password_updated', $request->user(), [], ['method' => 'profile_settings'], $request->user()->id);

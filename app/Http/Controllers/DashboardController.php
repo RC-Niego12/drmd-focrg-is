@@ -14,6 +14,7 @@ use App\Models\User;
 use App\Models\Warehouse;
 use App\Models\WarehouseSheetImport;
 use App\Services\InventoryBalanceService;
+use App\Services\StandbyStockpileSummaryService;
 use Carbon\CarbonImmutable;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -21,7 +22,7 @@ use Spatie\Permission\Models\Role;
 
 class DashboardController extends Controller
 {
-    public function __invoke(InventoryBalanceService $inventoryBalanceService): Response
+    public function __invoke(InventoryBalanceService $inventoryBalanceService, StandbyStockpileSummaryService $stockpileSummary): Response
     {
         $user = request()->user();
         $role = request()->attributes->get('dashboard_role_override') ?: $this->dashboardRole($user);
@@ -52,6 +53,16 @@ class DashboardController extends Controller
         $warehouseBalances = $inventoryBalanceService->warehouseBalances();
         $totalIssuances = $canViewInventoryDashboard ? $this->transactionSummary('release') : ['quantity' => null, 'cost' => null];
         $totalReceipts = $canViewInventoryDashboard ? $this->transactionSummary('receipt') : ['quantity' => null, 'cost' => null];
+        $witReportedBalance = $canViewInventoryDashboard
+            ? (float) $totalReceipts['quantity'] - (float) $totalIssuances['quantity']
+            : null;
+        $pendingWitReconciliation = $canViewInventoryDashboard
+            ? InventoryTransaction::query()
+                ->where('reconciliation_status', 'pending_wit')
+                ->whereDoesntHave('sheetImport')
+                ->selectRaw('count(*) as transactions, coalesce(sum(quantity), 0) as quantity')
+                ->first()
+            : null;
         $drrsRequestQuery = AssistanceRequest::query()
             ->where('submission_type', '!=', 'lgu_dromic_relief_request');
 
@@ -75,6 +86,12 @@ class DashboardController extends Controller
             ],
             'metrics' => [
                 'inventory_total' => $canViewInventoryDashboard ? $inventoryBalances['current_balance'] : null,
+                'wit_reported_inventory_total' => $witReportedBalance,
+                'wit_inventory_variance' => $canViewInventoryDashboard
+                    ? $witReportedBalance - (float) $inventoryBalances['current_balance']
+                    : null,
+                'pending_wit_transactions' => (int) ($pendingWitReconciliation?->transactions ?? 0),
+                'pending_wit_quantity' => (float) ($pendingWitReconciliation?->quantity ?? 0),
                 'stockpile_cost' => $canViewInventoryDashboard ? $inventoryBalances['cost'] : null,
                 'food_inventory' => $canViewInventoryDashboard ? $inventoryBalances['food_current_balance'] : null,
                 'non_food_inventory' => $canViewInventoryDashboard ? $inventoryBalances['non_food_current_balance'] : null,
@@ -100,7 +117,7 @@ class DashboardController extends Controller
             'familyFoodPackMap' => $canViewInventoryDashboard ? $this->familyFoodPackMap($inventoryBalanceRows) : [],
             'familyFoodPackDashboard' => $canViewInventoryDashboard ? $this->familyFoodPackDashboard($inventoryBalanceRows) : null,
             'nearExpirySummary' => $isRros || $isDrrs || $isSuperAdmin ? $this->nearExpirySummary($inventoryBalanceRows) : [],
-            'standbyStockpileSummary' => $canViewInventoryDashboard ? $this->standbyStockpileSummary($inventoryBalanceRows) : null,
+            'standbyStockpileSummary' => $canViewInventoryDashboard ? $stockpileSummary->current() : null,
             'foodItemSummaries' => $canViewInventoryDashboard ? [
                 'rtef' => $this->foodItemWarehouseSummary($inventoryBalanceRows, 'rtef'),
                 'bottled_water' => $this->foodItemWarehouseSummary($inventoryBalanceRows, 'bottled_water'),

@@ -27,6 +27,7 @@ import {
   DOCUMENT_PREVIEW_ZOOM_OPTIONS,
 } from "@/Components/DocumentPreviewCanvas";
 import PdfPreviewModal from "@/Components/PdfPreviewModal";
+import { formatExpiryMonth } from "@/Utils/dateFormat";
 import { PrintableRisDr, RROS_OFFICIAL_PRINT_CSS, RrosOfficialPreviewCanvas } from "@/Components/RrosOfficialDocuments";
 import SectionTabs from "@/Components/SectionTabs";
 import {
@@ -372,8 +373,9 @@ const incidentTypeKey = (value) =>
     .replace(/[^a-z0-9]/g, "");
 const releaseOccurrences = (request) => {
   const payload = request.source_lgu_dromic_report?.lgu_dromic_payload || {};
-  const assessmentIncidents = Array.isArray(request.assessment_form_data?.incidents)
-    ? request.assessment_form_data.incidents
+  const formData = request.assessment_form_data || {};
+  const assessmentIncidents = Array.isArray(formData.incidents)
+    ? formData.incidents
     : [];
   if (assessmentIncidents.length) {
     return assessmentIncidents.map((row) => ({
@@ -384,6 +386,20 @@ const releaseOccurrences = (request) => {
       affectedFamilies: row.affected_families,
     }));
   }
+
+  const linkedIncidents = Array.isArray(payload.linked_incidents)
+    ? payload.linked_incidents
+    : (Array.isArray(formData.linked_incidents) ? formData.linked_incidents : []);
+  if ((payload.standalone_relief_request || formData.standalone_relief_request) && linkedIncidents.length) {
+    return linkedIncidents.map((row) => ({
+      barangays: Array.isArray(row.affected_barangays) ? row.affected_barangays.filter(Boolean) : [row.barangay].filter(Boolean),
+      municipality: row.municipality,
+      date: row.occurrence_started_at,
+      incidentType: row.incident_type || payload.incident_type,
+      affectedFamilies: row.affected_families,
+    }));
+  }
+
   const primaryType = request.incident?.name || payload.incident_type || payload.incident_name;
   const primaryBarangays = Array.isArray(payload.affected_barangays)
     ? payload.affected_barangays
@@ -428,6 +444,20 @@ const releaseOccurrences = (request) => {
   );
 };
 const releaseIncident = (request) => {
+  const payload = request.source_lgu_dromic_report?.lgu_dromic_payload || {};
+  const formData = request.assessment_form_data || {};
+  if (payload.standalone_relief_request || formData.standalone_relief_request) {
+    const type = meaningfulText(payload.incident_type || formData.incident_type || request.incident?.name);
+    if (type) {
+      const normalized = type.toLowerCase();
+      if (/tornado/.test(normalized)) return "the occurrence of a tornado";
+      if (/fire/.test(normalized)) return "a fire incident";
+      if (/armed conflict/.test(normalized)) return "armed conflict";
+      if (/shear\s*line/.test(normalized)) return "a shear line";
+      if (/trough.*lpa|lpa.*trough/.test(normalized)) return "a trough of an LPA";
+      return type;
+    }
+  }
   const type = meaningfulText(request.incident?.name);
   const detail = meaningfulText(request.incident_details);
   const normalized = type.toLowerCase();
@@ -1178,7 +1208,7 @@ export default function RisFormModal({
     (a, b) =>
       (Date.parse(a || "") || Number.MAX_SAFE_INTEGER) -
       (Date.parse(b || "") || Number.MAX_SAFE_INTEGER),
-  ).map((value) => ({ value, label: readableDate(value) }));
+  ).map((value) => ({ value, label: formatExpiryMonth(value) }));
   const warehouseOptions = (item) => {
     const groupedRows = planningWarehouseStock
       .filter((row) => itemKey(row.item) === itemKey(item.item_name))
@@ -2852,7 +2882,7 @@ export default function RisFormModal({
                             <td className="px-3 py-2 text-slate-600 dark:text-zinc-300">{row.category || ""}</td>
                             <td className="px-3 py-2 font-bold text-slate-900 dark:text-zinc-50">{row.item}</td>
                             <td className="px-3 py-2">{String(row.brand_description || "").trim() === "-" ? "" : row.brand_description}</td>
-                            <td className="px-3 py-2">{applicableExpiry(row.expiry) ? readableDate(row.expiry) : ""}</td>
+                            <td className="px-3 py-2">{applicableExpiry(row.expiry) ? formatExpiryMonth(row.expiry) : ""}</td>
                             <td className="px-3 py-2 text-right font-bold">{formatWholeQuantity(row.physical_available, "0")}</td>
                             <td className="px-3 py-2 text-right font-bold text-emerald-700">{formatWholeQuantity(row.available, "0")}</td>
                             <td className="px-3 py-2 text-right">{Number.isFinite(cost) && cost > 0 ? peso(cost) : ""}</td>
@@ -3303,7 +3333,7 @@ function MyPortalEmployeeSelect({
           headers: { Accept: "application/json" },
           signal: controller.signal,
         });
-        const payload = response.ok ? await response.json() : { employees: [] };
+        const payload = await response.json().catch(() => ({ employees: [] }));
         setOptions(payload.employees || []);
         setDirectoryError(payload.directory_error || (!response.ok ? "MyPortal directory request failed." : ""));
       } catch (error) {

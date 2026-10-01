@@ -2,6 +2,35 @@
 @tailwind components;
 @tailwind utilities;
 
+.delivery-location-pin {
+    background: transparent;
+    border: 0;
+}
+
+.delivery-location-pin span {
+    position: relative;
+    display: block;
+    width: 30px;
+    height: 30px;
+    border: 3px solid #fff;
+    border-radius: 50% 50% 50% 0;
+    background: #4f46e5;
+    box-shadow: 0 4px 12px rgb(15 23 42 / 35%);
+    transform: rotate(-45deg);
+}
+
+.delivery-location-pin span::after {
+    content: "";
+    position: absolute;
+    inset: 8px;
+    border-radius: 9999px;
+    background: #fff;
+}
+
+.leaflet-dragging .delivery-location-pin span {
+    box-shadow: 0 8px 18px rgb(15 23 42 / 45%);
+}
+
 :root {
     color-scheme: light;
 }
@@ -490,8 +519,10 @@ a[title]:not(.dromis-tip):focus-visible::before,
  * Stacking contract:
  * - App chrome (sidebar/header): z-40
  * - Page sticky/tooltips within content: z-10–30
- * - Toasts / floating chrome widgets: z-50–60
- * - Modals: z-50+ in components, floored to 240 here when marked as dialogs
+ * - Page maps (Leaflet/MapLibre): isolated at z-0 so tile/control panes (200–1000)
+ *   cannot paint over overlays
+ * - Toasts / floating chrome widgets: z-50–60 (toast panel uses ~1200)
+ * - Modals: z-50+ in components, floored to 1100 here (above Leaflet panes)
  *
  * Many modals put role="dialog" on the inner panel (not the fixed backdrop).
  * Raise the backdrop in both patterns so chrome never paints over overlays.
@@ -507,5 +538,328 @@ body:has([role="alertdialog"][aria-modal="true"]) [data-app-header] {
 [role="alertdialog"][aria-modal="true"].fixed.inset-0,
 .fixed.inset-0:has([role="dialog"][aria-modal="true"]),
 .fixed.inset-0:has([role="alertdialog"][aria-modal="true"]) {
-    z-index: 240;
+    z-index: 1100;
+}
+
+/* Trap Leaflet/MapLibre internal z-index panes inside the page content. */
+.leaflet-container,
+.maplibregl-map,
+[data-map-container] {
+    position: relative;
+    z-index: 0;
+    isolation: isolate;
+}
+@keyframes login-pillar-float {
+    0%, 100% {
+        transform: translateY(0);
+        box-shadow: 0 10px 30px rgba(2, 12, 27, 0.12);
+    }
+    50% {
+        transform: translateY(-7px);
+        box-shadow: 0 18px 34px rgba(16, 185, 129, 0.18);
+    }
+}
+
+.login-hero-sequence {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+    transition: opacity 0.65s ease, filter 0.65s ease, transform 0.65s ease;
+}
+
+.login-hero-sequence--fading {
+    opacity: 0;
+    filter: blur(6px);
+    transform: translateY(-10px) scale(0.985);
+}
+
+.login-pillar-card {
+    opacity: 0;
+    animation:
+        login-pillar-enter 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) var(--pillar-delay, 0s) forwards,
+        login-pillar-float 4.8s ease-in-out calc(var(--pillar-delay, 0s) + 0.65s) infinite;
+}
+
+.login-pillar-glint {
+    animation: login-pillar-glint 5.2s ease-in-out calc(var(--pillar-delay, 0s) + 1.2s) infinite;
+}
+
+@keyframes login-pillar-glint {
+    0%, 60% { transform: translateX(0) skewX(-12deg); opacity: 0; }
+    70% { opacity: 1; }
+    88%, 100% { transform: translateX(650%) skewX(-12deg); opacity: 0; }
+}
+
+@keyframes login-pillar-enter {
+    from { opacity: 0; transform: translateY(18px) scale(0.96); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.login-written-letter {
+    display: inline;
+    opacity: 0;
+    animation: login-letter-write 0.18s ease-out forwards;
+}
+
+@keyframes login-letter-write {
+    from { opacity: 0; filter: blur(3px); }
+    to { opacity: 1; filter: blur(0); }
+}
+
+.login-written-rule {
+    opacity: 0;
+    transform-origin: left;
+    animation: login-rule-draw 0.75s ease-out 2.45s forwards;
+}
+
+@keyframes login-rule-draw {
+    from { opacity: 0; transform: scaleX(0); }
+    to { opacity: 1; transform: scaleX(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .login-pillar-card {
+        animation: none;
+        opacity: 1;
+    }
+    .login-written-letter { animation: none; opacity: 1; }
+    .login-written-rule { animation: none; opacity: 1; transform: none; }
+    .login-pillar-glint { animation: none; }
+    .login-hero-sequence { transition: none; }
+}
+
+@media (min-width: 768px) and (max-height: 820px) {
+    .login-card-shell {
+        display: flex;
+        justify-content: center;
+        transform: scale(0.88);
+        width: 113.64%;
+        max-width: 31rem;
+    }
+
+    .login-card {
+        width: 100%;
+    }
+}
+
+@media (min-width: 768px) and (max-height: 700px) {
+    .login-card-shell {
+        transform: scale(0.76);
+        width: 131.58%;
+        max-width: 35rem;
+    }
+}
+
+@media (max-width: 767px) {
+    .login-form-section {
+        /* Keep authentication usable when an installed/shortcut PWA restores
+           a stale grid viewport after sign-out. Anchor the form to the actual
+           visual viewport instead of relying on the desktop grid column. */
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 20 !important;
+        width: 100% !important;
+        max-width: none !important;
+        -webkit-overflow-scrolling: touch;
+        scroll-padding-top: max(3.5rem, env(safe-area-inset-top));
+    }
+
+    .login-card-shell,
+    .login-card {
+        transform: none !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+    }
+}
+
+/* App-shell mobile baseline: preserve native-app proportions and safe areas. */
+html,
+body,
+#app {
+    min-height: 100%;
+}
+
+body {
+    min-height: 100dvh;
+    overscroll-behavior-y: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+@media (max-width: 767px) {
+    html {
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+    }
+
+    body {
+        overflow-x: hidden;
+    }
+
+    input:not([type="checkbox"]):not([type="radio"]),
+    select,
+    textarea {
+        min-height: 2.75rem;
+        font-size: 16px;
+    }
+
+    button,
+    a {
+        touch-action: manipulation;
+    }
+
+    /* Size actual dialog panels, not full-screen backdrops that also carry the
+       dialog role. Constraining a fixed inset backdrop clipped its bottom
+       content and close controls on short mobile viewports. */
+    [role="dialog"][aria-modal="true"]:not(.fixed),
+    [role="alertdialog"][aria-modal="true"]:not(.fixed) {
+        max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 1rem);
+        max-width: calc(100vw - 1rem);
+    }
+
+    [role="dialog"][aria-modal="true"].fixed.inset-0,
+    [role="alertdialog"][aria-modal="true"].fixed.inset-0 {
+        width: 100vw;
+        max-width: none;
+        height: 100dvh;
+        max-height: none;
+    }
+
+    table {
+        font-size: 0.75rem;
+    }
+
+    [data-app-main],
+    main,
+    main > *,
+    .dromis-table {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .dromis-table {
+        overscroll-behavior-x: contain;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: thin;
+    }
+
+    .dromis-table::after {
+        content: "";
+        position: sticky;
+        right: 0;
+        display: block;
+        width: 1px;
+        height: 1px;
+    }
+}
+
+/* Shared phone/tablet containment. Dense records may scroll horizontally, but
+   surrounding cards, charts, media, and maps must remain inside the viewport. */
+@media (max-width: 1023px) {
+    /* Page modals must always paint above the sticky app chrome. Several legacy
+       dialogs do not put aria-modal on their backdrop, so cover direct page
+       overlays as well as the accessible dialog patterns. */
+    main > .fixed.inset-0:not([aria-hidden="true"]),
+    [role="dialog"][aria-modal="true"].fixed.inset-0,
+    [role="alertdialog"][aria-modal="true"].fixed.inset-0,
+    .fixed.inset-0:has([role="dialog"][aria-modal="true"]),
+    .fixed.inset-0:has([role="alertdialog"][aria-modal="true"]) {
+        z-index: 1100 !important;
+    }
+
+    /* Tall phone/tablet dialogs start at the safe top edge instead of being
+       vertically centered beyond the viewport. Their header and close/cancel
+       controls therefore remain reachable while the body scrolls. */
+    main > .fixed.inset-0:not([aria-hidden="true"]),
+    [role="dialog"][aria-modal="true"].fixed.inset-0,
+    [role="alertdialog"][aria-modal="true"].fixed.inset-0 {
+        padding-top: max(.5rem, env(safe-area-inset-top)) !important;
+        padding-bottom: max(.5rem, env(safe-area-inset-bottom)) !important;
+    }
+
+    main > .fixed.inset-0:not([aria-hidden="true"]):has(> [role="dialog"][aria-modal="true"]),
+    main > .fixed.inset-0:not([aria-hidden="true"]):has(> [role="alertdialog"][aria-modal="true"]),
+    .fixed.inset-0:has(> [role="dialog"][aria-modal="true"]),
+    .fixed.inset-0:has(> [role="alertdialog"][aria-modal="true"]) {
+        align-items: flex-start !important;
+        overflow-x: hidden !important;
+        overflow-y: auto !important;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    main :where(.grid, [class*="grid-cols-"]) > * {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    main :where(h1, h2, h3, h4, p, span, td, th, label) {
+        overflow-wrap: anywhere;
+    }
+
+    main :where(img, video, canvas, iframe) {
+        max-width: 100%;
+    }
+
+    main iframe,
+    main video {
+        width: 100%;
+    }
+
+    main :where(.maplibregl-map, .leaflet-container, [data-map-container]) {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+    }
+
+    main :where(.overflow-hidden):has(> table) {
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    main :where(.recharts-responsive-container, .recharts-wrapper, .chart-container) {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+    }
+
+    main :where(.recharts-wrapper) > svg {
+        max-width: 100%;
+    }
+
+    [role="dialog"][aria-modal="true"],
+    [role="alertdialog"][aria-modal="true"] {
+        min-width: 0;
+        max-width: calc(100vw - 1rem);
+        box-sizing: border-box;
+        overflow-x: hidden;
+        overflow-y: auto;
+    }
+
+    [role="dialog"][aria-modal="true"].fixed.inset-0,
+    [role="alertdialog"][aria-modal="true"].fixed.inset-0 {
+        max-width: none;
+    }
+
+    /* Modal contents must shrink inside portrait and landscape widths. Dense
+       rows remain horizontally scrollable instead of pushing the close button
+       or final fields beyond the viewport. */
+    [role="dialog"][aria-modal="true"] :where(.grid, .flex, [class*="grid-cols-"]) > *,
+    [role="alertdialog"][aria-modal="true"] :where(.grid, .flex, [class*="grid-cols-"]) > * {
+        min-width: 0;
+    }
+
+    [role="dialog"][aria-modal="true"] :where(img, video, canvas, iframe, .maplibregl-map, .leaflet-container),
+    [role="alertdialog"][aria-modal="true"] :where(img, video, canvas, iframe, .maplibregl-map, .leaflet-container) {
+        max-width: 100%;
+    }
+}
+
+@media (display-mode: standalone) {
+    body {
+        padding-top: env(safe-area-inset-top);
+        padding-left: env(safe-area-inset-left);
+        padding-right: env(safe-area-inset-right);
+        padding-bottom: env(safe-area-inset-bottom);
+    }
 }

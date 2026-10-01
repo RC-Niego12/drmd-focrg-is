@@ -82,7 +82,15 @@ class AuthenticatedSessionController extends Controller
             $this->rejectAudience($request, $user, 'employee_on_lgu_portal');
 
             throw ValidationException::withMessages([
-                'email' => 'DSWD employee accounts must sign in through the regular DROMIS login or Caraga Connect SSO.',
+                'username' => 'DSWD employee accounts must sign in through the regular DROMIS login or Caraga Connect SSO.',
+            ]);
+        }
+
+        if ($audience === 'lgu' && $user && ! $user->canAccessLguPortalLogin()) {
+            $this->rejectAudience($request, $user, 'lgu_not_linked_to_profile_personnel');
+
+            throw ValidationException::withMessages([
+                'username' => 'Only LGU profile personnel can sign in. Use an LCE, LSWDO, LDRRMO, or alternate account to open the LGU profile and create your personal login username, or ask them to do it for you.',
             ]);
         }
 
@@ -105,6 +113,10 @@ class AuthenticatedSessionController extends Controller
             $request->session()->put('mfa_required', true);
 
             return redirect()->route('mfa.verify');
+        }
+
+        if ($user?->must_change_password) {
+            return redirect()->route('lgu.credentials.edit');
         }
 
         $home = $audience === 'lgu'

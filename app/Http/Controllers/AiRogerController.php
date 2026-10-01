@@ -4,9 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Services\AiRogerContextService;
 use App\Services\AiRogerSystemMapService;
+use App\Services\GroqChatService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 
 class AiRogerController extends Controller
@@ -16,7 +16,7 @@ class AiRogerController extends Controller
         private readonly AiRogerSystemMapService $systemMapService,
     ) {}
 
-    public function chat(Request $request): JsonResponse
+    public function chat(Request $request, GroqChatService $groq): JsonResponse
     {
         $data = $request->validate([
             'message' => ['required', 'string', 'max:4000'],
@@ -77,21 +77,17 @@ class AiRogerController extends Controller
         ];
 
         try {
-            $response = Http::timeout(45)
-                ->retry(1, 500)
-                ->withToken($apiKey)
-                ->acceptJson()
-                ->post(rtrim((string) config('services.groq.base_url'), '/').'/chat/completions', [
-                    'model' => config('services.groq.model'),
-                    'temperature' => 0.2,
-                    'max_completion_tokens' => 800,
-                    'messages' => $messages,
-                ]);
+            ['response' => $response, 'model' => $model] = $groq->complete([
+                'model' => config('services.groq.model'),
+                'temperature' => 0.2,
+                'max_completion_tokens' => 800,
+                'messages' => $messages,
+            ]);
         } catch (\Throwable $exception) {
             report($exception);
 
             return response()->json([
-                'answer' => 'AI Roger could not reach the AI provider right now. Please try again in a moment. Existing DROMIS features were not affected.',
+                'answer' => $groq->unreachableMessage($exception).' Existing DROMIS features were not affected.',
                 'provider' => 'local fallback',
                 'model' => null,
             ]);
@@ -101,18 +97,18 @@ class AiRogerController extends Controller
             report(new \RuntimeException('AI Roger Groq API error '.$response->status().': '.$response->body()));
 
             return response()->json([
-                'answer' => 'AI Roger received an error from the AI provider. Please check the Groq API key/model configuration or try again later.',
+                'answer' => $groq->errorMessage($response, 'AI Roger received an error from the AI provider. Please check the Groq API key/model configuration or try again later.'),
                 'provider' => 'local fallback',
                 'model' => null,
             ]);
         }
 
-        $answer = trim((string) data_get($response->json(), 'choices.0.message.content'));
+        $answer = $groq->messageText($response);
 
         return response()->json([
             'answer' => $answer !== '' ? $answer : 'AI Roger returned an empty response. Please rephrase your question and try again.',
             'provider' => 'Groq',
-            'model' => config('services.groq.model'),
+            'model' => $model,
         ]);
     }
 }

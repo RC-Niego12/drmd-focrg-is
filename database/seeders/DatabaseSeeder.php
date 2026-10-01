@@ -55,6 +55,11 @@ class DatabaseSeeder extends Seeder
         $lgu = Role::firstOrCreate(['name' => 'LGU', 'guard_name' => 'web']);
         $financialAnalyst = Role::firstOrCreate(['name' => 'DRMD Financial Analyst', 'guard_name' => 'web']);
         $ocdCaraga = Role::firstOrCreate(['name' => 'OCD Caraga', 'guard_name' => 'web']);
+        $regionalDirector = Role::firstOrCreate(['name' => 'Regional Director', 'guard_name' => 'web']);
+        $assistantRegionalDirector = Role::firstOrCreate(['name' => 'Assistant Regional Director', 'guard_name' => 'web']);
+        $rd = Role::firstOrCreate(['name' => 'RD', 'guard_name' => 'web']);
+        $ard = Role::firstOrCreate(['name' => 'ARD', 'guard_name' => 'web']);
+        $ardo = Role::firstOrCreate(['name' => 'ARDO', 'guard_name' => 'web']);
         Role::firstOrCreate(['name' => 'guest', 'guard_name' => 'web']);
 
         $superAdmin->syncPermissions($permissions);
@@ -68,6 +73,11 @@ class DatabaseSeeder extends Seeder
         $lgu->syncPermissions(['submit lgu dromic requests']);
         $financialAnalyst->syncPermissions(['view dashboards', 'manage standby funds', 'export reports', 'view regional alert acknowledgements']);
         $ocdCaraga->syncPermissions(['manage regional alerts', 'view regional alert acknowledgements']);
+        $regionalDirector->syncPermissions(['view dispatch delivery monitoring']);
+        $assistantRegionalDirector->syncPermissions(['view dispatch delivery monitoring']);
+        $rd->syncPermissions(['view dispatch delivery monitoring']);
+        $ard->syncPermissions(['view dispatch delivery monitoring']);
+        $ardo->syncPermissions(['view dispatch delivery monitoring']);
 
         app(PermissionRegistrar::class)->forgetCachedPermissions();
 

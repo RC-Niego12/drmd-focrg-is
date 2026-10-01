@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\LguDirectoryEntry;
 use App\Models\User;
 use App\Notifications\AccessDecisionNotification;
 use App\Services\AccessNotificationCenter;
 use App\Services\AuditLogger;
+use App\Services\LguPersonnelAccountService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -21,6 +23,7 @@ class AccessManagementController extends Controller
     public function __construct(
         private readonly AuditLogger $audit,
         private readonly AccessNotificationCenter $notificationCenter,
+        private readonly LguPersonnelAccountService $lguPersonnelAccounts,
     ) {}
 
     public function index(Request $request): Response
@@ -48,14 +51,28 @@ class AccessManagementController extends Controller
             ->get()
             ->map(fn (User $user): array => $this->serializeUser($user));
 
+        $lguDirectories = LguDirectoryEntry::query()
+            ->with(['officials', 'ldrrmoOfficers', 'lswdoAlternates', 'staffMembers'])
+            ->where('is_active', true)
+            ->orderBy('source_sheet')
+            ->orderBy('lgu_name')
+            ->get()
+            ->map(fn (LguDirectoryEntry $entry): array => $this->serializeLguAccessGroup($entry))
+            ->values();
+
         return Inertia::render('AccessManagement/Index', [
             'users' => $users,
+            'lguDirectories' => $lguDirectories,
             'filters' => $filters,
             'roleOptions' => Role::query()
-                ->whereIn('name', ['Super Admin', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst', 'LGU'])
-                ->orderByRaw("case name when 'Super Admin' then 0 when 'RROS' then 1 when 'RROS AA' then 2 when 'DRRS' then 3 when 'DRRS AA' then 4 when 'DRIMS' then 5 when 'DRMD AA' then 6 when 'DRMD Chief' then 7 when 'DRMD Financial Analyst' then 8 when 'LGU' then 9 else 10 end")
+                ->whereIn('name', ['Super Admin', 'RD', 'ARD', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst', 'LGU'])
+                ->orderByRaw("case name when 'Super Admin' then 0 when 'RD' then 1 when 'ARD' then 2 when 'RROS' then 3 when 'RROS AA' then 4 when 'DRRS' then 5 when 'DRRS AA' then 6 when 'DRIMS' then 7 when 'DRMD AA' then 8 when 'DRMD Chief' then 9 when 'DRMD Financial Analyst' then 10 when 'LGU' then 11 else 12 end")
                 ->pluck('name')
-                ->map(fn (string $role): array => ['value' => $role, 'label' => $role])
+                ->map(fn (string $role): array => ['value' => $role, 'label' => match ($role) {
+                    'RD' => 'Regional Director (RD)',
+                    'ARD' => 'Assistant Regional Director (ARD)',
+                    default => $role,
+                }])
                 ->values(),
             'requestableRoleOptions' => $this->notificationCenter->roleOptions(),
             'metrics' => [
@@ -65,14 +82,11 @@ class AccessManagementController extends Controller
                 'inactive' => User::where('is_active', false)->count(),
                 'deleted' => User::onlyTrashed()->count(),
                 'drmd' => User::query()->whereDoesntHave('roles', fn ($query) => $query->where('name', 'LGU'))->where(function ($query): void {
-                    $query->whereIn('office', ['DRMD', 'DRMD AA', 'DRRS', 'DRRS AA', 'DRIMS', 'RROS', 'RROS AA', 'DRMD Financial Analyst', 'Super Admin'])
-                        ->orWhereHas('roles', fn ($roleQuery) => $roleQuery->whereIn('name', ['Super Admin', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst']));
+                    $query->whereIn('office', ['DRMD', 'DRMD AA', 'DRRS', 'DRRS AA', 'DRIMS', 'RROS', 'RROS AA', 'RD', 'ARD', 'ARDO', 'DRMD Financial Analyst', 'Super Admin'])
+                        ->orWhereHas('roles', fn ($roleQuery) => $roleQuery->whereIn('name', ['Super Admin', 'RD', 'ARD', 'ARDO', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst']));
                 })->count(),
-                'lgu' => User::query()->where(function ($query): void {
-                    $query->whereNotNull('lgu_psgc_code')
-                        ->orWhereHas('roles', fn ($roleQuery) => $roleQuery->where('name', 'LGU'));
-                })->count(),
-                'outside' => User::query()->whereNull('lgu_psgc_code')->whereDoesntHave('roles', fn ($query) => $query->whereIn('name', ['Super Admin', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst', 'LGU']))->count(),
+                'lgu' => $lguDirectories->count(),
+                'outside' => User::query()->whereNull('lgu_psgc_code')->whereDoesntHave('roles', fn ($query) => $query->whereIn('name', ['Super Admin', 'RD', 'ARD', 'ARDO', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst', 'LGU']))->count(),
             ],
             'deletedUsers' => User::onlyTrashed()
                 ->with('roles:id,name')
@@ -353,6 +367,8 @@ class AccessManagementController extends Controller
             'lgu_psgc_code' => $user->lgu_psgc_code,
             'lgu_level' => $user->lgu_level,
             'lgu_name' => $user->lgu_name,
+            'username' => $user->username,
+            'lgu_directory_role' => $user->lgu_directory_role,
             'access_requested_at' => $user->access_requested_at?->toDateTimeString(),
             'access_approved_at' => $user->access_approved_at?->toDateTimeString(),
             'access_decided_at' => $user->access_decided_at?->toDateTimeString(),
@@ -362,14 +378,32 @@ class AccessManagementController extends Controller
         ];
     }
 
+    private function serializeLguAccessGroup(LguDirectoryEntry $entry): array
+    {
+        $credentials = $this->lguPersonnelAccounts->portalCredentialsForDirectory($entry);
+        $provisioned = collect($credentials)->where('status', '!=', 'missing')->count();
+
+        return [
+            'id' => $entry->id,
+            'lgu_name' => $entry->override_lgu_name ?: $entry->lgu_name,
+            'lgu_level' => $entry->lgu_level,
+            'psgc_code' => $entry->psgc_code,
+            'source_sheet' => $entry->source_sheet,
+            'logo_url' => $entry->logo_url,
+            'personnel_count' => count($credentials),
+            'provisioned_count' => $provisioned,
+            'portal_logins' => $credentials,
+        ];
+    }
+
     private function userCategory(User $user, array $roles): string
     {
         if ($user->lgu_psgc_code || in_array('LGU', $roles, true)) {
             return 'lgu';
         }
 
-        $drmdRoles = ['Super Admin', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst'];
-        if (array_intersect($roles, $drmdRoles) || in_array($user->office, ['DRMD', 'DRMD AA', 'DRRS', 'DRRS AA', 'DRIMS', 'RROS', 'RROS AA', 'DRMD Financial Analyst', 'Super Admin'], true)) {
+        $drmdRoles = ['Super Admin', 'RD', 'ARD', 'ARDO', 'RROS', 'RROS AA', 'DRRS', 'DRRS AA', 'DRIMS', 'DRMD AA', 'DRMD Chief', 'DRMD Financial Analyst'];
+        if (array_intersect($roles, $drmdRoles) || in_array($user->office, ['DRMD', 'DRMD AA', 'DRRS', 'DRRS AA', 'DRIMS', 'RROS', 'RROS AA', 'RD', 'ARD', 'ARDO', 'DRMD Financial Analyst', 'Super Admin'], true)) {
             return 'drmd';
         }
 

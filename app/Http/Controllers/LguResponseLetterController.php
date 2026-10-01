@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\AssistanceRequest;
 use App\Models\EpirmaSignedDocument;
 use App\Services\EpirmaDocumentStatusService;
+use App\Services\PdfPageExtractService;
 use App\Services\RealtimePublisher;
 use App\Services\WorkflowNotificationService;
 use App\Support\InlinePdfFilename;
@@ -20,6 +21,7 @@ class LguResponseLetterController extends Controller
 {
     public function __construct(
         private EpirmaDocumentStatusService $statusService,
+        private PdfPageExtractService $pdfPages,
     ) {}
 
     public function index(Request $request): InertiaResponse
@@ -169,11 +171,24 @@ class LguResponseLetterController extends Controller
             'signed-response-letter',
         );
 
-        return response()->file(Storage::disk('public')->path($cachedPath), [
+        // e-PIRMA signs the full 2-page letter for DRRS/AA; LGU receives page 2 only.
+        $sourceAbsolute = Storage::disk('public')->path($cachedPath);
+        try {
+            $lguPagePath = $this->pdfPages->extractPage($sourceAbsolute, 2);
+        } catch (\Throwable) {
+            return response()->file($sourceAbsolute, [
+                'Content-Disposition' => InlinePdfFilename::disposition($filename),
+                'X-Epirma-Preview-Kind' => 'signed',
+                'X-Content-Type-Options' => 'nosniff',
+            ]);
+        }
+
+        return response()->file($lguPagePath, [
             'Content-Disposition' => InlinePdfFilename::disposition($filename),
             'X-Epirma-Preview-Kind' => 'signed',
             'X-Content-Type-Options' => 'nosniff',
-        ]);
+            'X-Lgu-Response-Letter-Page' => '2',
+        ])->deleteFileAfterSend(true);
     }
 
     public function acknowledge(

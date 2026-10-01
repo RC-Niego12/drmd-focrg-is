@@ -7,7 +7,6 @@ use App\Models\LguDirectoryEntry;
 use App\Models\OperationalLibraryValue;
 use App\Models\User;
 use App\Support\RequestedGoodsTypeSummary;
-use Illuminate\Support\Carbon;
 use DOMDocument;
 use DOMElement;
 use DOMXPath;
@@ -58,7 +57,6 @@ class ResponseLetterDocumentService
         $xpath = new DOMXPath($document);
         $xpath->registerNamespace('w', self::WORD_NS);
 
-        $meta = $request->assessment_form_data ?? [];
         $directory = $request->requestParty?->lguDirectoryEntry
             ?: LguDirectoryEntry::query()
                 ->with(['officials', 'contacts'])
@@ -112,63 +110,9 @@ class ResponseLetterDocumentService
         $attentionName = $this->capitalizedName($lswd?->override_name ?: $lswd?->name ?: $request->requester);
         $attentionPosition = trim((string) ($lswd?->override_position_designation ?: $lswd?->position_designation ?: $request->office_agency_details));
         $salutation = $this->salutation($recipient, $recipientPosition);
-        $responsePurpose = $meta['response_purpose'] ?? $request->purpose;
-        $isReliefAugmentation = $responsePurpose === 'Relief Augmentation'
-            || (blank($responsePurpose) && ($meta['provide_augmentation'] ?? false) === true);
-        $incident = $isReliefAugmentation ? ($request->incident?->name ?: 'the reported incident') : null;
-        $incidentDate = $request->incident?->incident_date?->format('F j, Y');
-        $incidentRows = collect($meta['incidents'] ?? [])->filter(fn ($row) => is_array($row) && filled($row['incident_type'] ?? null))->values();
-        if ($isReliefAugmentation && $incidentRows->count() > 1) {
-            $incident = 'multiple separate incidents: '.$incidentRows->map(function ($row, $index): string {
-                $date = filled($row['occurrence_at'] ?? null) ? Carbon::parse($row['occurrence_at'])->format('F j, Y') : null;
-                $place = collect([$row['barangay'] ?? null, $row['city_municipality'] ?? null])->filter()->implode(', ');
-
-                return ($index + 1).') '.($row['incident_type'] ?? 'incident')
-                    .($place !== '' ? ' in '.$place : '')
-                    .($date ? ' on '.$date : '');
-            })->implode('; ');
-            $incidentDate = null;
-        }
-        $areas = collect($meta['affected_areas'] ?? [])->filter()->values();
-        $areaSummary = match (true) {
-            $areas->isEmpty() => '',
-            $areas->count() <= 5 => ' and affected '.$areas->implode(', '),
-            in_array(strtoupper((string) $request->lgu_level), ['CLGU', 'MLGU', 'MGLU'], true) => ' and affected '.$areas->count().' identified barangays within the locality',
-            in_array(strtoupper((string) $request->lgu_level), ['PLGU', 'PGLU'], true) => ' and affected '.$areas->count().' identified cities and municipalities within the province',
-            default => ' and affected '.$areas->count().' identified areas',
-        };
-        $provideAugmentation = ($meta['provide_augmentation'] ?? false) === true;
-        $items = $request->items->filter(fn ($item) => (float) ($item->approved_quantity ?: $item->requested_quantity) > 0);
-        $itemSummary = $items->map(function ($item): string {
-            $quantity = $item->approved_quantity ?: $item->requested_quantity;
-            $unit = strtolower((string) $item->unit);
-            if ((float) $quantity !== 1.0) {
-                $unit = match ($unit) {
-                    'box' => 'boxes', 'kit' => 'kits', 'set' => 'sets', 'pack' => 'packs', default => $unit
-                };
-            }
-
-            return number_format((float) $quantity).' '.$unit.' of '.$item->item_name;
-        })->implode(', ');
-        // Opening paragraph: enumerate FNI type/category labels only — never each item name or quantities.
-        $requestedGoodsTypes = RequestedGoodsTypeSummary::summarize($items);
-        $locality = $this->localityReference($request, $lguName, $provinceName, $directory?->lgu_level);
-        $socialWorker = $this->responseSocialWorker($request, $meta);
-        $workerReference = filled($socialWorker['full_name'])
-            ? 'our Social Worker '.$socialWorker['full_name']
-            : 'our assigned social worker';
-        $workerContactSentence = filled($socialWorker['short_name']) && filled($socialWorker['contact'])
-            ? sprintf(
-                ' For further queries, %s will be coordinating with you through this mobile number %s.',
-                $socialWorker['short_name'],
-                $socialWorker['contact']
-            )
-            : (filled($socialWorker['short_name'])
-                ? sprintf(' For further queries, %s will be coordinating with you.', $socialWorker['short_name'])
-                : '');
-        $occurrenceClause = $incidentDate
-            ? ' which occurred in Caraga Region on '.$incidentDate
-            : ' which occurred in Caraga Region';
+        $meta = (array) ($request->assessment_form_data ?? []);
+        $letterDate = $this->resolveLetterDate($meta);
+        $bodyParagraphs = $this->effectiveBodyParagraphs($request)['paragraphs'];
         $responseApprover = OperationalLibraryValue::query()
             ->where('library_type', 'drrs_signatory')
             ->where('context', 'approved_by')
@@ -179,19 +123,23 @@ class ResponseLetterDocumentService
         [$savedApproverName, $savedApproverDesignation] = array_pad(explode('|', (string) $responseApprover?->value, 2), 2, '');
         $responseApproverEmployeeName = trim((string) data_get($responseApprover?->metadata, 'employee_name'));
         $responseApproverSuffix = trim((string) data_get($responseApprover?->metadata, 'suffix'));
-        $responseApproverName = $responseApproverEmployeeName !== ''
-            ? $responseApproverEmployeeName.($responseApproverSuffix !== '' ? ', '.$responseApproverSuffix : '')
-            : trim($savedApproverName);
+        $responseApproverName = $this->capitalizedName(
+            $responseApproverEmployeeName !== ''
+                ? $responseApproverEmployeeName.($responseApproverSuffix !== '' ? ', '.$responseApproverSuffix : '')
+                : trim($savedApproverName)
+        );
         $responseApproverDesignation = trim((string) (data_get($responseApprover?->metadata, 'designation')
             ?: data_get($responseApprover?->metadata, 'position')
             ?: $savedApproverDesignation));
-        $responseLetterInitials = data_get($responseApprover?->metadata, 'initials')
-            ?: OperationalLibraryValue::query()
-                ->where('library_type', 'response_letter_initials')
-                ->where('context', 'response_letter')
-                ->where('is_active', true)
-                ->orderBy('id')
-                ->value('value')
+        // Routing acronyms come from the dedicated initials library (e.g. JSP/AAA/JLM/1628),
+        // not the RD's personal initials (MAD).
+        $responseLetterInitials = OperationalLibraryValue::query()
+            ->where('library_type', 'response_letter_initials')
+            ->where('context', 'response_letter')
+            ->where('is_active', true)
+            ->orderBy('id')
+            ->value('value')
+            ?: data_get($responseApprover?->metadata, 'initials')
             ?: '';
         $responseLetterInitials = preg_replace('/\s*\/\s*/', ' / ', trim((string) $responseLetterInitials));
 
@@ -247,10 +195,11 @@ class ResponseLetterDocumentService
 
                 continue;
             }
-            if (str_starts_with(trim($text), 'MARI- FLOR A. DOLLAGA- LIBANG')) {
+            if (str_starts_with(trim($text), 'MARI- FLOR A. DOLLAGA- LIBANG')
+                || ($responseApproverName !== '' && strcasecmp(trim($text), $responseApproverName) === 0)) {
                 $this->replaceParagraphSegments($document, $xpath, $paragraph, [[
-                    'text' => $responseApproverName ?: trim($text),
-                    'breaks_before' => 3,
+                    'text' => $responseApproverName !== '' ? $responseApproverName : $this->capitalizedName(trim($text)),
+                    'breaks_before' => 2,
                     'bold' => true,
                 ]]);
 
@@ -263,7 +212,7 @@ class ResponseLetterDocumentService
 
                 continue;
             }
-            if ($responseLetterInitials !== '' && preg_match('/^[A-Z]{2,5}\/[A-Z]{2,5}\/[A-Z]{2,5}\/[0-9]+$/', trim($text)) === 1) {
+            if ($responseLetterInitials !== '' && preg_match('/^[A-Z]{2,5}(\s*\/\s*[A-Z]{2,5}){2,}(\s*\/\s*[0-9]+)?$/', trim($text)) === 1) {
                 $this->replaceParagraphSegments($document, $xpath, $paragraph, [[
                     'text' => $responseLetterInitials,
                     'breaks_before' => 3,
@@ -274,15 +223,14 @@ class ResponseLetterDocumentService
 
                 continue;
             }
-            if (preg_match('/^[A-Z]+\s+\d{1,2},\s+\d{4}$/', trim($text)) === 1) {
+            if (preg_match('/^[A-Z]+\s+\d{1,2},\s+\d{4}$/', trim($text)) === 1
+                || $this->isLetterDateParagraph(trim($text))) {
                 $dateOccurrence++;
                 if ($dateOccurrence === 2) {
                     $this->ensurePageBreakBefore($document, $xpath, $paragraph);
                 }
-                // Omit the blank line before the date so countersignee
-                // acronyms stay on page 1 with the signature block.
                 $this->replaceParagraphSegments($document, $xpath, $paragraph, [[
-                    'text' => strtoupper(now()->format('F j, Y')),
+                    'text' => $this->readableLetterDate($letterDate),
                 ]]);
 
                 continue;
@@ -295,32 +243,9 @@ class ResponseLetterDocumentService
             }
 
             $replacement = match (true) {
-                str_starts_with(trim($text), 'This is in reference to your letter requesting') => $isReliefAugmentation
-                    ? sprintf(
-                        'This is in reference to your letter requesting %s intended for the %s disaster-affected %s in %s due to %s%s%s.',
-                        $requestedGoodsTypes,
-                        number_format((int) ($request->affected_families ?? 0)),
-                        (int) ($request->affected_families ?? 0) === 1 ? 'family' : 'families',
-                        $locality,
-                        $incident,
-                        $occurrenceClause,
-                        $areaSummary
-                    )
-                    : 'This is in reference to your letter requesting Food and Non-Food Items for preparedness and response readiness.',
-                str_starts_with(trim($text), 'After a thorough assessment') => $provideAugmentation
-                    ? sprintf(
-                        'After a thorough assessment conducted by %s, %s is eligible to be provided with the requested goods as augmentation assistance from our office. Hence, we will extend %s to the above-mentioned number of affected families.',
-                        $workerReference,
-                        $locality,
-                        $itemSummary ?: 'the approved Food and Non-Food Items'
-                    )
-                    : sprintf(
-                        'After a thorough assessment conducted by %s, the requested augmentation is not recommended at this time. The requesting party will be advised of any additional documentation or coordination required.',
-                        $workerReference
-                    ),
-                str_starts_with(trim($text), 'With this, the Regional Resource Operations Section') => $provideAugmentation
-                    ? 'With this, the Regional Resource Operations Section (RROS) personnel will prepare the Requisition and Issuance Slip (RIS) of the said items. The assigned social worker will immediately coordinate with the Focal Person once the documents are prepared and the goods are ready for delivery and/or pick-up from your Local Government Unit Warehouse.'.$workerContactSentence
-                    : 'The Disaster Response Management Division will coordinate with the requesting party regarding the assessment result and any succeeding action required.',
+                str_starts_with(trim($text), 'This is in reference to your letter requesting') => $bodyParagraphs['opening'],
+                str_starts_with(trim($text), 'After a thorough assessment') => $bodyParagraphs['assessment'],
+                str_starts_with(trim($text), 'With this, the Regional Resource Operations Section') => $bodyParagraphs['closing'],
                 default => null,
             };
 
@@ -329,6 +254,9 @@ class ResponseLetterDocumentService
             }
         }
 
+        // Official letter is a 2-pager for DRRS / DRRS AA / e-PIRMA:
+        // page 1 ends with RD + initials; page 2 is the LGU copy (date through RD).
+        $this->ensureCountersignaturePage($document, $xpath);
         $this->compactLetterPages($document, $xpath);
         $zip->addFromString('word/document.xml', $document->saveXML());
         $this->normalizeHeadersAndFooters($zip);
@@ -339,14 +267,219 @@ class ResponseLetterDocumentService
         return ['path' => $path, 'filename' => $filename];
     }
 
+    /**
+     * Auto-generated Response Letter body paragraphs (opening, assessment, closing).
+     *
+     * @return array{opening: string, assessment: string, closing: string}
+     */
+    public function bodyParagraphs(AssistanceRequest $request): array
+    {
+        $request->loadMissing([
+            'requestParty.lguDirectoryEntry.officials',
+            'requestParty.lguDirectoryEntry.contacts',
+            'drmdAssignedUser',
+            'assessmentActor',
+            'incident',
+            'items.fniLibraryItem',
+            'items.inventoryItem',
+        ]);
+
+        $meta = $request->assessment_form_data ?? [];
+        $directory = $request->requestParty?->lguDirectoryEntry
+            ?: LguDirectoryEntry::query()
+                ->with(['officials', 'contacts'])
+                ->when(
+                    filled($request->lgu_psgc_code),
+                    fn ($query) => $query->where('psgc_code', $request->lgu_psgc_code),
+                    fn ($query) => $query->whereRaw('1 = 0')
+                )
+                ->first();
+        if (! $directory && filled($request->municipality)) {
+            $sourceSheet = match (strtolower(trim((string) $request->province))) {
+                'agusan del norte' => 'ADN',
+                'agusan del sur' => 'ADS',
+                'surigao del norte' => 'SDN',
+                'surigao del sur' => 'SDS',
+                'province of dinagat islands', 'dinagat islands' => 'PDI',
+                default => null,
+            };
+            $directory = LguDirectoryEntry::query()
+                ->with(['officials', 'contacts'])
+                ->where(function ($query) use ($request): void {
+                    $query->where('lgu_name', 'like', '%'.trim((string) $request->municipality).'%')
+                        ->orWhere('override_lgu_name', 'like', '%'.trim((string) $request->municipality).'%');
+                })
+                ->when($sourceSheet, fn ($query) => $query->where('source_sheet', $sourceSheet))
+                ->first();
+        }
+        $provinceName = match (strtoupper((string) $directory?->source_sheet)) {
+            'ADN' => 'Agusan del Norte',
+            'ADS' => 'Agusan del Sur',
+            'SDN' => 'Surigao del Norte',
+            'SDS' => 'Surigao del Sur',
+            'PDI' => 'Province of Dinagat Islands',
+            default => $request->province,
+        };
+        $lguName = trim((string) ($directory?->override_lgu_name
+            ?: $directory?->lgu_name
+            ?: $request->municipality
+            ?: $request->lgu
+            ?: $request->requesting_agency));
+        $responsePurpose = $meta['response_purpose'] ?? $request->purpose;
+        $isReliefAugmentation = $responsePurpose === 'Relief Augmentation'
+            || (blank($responsePurpose) && ($meta['provide_augmentation'] ?? false) === true);
+        $incident = $isReliefAugmentation ? ($request->incident?->name ?: 'the reported incident') : null;
+        $occurrenceDisplay = trim((string) ($meta['incident_occurrence_display'] ?? ''));
+        if ($occurrenceDisplay !== '' && preg_match('/^\d{4}-\d{2}-\d{2}\s+to\s+\d{4}-\d{2}-\d{2}$/i', $occurrenceDisplay)) {
+            [$fromIso, $toIso] = preg_split('/\s+to\s+/i', $occurrenceDisplay);
+            $occurrenceDisplay = \App\Support\IncidentOccurrenceDisplay::format($fromIso, $toIso);
+        }
+        if ($occurrenceDisplay === '') {
+            $occurrenceStart = \Illuminate\Support\Str::substr((string) ($meta['occurrence_started_at'] ?? $request->incident?->incident_date?->toDateString() ?? ''), 0, 10);
+            $occurrenceEnd = \Illuminate\Support\Str::substr((string) ($meta['occurrence_ended_span'] ?? $occurrenceStart), 0, 10);
+            $occurrenceDisplay = \App\Support\IncidentOccurrenceDisplay::format($occurrenceStart, $occurrenceEnd);
+        }
+        $incidentDate = $occurrenceDisplay !== ''
+            ? $occurrenceDisplay
+            : $request->incident?->incident_date?->format('Y-m-d');
+        $incidentRows = collect($meta['incidents'] ?? [])
+            ->filter(fn ($row) => is_array($row) && filled($row['incident_type'] ?? null))
+            ->sortBy(fn ($row) => \Illuminate\Support\Str::substr((string) ($row['occurrence_at'] ?? '9999-12-31'), 0, 10))
+            ->values();
+        $isMultipleIncidents = $isReliefAugmentation && $incidentRows->count() > 1;
+        if ($isMultipleIncidents) {
+            $incident = $this->formatMultipleIncidentsClause($incidentRows);
+            $incidentDate = null;
+        } elseif ($isReliefAugmentation && $incidentRows->count() === 1) {
+            $row = $incidentRows->first();
+            $incident = $this->formatIncidentPhrase($row, withDate: false) ?: ($request->incident?->name ?: 'the reported incident');
+            $rowDate = filled($row['occurrence_at'] ?? null)
+                ? $this->shortMonthDate(\Illuminate\Support\Str::substr((string) $row['occurrence_at'], 0, 10))
+                : '';
+            $start = \Illuminate\Support\Str::substr((string) ($meta['occurrence_started_at'] ?? $row['occurrence_at'] ?? $request->incident?->incident_date?->toDateString() ?? ''), 0, 10);
+            $end = \Illuminate\Support\Str::substr((string) ($meta['occurrence_ended_span'] ?? $start), 0, 10);
+            $incidentDate = $this->shortMonthDateRange($start, $end) ?: $rowDate ?: null;
+        } else {
+            $start = \Illuminate\Support\Str::substr((string) ($meta['occurrence_started_at'] ?? $request->incident?->incident_date?->toDateString() ?? ''), 0, 10);
+            $end = \Illuminate\Support\Str::substr((string) ($meta['occurrence_ended_span'] ?? $start), 0, 10);
+            $incidentDate = $this->shortMonthDateRange($start, $end)
+                ?: $this->shortMonthDate((string) $incidentDate)
+                ?: null;
+        }
+        $areas = collect($meta['affected_areas'] ?? [])->filter()->values();
+        $areaSummary = $isMultipleIncidents ? '' : match (true) {
+            $areas->isEmpty() => '',
+            $areas->count() <= 5 => ' and affected '.$areas->implode(', '),
+            in_array(strtoupper((string) $request->lgu_level), ['CLGU', 'MLGU', 'MGLU'], true) => ' and affected '.$areas->count().' identified barangays within the locality',
+            in_array(strtoupper((string) $request->lgu_level), ['PLGU', 'PGLU'], true) => ' and affected '.$areas->count().' identified cities and municipalities within the province',
+            default => ' and affected '.$areas->count().' identified areas',
+        };
+        $provideAugmentation = ($meta['provide_augmentation'] ?? false) === true;
+        $items = $request->items->filter(fn ($item) => (float) ($item->approved_quantity ?: $item->requested_quantity) > 0);
+        $itemSummary = $items->map(function ($item): string {
+            $quantity = $item->approved_quantity ?: $item->requested_quantity;
+            $unit = strtolower((string) $item->unit);
+            if ((float) $quantity !== 1.0) {
+                $unit = match ($unit) {
+                    'box' => 'boxes', 'kit' => 'kits', 'set' => 'sets', 'pack' => 'packs', default => $unit
+                };
+            }
+
+            return number_format((float) $quantity).' '.$unit.' of '.$item->item_name;
+        })->implode(', ');
+        $requestedGoodsTypes = RequestedGoodsTypeSummary::summarize($items);
+        $locality = $this->localityReference($request, $lguName, $provinceName, $directory?->lgu_level);
+        $socialWorker = $this->responseSocialWorker($request, $meta);
+        $workerReference = filled($socialWorker['full_name'])
+            ? 'our Social Worker '.$socialWorker['full_name']
+            : 'our assigned social worker';
+        $workerContactSentence = filled($socialWorker['short_name']) && filled($socialWorker['contact'])
+            ? sprintf(
+                ' For further queries, %s will be coordinating with you through this mobile number %s.',
+                $socialWorker['short_name'],
+                $socialWorker['contact']
+            )
+            : (filled($socialWorker['short_name'])
+                ? sprintf(' For further queries, %s will be coordinating with you.', $socialWorker['short_name'])
+                : '');
+        $occurrenceClause = $isMultipleIncidents
+            ? ''
+            : ($incidentDate
+                ? ' which occurred in Caraga Region on '.$incidentDate
+                : ' which occurred in Caraga Region');
+
+        return [
+            'opening' => $isReliefAugmentation
+                ? sprintf(
+                    'This is in reference to your letter requesting %s intended for the %s disaster-affected %s in %s due to %s%s%s.',
+                    $requestedGoodsTypes,
+                    number_format((int) ($request->affected_families ?? 0)),
+                    (int) ($request->affected_families ?? 0) === 1 ? 'family' : 'families',
+                    $locality,
+                    $incident,
+                    $occurrenceClause,
+                    $areaSummary
+                )
+                : 'This is in reference to your letter requesting Food and Non-Food Items for preparedness and response readiness.',
+            'assessment' => $provideAugmentation
+                ? sprintf(
+                    'After a thorough assessment conducted by %s, %s is eligible to be provided with the requested goods as augmentation assistance from our office. Hence, we will extend %s to the above-mentioned number of affected families.',
+                    $workerReference,
+                    $locality,
+                    $itemSummary ?: 'the approved Food and Non-Food Items'
+                )
+                : sprintf(
+                    'After a thorough assessment conducted by %s, the requested augmentation is not recommended at this time. The requesting party will be advised of any additional documentation or coordination required.',
+                    $workerReference
+                ),
+            'closing' => $provideAugmentation
+                ? 'With this, the Regional Resource Operations Section (RROS) personnel will prepare the Requisition and Issuance Slip (RIS) of the said items. The assigned social worker will immediately coordinate with the Local Social Welfare and Development Officer or Focal Person once the documents are prepared and the goods are ready for delivery and/or pick-up from your Local Government Unit Warehouse.'.$workerContactSentence
+                : 'The Disaster Response Management Division will coordinate with the requesting party regarding the assessment result and any succeeding action required.',
+        ];
+    }
+
+    /**
+     * Effective body paragraphs after applying saved overrides.
+     *
+     * @return array{
+     *     paragraphs: array{opening: string, assessment: string, closing: string},
+     *     defaults: array{opening: string, assessment: string, closing: string},
+     *     custom: array{opening: bool, assessment: bool, closing: bool},
+     *     is_custom: bool
+     * }
+     */
+    public function effectiveBodyParagraphs(AssistanceRequest $request): array
+    {
+        $defaults = $this->bodyParagraphs($request);
+        $overrides = (array) data_get($request->assessment_form_data, 'response_letter_body', []);
+        $paragraphs = [];
+        $custom = [];
+
+        foreach (['opening', 'assessment', 'closing'] as $key) {
+            $override = trim((string) ($overrides[$key] ?? ''));
+            $isCustom = $override !== '';
+            $custom[$key] = $isCustom;
+            $paragraphs[$key] = $isCustom ? $override : $defaults[$key];
+        }
+
+        return [
+            'paragraphs' => $paragraphs,
+            'defaults' => $defaults,
+            'custom' => $custom,
+            'is_custom' => in_array(true, $custom, true),
+        ];
+    }
+
     private function templatePath(): string
     {
         $profile = (string) ($_SERVER['USERPROFILE'] ?? getenv('USERPROFILE') ?: '');
         $configured = (string) config('services.response_documents.template');
+        // Prefer the repo template so a stray Downloads copy cannot silently
+        // deform the official 2-page letter layout.
         $candidates = array_filter([
             $configured,
-            $profile !== '' ? $profile.DIRECTORY_SEPARATOR.'Downloads'.DIRECTORY_SEPARATOR.'Response Letter.docx' : null,
             storage_path('app/templates/Response Letter.docx'),
+            $profile !== '' ? $profile.DIRECTORY_SEPARATOR.'Downloads'.DIRECTORY_SEPARATOR.'Response Letter.docx' : null,
         ]);
 
         foreach ($candidates as $candidate) {
@@ -588,6 +721,344 @@ class ResponseLetterDocumentService
         }
     }
 
+    /**
+     * @param  \Illuminate\Support\Collection<int, array<string, mixed>>  $incidentRows
+     */
+    private function formatMultipleIncidentsClause($incidentRows): string
+    {
+        $types = $incidentRows
+            ->map(fn (array $row) => $this->normalizeIncidentTypeLabel((string) ($row['incident_type'] ?? 'incident')))
+            ->filter()
+            ->unique()
+            ->values();
+        $sharedType = $types->count() === 1 ? $types->first() : null;
+
+        $parts = $incidentRows->values()->map(function (array $row, int $index) use ($sharedType): string {
+            $barangay = $this->formatBarangayLabel((string) ($row['barangay'] ?? ''));
+            $date = filled($row['occurrence_at'] ?? null)
+                ? $this->shortMonthDate(\Illuminate\Support\Str::substr((string) $row['occurrence_at'], 0, 10))
+                : '';
+            $label = $barangay !== '' ? $barangay : 'the affected area';
+            if ($sharedType === null) {
+                $type = $this->normalizeIncidentTypeLabel((string) ($row['incident_type'] ?? 'incident'));
+                $label .= $type !== '' ? ' ('.$type.')' : '';
+            }
+
+            return ($index + 1).') '.$label.($date !== '' ? ' on '.$date : '');
+        });
+
+        $last = $parts->pop();
+        $list = $parts->isEmpty() ? $last : $parts->implode('; ').'; and '.$last;
+
+        if ($sharedType !== null) {
+            return 'multiple separate '.$sharedType.' incidents in: '.$list;
+        }
+
+        return 'multiple separate incidents in: '.$list;
+    }
+
+    private function normalizeIncidentTypeLabel(string $type): string
+    {
+        $type = trim(mb_strtolower($type));
+        $type = preg_replace('/\s+incidents?$/i', '', $type) ?? $type;
+
+        return trim($type);
+    }
+
+    private function formatBarangayLabel(string $barangay): string
+    {
+        $barangay = trim($barangay);
+        if ($barangay === '') {
+            return '';
+        }
+        if (preg_match('/^(brgy\.?|barangay)\b/i', $barangay)) {
+            return preg_replace('/^(brgy\.?|barangay)\s*/i', 'Brgy. ', $barangay) ?: $barangay;
+        }
+
+        return 'Brgy. '.$barangay;
+    }
+
+    private function formatIncidentPhrase(array $row, bool $withDate = true): string
+    {
+        $type = trim((string) ($row['incident_type'] ?? 'incident'));
+        $barangay = $this->formatBarangayLabel((string) ($row['barangay'] ?? ''));
+        $place = $barangay !== ''
+            ? $barangay
+            : collect([$row['barangay'] ?? null, $row['city_municipality'] ?? null])->filter()->implode(', ');
+        $date = $withDate && filled($row['occurrence_at'] ?? null)
+            ? $this->shortMonthDate(\Illuminate\Support\Str::substr((string) $row['occurrence_at'], 0, 10))
+            : '';
+
+        return $type
+            .($place !== '' ? ' in '.$place : '')
+            .($date !== '' ? ' on '.$date : '');
+    }
+
+    private function resolveLetterDate(array $meta): \DateTimeInterface
+    {
+        foreach (['assessment_date', 'prepared_at'] as $key) {
+            $raw = $meta[$key] ?? null;
+            if (! filled($raw)) {
+                continue;
+            }
+            try {
+                return \Illuminate\Support\Carbon::parse((string) $raw)->startOfDay();
+            } catch (\Throwable) {
+                // Try the next fallback.
+            }
+        }
+
+        return now();
+    }
+
+    private function readableLetterDate(?\DateTimeInterface $date = null): string
+    {
+        // Letter date line — same calendar day as the Assessment Date when available.
+        return ($date ?? now())->format('F j, Y');
+    }
+
+    private function isLetterDateParagraph(string $text): bool
+    {
+        return preg_match(
+            '/^(?:[A-Z]+\s+\d{1,2},\s+\d{4}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{1,2},\s+\d{4})$/i',
+            $text
+        ) === 1;
+    }
+
+    private function shortMonthDate(?string $isoDate): string
+    {
+        if (! is_string($isoDate) || ! preg_match('/^(\d{4})-(\d{2})-(\d{2})/', $isoDate, $match)) {
+            return '';
+        }
+        $month = (int) $match[2];
+        $day = (int) $match[3];
+        $year = $match[1];
+        // Body/incident dates: 3-letter month; period when the full name is longer than 3 letters.
+        $months = [
+            1 => 'Jan.', 2 => 'Feb.', 3 => 'Mar.', 4 => 'Apr.',
+            5 => 'May', 6 => 'Jun.', 7 => 'Jul.', 8 => 'Aug.',
+            9 => 'Sep.', 10 => 'Oct.', 11 => 'Nov.', 12 => 'Dec.',
+        ];
+
+        return ($months[$month] ?? '').' '.$day.', '.$year;
+    }
+
+    private function shortMonthDateRange(?string $startIso, ?string $endIso = null): string
+    {
+        $start = $this->shortMonthDate($startIso);
+        if ($start === '') {
+            return '';
+        }
+        $end = $this->shortMonthDate($endIso ?: $startIso);
+        if ($end === '' || $end === $start) {
+            return $start;
+        }
+
+        return $start.' to '.$end;
+    }
+
+    /**
+     * Keep only the LGU-facing letter body as a single page.
+     * When the template contains two copies, discard the first (internal) copy and
+     * keep the second. Carry over the DRN line when the LGU copy omits it.
+     */
+    private function reduceToSingleLguPage(DOMDocument $document, DOMXPath $xpath): void
+    {
+        $body = $xpath->query('//w:body')->item(0);
+        if (! $body instanceof DOMElement) {
+            return;
+        }
+
+        $paragraphs = [];
+        foreach ($xpath->query('./w:p', $body) as $paragraph) {
+            if ($paragraph instanceof DOMElement) {
+                $paragraphs[] = $paragraph;
+            }
+        }
+        if ($paragraphs === []) {
+            return;
+        }
+
+        $dateIndexes = [];
+        $pageBreakIndex = null;
+        $drnParagraph = null;
+        foreach ($paragraphs as $index => $paragraph) {
+            $text = trim($this->paragraphText($xpath, $paragraph));
+            if ($this->isLetterDateParagraph($text)) {
+                $dateIndexes[] = $index;
+            }
+            if (
+                $pageBreakIndex === null
+                && $xpath->query('./w:pPr/w:pageBreakBefore|.//w:br[@w:type="page"]', $paragraph)->length > 0
+            ) {
+                $pageBreakIndex = $index;
+            }
+            if ($drnParagraph === null && (str_starts_with($text, 'DRN:') || $text === 'DRN:')) {
+                $drnParagraph = $paragraph;
+            }
+        }
+
+        $keepFrom = null;
+        if ($pageBreakIndex !== null) {
+            $keepFrom = $pageBreakIndex;
+        } elseif (count($dateIndexes) >= 2) {
+            $keepFrom = $dateIndexes[1];
+        }
+
+        if ($keepFrom === null || $keepFrom <= 0) {
+            foreach ($paragraphs as $paragraph) {
+                $this->clearPageBreakBefore($document, $xpath, $paragraph);
+            }
+
+            return;
+        }
+
+        $drnClone = null;
+        if ($drnParagraph instanceof DOMElement) {
+            $drnIndex = array_search($drnParagraph, $paragraphs, true);
+            if ($drnIndex !== false && $drnIndex < $keepFrom) {
+                $drnClone = $drnParagraph->cloneNode(true);
+            }
+        }
+
+        for ($index = 0; $index < $keepFrom; $index++) {
+            $paragraphs[$index]->parentNode?->removeChild($paragraphs[$index]);
+        }
+
+        $remaining = [];
+        foreach ($xpath->query('./w:p', $body) as $paragraph) {
+            if ($paragraph instanceof DOMElement) {
+                $remaining[] = $paragraph;
+                $this->clearPageBreakBefore($document, $xpath, $paragraph);
+            }
+        }
+
+        $hasDrn = false;
+        foreach ($remaining as $paragraph) {
+            $text = trim($this->paragraphText($xpath, $paragraph));
+            if (str_starts_with($text, 'DRN:') || $text === 'DRN:') {
+                $hasDrn = true;
+                break;
+            }
+        }
+
+        if (! $hasDrn && $drnClone instanceof DOMElement && ($remaining[0] ?? null) instanceof DOMElement) {
+            $insertAfter = $remaining[0];
+            if ($insertAfter->nextSibling) {
+                $body->insertBefore($drnClone, $insertAfter->nextSibling);
+            } else {
+                $body->appendChild($drnClone);
+            }
+            if ($drnClone instanceof DOMElement) {
+                $this->clearPageBreakBefore($document, $xpath, $drnClone);
+            }
+        }
+    }
+
+    private function clearPageBreakBefore(DOMDocument $document, DOMXPath $xpath, DOMElement $paragraph): void
+    {
+        foreach (iterator_to_array($xpath->query('./w:pPr/w:pageBreakBefore', $paragraph)) as $break) {
+            $break->parentNode?->removeChild($break);
+        }
+        foreach (iterator_to_array($xpath->query('.//w:br[@w:type="page"]', $paragraph)) as $break) {
+            $break->parentNode?->removeChild($break);
+        }
+    }
+
+    private function ensureCountersignaturePage(DOMDocument $document, DOMXPath $xpath): void
+    {
+        $body = $xpath->query('//w:body')->item(0);
+        if (! $body instanceof DOMElement) {
+            return;
+        }
+        if ($xpath->query('.//w:pPr/w:pageBreakBefore|.//w:br[@w:type="page"]', $body)->length > 0) {
+            return;
+        }
+
+        $paragraphs = [];
+        foreach ($xpath->query('./w:p', $body) as $paragraph) {
+            if ($paragraph instanceof DOMElement) {
+                $paragraphs[] = $paragraph;
+            }
+        }
+        if ($paragraphs === []) {
+            return;
+        }
+
+        $dateIndexes = [];
+        foreach ($paragraphs as $index => $paragraph) {
+            $text = trim($this->paragraphText($xpath, $paragraph));
+            if ($this->isLetterDateParagraph($text)) {
+                $dateIndexes[] = $index;
+            }
+        }
+        if (count($dateIndexes) >= 2) {
+            $secondDate = $paragraphs[$dateIndexes[1]] ?? null;
+            if ($secondDate instanceof DOMElement) {
+                $this->ensurePageBreakBefore($document, $xpath, $secondDate);
+            }
+
+            return;
+        }
+        if ($dateIndexes === []) {
+            return;
+        }
+
+        $dateIndex = $dateIndexes[0];
+        $respectIndex = null;
+        for ($index = $dateIndex; $index < count($paragraphs); $index++) {
+            if (trim($this->paragraphText($xpath, $paragraphs[$index])) === 'Respectfully yours,') {
+                $respectIndex = $index;
+                break;
+            }
+        }
+        if ($respectIndex === null) {
+            return;
+        }
+
+        // Page 2 repeats date through RD designation (name + title), omitting initials.
+        $signatureIndexes = [];
+        for ($index = $respectIndex + 1; $index < count($paragraphs); $index++) {
+            $text = trim($this->paragraphText($xpath, $paragraphs[$index]));
+            if ($text === '') {
+                continue;
+            }
+            $signatureIndexes[] = $index;
+            if (count($signatureIndexes) >= 2) {
+                break;
+            }
+        }
+        if (count($signatureIndexes) < 2) {
+            return;
+        }
+        $endIndex = $signatureIndexes[1];
+
+        $sectPr = $xpath->query('./w:sectPr', $body)->item(0);
+        $insertBefore = $sectPr instanceof DOMElement ? $sectPr : null;
+        $firstClone = null;
+        for ($index = $dateIndex; $index <= $endIndex; $index++) {
+            $text = trim($this->paragraphText($xpath, $paragraphs[$index]));
+            if ($text === '' && $index > $dateIndex) {
+                continue;
+            }
+            $clone = $paragraphs[$index]->cloneNode(true);
+            if (! $clone instanceof DOMElement) {
+                continue;
+            }
+            if ($firstClone === null) {
+                $firstClone = $clone;
+            }
+            if ($insertBefore instanceof DOMElement) {
+                $body->insertBefore($clone, $insertBefore);
+            } else {
+                $body->appendChild($clone);
+            }
+        }
+        if ($firstClone instanceof DOMElement) {
+            $this->ensurePageBreakBefore($document, $xpath, $firstClone);
+        }
+    }
+
     private function prependLineBreaks(DOMDocument $document, DOMElement $paragraph, int $count): void
     {
         $run = $document->createElementNS(self::WORD_NS, 'w:r');
@@ -611,7 +1082,7 @@ class ResponseLetterDocumentService
             if (! $paragraph instanceof DOMElement || trim($this->paragraphText($xpath, $paragraph)) !== '') {
                 continue;
             }
-            if ($xpath->query('.//w:drawing|.//w:pict|.//w:br[@w:type="page"]|./w:pPr/w:sectPr', $paragraph)->length > 0) {
+            if ($xpath->query('.//w:drawing|.//w:pict|.//w:br[@w:type="page"]|./w:pPr/w:pageBreakBefore|./w:pPr/w:sectPr', $paragraph)->length > 0) {
                 continue;
             }
             $paragraph->parentNode?->removeChild($paragraph);
@@ -690,20 +1161,34 @@ class ResponseLetterDocumentService
         if ($footer === false) {
             return;
         }
-        $document = new DOMDocument('1.0', 'UTF-8');
-        $document->preserveWhiteSpace = true;
-        $document->loadXML($footer);
-        $xpath = new DOMXPath($document);
-        $xpath->registerNamespace('w', self::WORD_NS);
-        foreach ($xpath->query('//w:p') as $paragraph) {
-            if ($paragraph instanceof DOMElement && str_starts_with(trim($this->paragraphText($xpath, $paragraph)), 'PAGE')) {
-                $this->replaceParagraph($document, $xpath, $paragraph, 'PAGE 1of 1');
+        $pageOneFooterDocument = new DOMDocument('1.0', 'UTF-8');
+        $pageOneFooterDocument->preserveWhiteSpace = true;
+        $pageOneFooterDocument->loadXML($footer);
+        $pageOneFooterXPath = new DOMXPath($pageOneFooterDocument);
+        $pageOneFooterXPath->registerNamespace('w', self::WORD_NS);
+        // Each sheet is a complete one-page letter copy (file + LGU), so both
+        // footers read PAGE 1 of 1 — not 1 of 2 / 2 of 2 across the packet.
+        foreach ($pageOneFooterXPath->query('//w:p') as $paragraph) {
+            if ($paragraph instanceof DOMElement && str_starts_with(trim($this->paragraphText($pageOneFooterXPath, $paragraph)), 'PAGE')) {
+                $this->replaceParagraph($pageOneFooterDocument, $pageOneFooterXPath, $paragraph, 'PAGE 1 of 1');
                 break;
             }
         }
-        $normalizedFooter = $document->saveXML();
-        $zip->addFromString('word/footer2.xml', $normalizedFooter);
-        $zip->addFromString('word/footer3.xml', $normalizedFooter);
+
+        $pageTwoFooterDocument = new DOMDocument('1.0', 'UTF-8');
+        $pageTwoFooterDocument->preserveWhiteSpace = true;
+        $pageTwoFooterDocument->loadXML($footer);
+        $pageTwoFooterXPath = new DOMXPath($pageTwoFooterDocument);
+        $pageTwoFooterXPath->registerNamespace('w', self::WORD_NS);
+        foreach ($pageTwoFooterXPath->query('//w:p') as $paragraph) {
+            if ($paragraph instanceof DOMElement && str_starts_with(trim($this->paragraphText($pageTwoFooterXPath, $paragraph)), 'PAGE')) {
+                $this->replaceParagraph($pageTwoFooterDocument, $pageTwoFooterXPath, $paragraph, 'PAGE 1 of 1');
+                break;
+            }
+        }
+
+        $zip->addFromString('word/footer3.xml', $pageOneFooterDocument->saveXML());
+        $zip->addFromString('word/footer2.xml', $pageTwoFooterDocument->saveXML());
     }
 
     private function rebuildHeaderLogoLayer(DOMDocument $document, DOMXPath $xpath): void

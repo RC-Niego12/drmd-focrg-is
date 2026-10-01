@@ -357,6 +357,15 @@ class SSOAuthService
         $response = null;
         foreach ($tokens->unique() as $token) {
             $response = $this->myPortalJsonRequest($token)->get($url, ['q' => trim($query)]);
+            Log::info('MyPortal employee search API response:', [
+                'status' => $response->status(),
+                'url' => $url,
+                'query' => $query,
+                'has_data' => is_array(data_get($response->json(), 'data')),
+                'result_count' => is_array($response->json())
+                    ? count($this->extractEmployeeRecords($response->json()))
+                    : 0,
+            ]);
             if ($response->ok() && is_array($response->json())) {
                 break;
             }
@@ -406,7 +415,9 @@ class SSOAuthService
             return $data;
         }
 
-        foreach (['data.data', 'employees', 'results', 'records'] as $key) {
+        // Connect returns either a bare list under data, or paginated shapes such as
+        // { status, data: { count, results: [...] } }.
+        foreach (['data.results', 'data.data', 'data.employees', 'employees', 'results', 'records'] as $key) {
             $records = data_get($payload, $key);
 
             if (is_array($records) && array_is_list($records)) {
@@ -414,7 +425,9 @@ class SSOAuthService
             }
         }
 
-        return is_array($data) ? [$data] : [];
+        return is_array($data) && ! array_is_list($data) && filled(data_get($data, 'id_number') ?? data_get($data, 'fullname'))
+            ? [$data]
+            : [];
     }
 
     public function profileMatchesIdentity(array $profile, array $identity): bool

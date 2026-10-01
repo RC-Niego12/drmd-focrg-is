@@ -88,7 +88,7 @@ it('lets Super Admin open admin and operational workspaces', function (): void {
 
     // Gate::before already grants Super Admin every can(); role_or_permission still
     // keeps routes open if that bypass were removed.
-    foreach (['/access-management', '/standby-funds', '/dromic', '/inventory', '/warehouses'] as $path) {
+    foreach (['/access-management', '/standby-funds', '/dromic', '/preparedness-for-response', '/inventory', '/warehouses'] as $path) {
         $this->actingAs($user)
             ->get($path)
             ->assertOk();

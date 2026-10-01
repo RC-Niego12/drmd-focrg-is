@@ -18,6 +18,7 @@ class DispatchPlanItem extends Model
         'allocated_quantity',
         'loaded_quantity',
         'received_quantity',
+        'unit_cost',
         'variance_disposition',
         'variance_resolution',
         'return_condition',
@@ -34,6 +35,7 @@ class DispatchPlanItem extends Model
             'allocated_quantity' => 'integer',
             'loaded_quantity' => 'integer',
             'received_quantity' => 'integer',
+            'unit_cost' => 'decimal:2',
             'return_received_at' => 'datetime',
         ];
     }

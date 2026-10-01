@@ -164,6 +164,7 @@ it('prefers the official microservice document-routing handoff for Route after P
         'status' => 'under_review',
         'assessment_status' => 'draft',
         'assessment_acted_by' => $pdrc->id,
+        'assessment_drn' => 'FOCARAGA-DRMD-AS-26-08-0002',
         'response_drn' => 'FOCARAGA-DRMD-RL-26-08-0002',
         'endorsed_to_drrs' => true,
     ]);
@@ -235,6 +236,7 @@ it('blocks continue from re-opening document-routing after a successful handoff'
         'status' => 'under_review',
         'assessment_status' => 'draft',
         'assessment_acted_by' => $pdrc->id,
+        'assessment_drn' => 'FOCARAGA-DRMD-AS-26-08-0010',
         'response_drn' => 'FOCARAGA-DRMD-RL-26-08-0010',
         'endorsed_to_drrs' => true,
     ]);
@@ -441,7 +443,7 @@ it('surfaces invalid secret errors instead of locally signing assessments', func
         ->and($fresh->epirma_aa_status)->toBe('pending');
 });
 
-it('sets aa_status pending when both assessment and response letter routes are cancelled', function (): void {
+it('returns the assessment to DRRS PDRC when both assessment and response letter routes are cancelled', function (): void {
     $this->seed(DatabaseSeeder::class);
 
     $pdrc = User::where('email', 'drrs@example.test')->firstOrFail();
@@ -489,8 +491,132 @@ it('sets aa_status pending when both assessment and response letter routes are c
     ]);
 
     $status = app(EpirmaDocumentStatusService::class)->refreshAaStatus($record);
-    expect($status)->toBe('pending')
-        ->and($record->fresh()->epirma_aa_status)->toBe('pending');
+    $fresh = $record->fresh();
+    expect($status)->toBe('')
+        ->and($fresh->epirma_forwarded_to_drrs_aa_at)->toBeNull()
+        ->and($fresh->epirma_forwarded_by)->toBeNull()
+        ->and($fresh->epirma_aa_status)->toBeNull();
+
+    $caps = app(\App\Services\EpirmaWorkflowService::class)->capabilitiesFor($fresh, $pdrc);
+    expect($caps['forwarded'])->toBeFalse()
+        ->and($caps['read_only'])->toBeFalse()
+        ->and($caps['forward']['can_forward'])->toBeTrue();
+});
+
+it('returns the assessment to DRRS PDRC when only a cancelled response route remains', function (): void {
+    $this->seed(DatabaseSeeder::class);
+
+    $pdrc = User::where('email', 'drrs@example.test')->firstOrFail();
+    $aa = User::where('email', 'drrs-aa@example.test')->firstOrFail();
+    $record = AssistanceRequest::create([
+        'reference_number' => 'REQ-EPIRMA-RESPONSE-CANCELLED-ONLY',
+        'requesting_agency' => 'Test Proposing Party',
+        'requester' => 'Test Requester',
+        'date_requested' => '2026-07-15',
+        'status' => 'under_review',
+        'assessment_status' => 'draft',
+        'assessment_acted_by' => $pdrc->id,
+        'response_drn' => 'FOCARAGA-DRMD-RL-26-08-0200B',
+        'endorsed_to_drrs' => true,
+        'epirma_forwarded_to_drrs_aa_at' => now(),
+        'epirma_forwarded_by' => $pdrc->id,
+        'epirma_aa_status' => 'in_progress',
+    ]);
+
+    EpirmaSignedDocument::create([
+        'assistance_request_id' => $record->id,
+        'document_type' => 'response_letter',
+        'action' => 'route',
+        'document_uuid' => 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1',
+        'document_name' => 'response-letter.pdf',
+        'document_path' => 'epirma_signed_documents/only-rl-cancel.pdf',
+        'routing_status' => 'cancelled',
+        'routed_at' => now()->subMinutes(10),
+        'handoff' => 'document_routing',
+        'initiated_by' => $aa->id,
+        'timestamp' => now()->subMinutes(10),
+    ]);
+
+    app(EpirmaDocumentStatusService::class)->refreshAaStatus($record);
+    $fresh = $record->fresh();
+
+    expect($fresh->epirma_forwarded_to_drrs_aa_at)->toBeNull()
+        ->and($fresh->epirma_aa_status)->toBeNull();
+
+    $this->actingAs($pdrc)
+        ->get("/requests/{$fresh->id}/assessment-form")
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('Requests/AssessmentForm')
+            ->where('canEditResponseLetterBody', true)
+            ->where('epirma.forwarded', false)
+            ->where('epirma.read_only', false)
+        );
+
+    $this->actingAs($pdrc)
+        ->patch("/requests/{$fresh->id}/response-letter-body", [
+            'opening' => 'Custom opening after cancel revert.',
+        ])
+        ->assertRedirect();
+
+    expect(data_get($fresh->fresh()->assessment_form_data, 'response_letter_body.opening'))
+        ->toBe('Custom opening after cancel revert.');
+});
+
+it('keeps the forward handoff when an open e-PIRMA route still exists after a cancel', function (): void {
+    $this->seed(DatabaseSeeder::class);
+
+    $pdrc = User::where('email', 'drrs@example.test')->firstOrFail();
+    $aa = User::where('email', 'drrs-aa@example.test')->firstOrFail();
+    $record = AssistanceRequest::create([
+        'reference_number' => 'REQ-EPIRMA-PARTIAL-CANCEL',
+        'requesting_agency' => 'Test Proposing Party',
+        'requester' => 'Test Requester',
+        'date_requested' => '2026-07-15',
+        'status' => 'under_review',
+        'assessment_status' => 'draft',
+        'assessment_acted_by' => $pdrc->id,
+        'response_drn' => 'FOCARAGA-DRMD-RL-26-08-0200C',
+        'assessment_drn' => 'FOCARAGA-DRMD-AS-26-08-0200C',
+        'endorsed_to_drrs' => true,
+        'epirma_forwarded_to_drrs_aa_at' => now(),
+        'epirma_forwarded_by' => $pdrc->id,
+        'epirma_aa_status' => 'in_progress',
+    ]);
+
+    EpirmaSignedDocument::create([
+        'assistance_request_id' => $record->id,
+        'document_type' => 'assessment',
+        'action' => 'route',
+        'document_uuid' => 'cccccccc-cccc-cccc-cccc-ccccccccccc1',
+        'document_name' => 'assessment.pdf',
+        'document_path' => 'epirma_signed_documents/partial-a.pdf',
+        'routing_status' => 'routed',
+        'routed_at' => now()->subMinutes(20),
+        'handoff' => 'document_routing',
+        'initiated_by' => $aa->id,
+        'timestamp' => now()->subMinutes(20),
+    ]);
+    EpirmaSignedDocument::create([
+        'assistance_request_id' => $record->id,
+        'document_type' => 'response_letter',
+        'action' => 'route',
+        'document_uuid' => 'cccccccc-cccc-cccc-cccc-ccccccccccc2',
+        'document_name' => 'response-letter.pdf',
+        'document_path' => 'epirma_signed_documents/partial-rl.pdf',
+        'routing_status' => 'cancelled',
+        'routed_at' => now()->subMinutes(10),
+        'handoff' => 'document_routing',
+        'initiated_by' => $aa->id,
+        'timestamp' => now()->subMinutes(10),
+    ]);
+
+    $status = app(EpirmaDocumentStatusService::class)->refreshAaStatus($record);
+    $fresh = $record->fresh();
+
+    expect($status)->toBe('in_progress')
+        ->and($fresh->epirma_forwarded_to_drrs_aa_at)->not->toBeNull()
+        ->and($fresh->epirma_aa_status)->toBe('in_progress');
 });
 
 it('rejects route when employee id_number is missing and does not bump aa_status', function (): void {
@@ -507,6 +633,7 @@ it('rejects route when employee id_number is missing and does not bump aa_status
         'status' => 'under_review',
         'assessment_status' => 'draft',
         'assessment_acted_by' => $pdrc->id,
+        'assessment_drn' => 'FOCARAGA-DRMD-AS-26-08-0201',
         'response_drn' => 'FOCARAGA-DRMD-RL-26-08-0201',
         'endorsed_to_drrs' => true,
         'epirma_forwarded_to_drrs_aa_at' => now(),
@@ -547,6 +674,7 @@ it('keeps aa_status pending when e-PIRMA reports user not found on re-route', fu
         'status' => 'under_review',
         'assessment_status' => 'draft',
         'assessment_acted_by' => $pdrc->id,
+        'assessment_drn' => 'FOCARAGA-DRMD-AS-26-08-0202',
         'response_drn' => 'FOCARAGA-DRMD-RL-26-08-0202',
         'endorsed_to_drrs' => true,
         'epirma_forwarded_to_drrs_aa_at' => now(),
@@ -727,6 +855,7 @@ it('lists historical e-PIRMA documents for a request and keeps draft on routing 
         'status' => 'under_review',
         'assessment_status' => 'draft',
         'assessment_acted_by' => $pdrc->id,
+        'assessment_drn' => 'FOCARAGA-DRMD-AS-26-08-0004',
         'response_drn' => 'FOCARAGA-DRMD-RL-26-08-0004',
         'endorsed_to_drrs' => true,
     ]);
@@ -854,7 +983,7 @@ it('keeps preparedness forms free of pseudo-disasters and narrative signature pl
         ->and($html)->toContain('July 15, 2026');
 });
 
-it('marks cancelled e-PIRMA routes as re-routable and broadcasts status changes', function (): void {
+it('marks cancelled e-PIRMA routes as returned to DRRS PDRC and broadcasts status changes', function (): void {
     $this->seed(DatabaseSeeder::class);
     config([
         'realtime.enabled' => true,
@@ -926,14 +1055,21 @@ it('marks cancelled e-PIRMA routes as re-routable and broadcasts status changes'
 
     expect($document->fresh()->routing_status)->toBe('cancelled')
         ->and($record->fresh()->assessment_status)->toBe('draft')
-        ->and($record->fresh()->epirma_aa_status)->toBe('pending');
+        ->and($record->fresh()->epirma_forwarded_to_drrs_aa_at)->toBeNull()
+        ->and($record->fresh()->epirma_aa_status)->toBeNull();
 
     $caps = app(EpirmaWorkflowService::class)->capabilitiesFor($record->fresh(), $aa);
-    expect($caps['assessment']['can_route'])->toBeTrue()
+    expect($caps['forwarded'])->toBeFalse()
+        ->and($caps['assessment']['can_route'])->toBeFalse()
+        ->and($caps['assessment']['route_blocked_reason'])->toContain('forward')
         ->and($caps['assessment']['can_continue'])->toBeFalse()
         ->and($caps['assessment']['handoff_complete'])->toBeFalse()
         ->and($caps['assessment']['is_in_epirma'])->toBeFalse()
         ->and($caps['assessment']['is_signed'])->toBeFalse();
+
+    $pdrcCaps = app(EpirmaWorkflowService::class)->capabilitiesFor($record->fresh(), $pdrc);
+    expect($pdrcCaps['forward']['can_forward'])->toBeTrue()
+        ->and($pdrcCaps['read_only'])->toBeFalse();
 
     Http::assertSent(fn ($request): bool => $request->url() === 'http://127.0.0.1:6002/publish'
         && $request['event'] === 'epirma.status.changed'
@@ -941,7 +1077,54 @@ it('marks cancelled e-PIRMA routes as re-routable and broadcasts status changes'
         && ($request['payload']['request_id'] ?? null) === $record->id);
 });
 
-it('syncs cancelled remote status and keeps cancelled docs from blocking re-route', function (): void {
+it('keeps a re-forward after cancelled e-PIRMA routes instead of silently reverting', function (): void {
+    $this->seed(DatabaseSeeder::class);
+
+    $pdrc = User::where('email', 'drrs@example.test')->firstOrFail();
+    $aa = User::where('email', 'drrs-aa@example.test')->firstOrFail();
+    $record = AssistanceRequest::create([
+        'reference_number' => 'REQ-EPIRMA-REFORWARD',
+        'requesting_agency' => 'Test Proposing Party',
+        'requester' => 'Test Requester',
+        'date_requested' => '2026-07-15',
+        'status' => 'under_review',
+        'assessment_status' => 'draft',
+        'assessment_acted_by' => $pdrc->id,
+        'response_drn' => 'FOCARAGA-DRMD-RL-26-08-0200',
+        'endorsed_to_drrs' => true,
+    ]);
+
+    EpirmaSignedDocument::create([
+        'assistance_request_id' => $record->id,
+        'document_type' => 'assessment',
+        'action' => 'route',
+        'document_uuid' => 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+        'document_name' => 'assessment.pdf',
+        'document_path' => 'epirma_signed_documents/assessment-reforward.pdf',
+        'routing_status' => 'cancelled',
+        'completed_at' => now()->subMinutes(5),
+        'handoff' => 'document_routing',
+        'initiated_by' => $aa->id,
+        'timestamp' => now()->subMinutes(5),
+    ]);
+
+    $this->actingAs($pdrc)
+        ->postJson(route('requests.epirma.forward', $record))
+        ->assertOk()
+        ->assertJsonPath('success', true)
+        ->assertJsonPath('epirma.forwarded', true);
+
+    $fresh = $record->fresh();
+    expect($fresh->epirma_forwarded_to_drrs_aa_at)->not->toBeNull()
+        ->and($fresh->epirma_aa_status)->toBe('pending');
+
+    $caps = app(EpirmaWorkflowService::class)->capabilitiesFor($fresh, $pdrc);
+    expect($caps['forwarded'])->toBeTrue()
+        ->and($caps['forward']['can_forward'])->toBeFalse()
+        ->and($record->fresh()->epirma_forwarded_to_drrs_aa_at)->not->toBeNull();
+});
+
+it('syncs cancelled remote status and returns the handoff to DRRS PDRC', function (): void {
     $this->seed(DatabaseSeeder::class);
     config([
         'realtime.enabled' => true,
@@ -998,13 +1181,16 @@ it('syncs cancelled remote status and keeps cancelled docs from blocking re-rout
     $result = app(EpirmaDocumentStatusService::class)->syncDocument($document, false);
     expect($result['success'])->toBeTrue()
         ->and($document->fresh()->routing_status)->toBe('cancelled')
-        ->and($record->fresh()->epirma_aa_status)->toBe('pending');
+        ->and($record->fresh()->epirma_forwarded_to_drrs_aa_at)->toBeNull()
+        ->and($record->fresh()->epirma_aa_status)->toBeNull();
 
     $caps = app(EpirmaWorkflowService::class)->capabilitiesFor($record->fresh(), $aa);
-    expect($caps['assessment']['can_route'])->toBeTrue()
+    expect($caps['forwarded'])->toBeFalse()
+        ->and($caps['assessment']['can_route'])->toBeFalse()
+        ->and($caps['assessment']['route_blocked_reason'])->toContain('forward')
         ->and($caps['assessment']['handoff_complete'])->toBeFalse()
         ->and($caps['assessment']['is_in_epirma'])->toBeFalse()
-        // Track history omits cancelled/failed; capabilities still allow re-route.
+        // Track history omits cancelled/failed.
         ->and($caps['documents'])->toHaveCount(0);
 
     $this->actingAs($aa)
@@ -1027,15 +1213,14 @@ it('syncs cancelled remote status and keeps cancelled docs from blocking re-rout
     app(EpirmaDocumentStatusService::class)->syncDocument($document->fresh(), false);
     expect($document->fresh()->routing_status)->toBe('cancelled');
 
-    // Recent cancels are still soft-synced for false-cancel recovery (not Track listing).
+    // Soft-sync after revert still leaves the route cancelled and unforwarded.
     $this->actingAs($aa)
         ->postJson(route('drrs-aa.epirma.sync-open'), ['ids' => [$record->id]])
         ->assertOk()
-        ->assertJsonPath('success', true)
-        ->assertJsonPath('synced', 1);
+        ->assertJsonPath('success', true);
 
     expect($document->fresh()->routing_status)->toBe('cancelled')
-        ->and($caps['assessment']['can_route'])->toBeTrue();
+        ->and($record->fresh()->epirma_forwarded_to_drrs_aa_at)->toBeNull();
 });
 
 it('marks routed docs cancelled after repeated latest-document-base-path not found', function (): void {
@@ -1108,10 +1293,12 @@ it('marks routed docs cancelled after repeated latest-document-base-path not fou
     expect($third['success'])->toBeTrue()
         ->and($third['cancelled_via'] ?? null)->toBe('remote_not_found')
         ->and($document->fresh()->routing_status)->toBe('cancelled')
-        ->and($record->fresh()->epirma_aa_status)->toBe('pending');
+        ->and($record->fresh()->epirma_forwarded_to_drrs_aa_at)->toBeNull()
+        ->and($record->fresh()->epirma_aa_status)->toBeNull();
 
     $caps = app(EpirmaWorkflowService::class)->capabilitiesFor($record->fresh(), $aa);
-    expect($caps['assessment']['can_route'])->toBeTrue()
+    expect($caps['forwarded'])->toBeFalse()
+        ->and($caps['assessment']['can_route'])->toBeFalse()
         ->and($caps['assessment']['is_in_epirma'])->toBeFalse();
 
     Http::assertSent(fn ($request): bool => $request->url() === 'http://127.0.0.1:6002/publish'
@@ -1353,7 +1540,7 @@ it('locks assessment edits and reopen after forward to DRRS AA', function (): vo
             'month' => '08',
             'specified' => '0301',
         ])
-        ->assertStatus(422);
+        ->assertForbidden();
 
     expect($record->fresh()->response_drn)->toBe('FOCARAGA-DRMD-RL-26-08-0300');
 });

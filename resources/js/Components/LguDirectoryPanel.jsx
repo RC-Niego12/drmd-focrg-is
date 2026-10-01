@@ -407,6 +407,7 @@ export default function LguDirectoryPanel({
       {viewing && (
         <DirectoryProfileModal
           row={viewing}
+          isSuperAdmin={isSuperAdmin}
           onClose={() => setViewing(null)}
         />
       )}
@@ -523,7 +524,7 @@ function ProfileSection({ title, photo, name, fields, children }) {
   );
 }
 
-function DirectoryProfileModal({ row, onClose }) {
+function DirectoryProfileModal({ row, isSuperAdmin = false, onClose }) {
   const lce = official(row, "lce");
   const lswd = official(row, "lswd_officer");
   const legacyLswdAlternate = official(row, "lswd_officer_alternate");

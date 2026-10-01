@@ -41,8 +41,11 @@ export default defineConfig(({ command, mode }) => {
                 origin: [
                     /^https?:\/\/localhost(?::\d+)?$/,
                     /^https?:\/\/127\.0\.0\.1(?::\d+)?$/,
+                    /^https?:\/\/10(?:\.\d{1,3}){3}(?::\d+)?$/,
+                    /^https?:\/\/192\.168(?:\.\d{1,3}){2}(?::\d+)?$/,
+                    /^https?:\/\/172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}(?::\d+)?$/,
                     /^https?:\/\/drmd-focrg-is\.test(?::\d+)?$/,
-                    /^https?:\/\/desktop-lj8f734(?::\d+)?$/i,
+                    /^https?:\/\/desktop-lj8f734(?:\.lan)?(?::\d+)?$/i,
                 ],
                 credentials: true,
             },
@@ -65,6 +68,12 @@ export default defineConfig(({ command, mode }) => {
             alias: {
                 '@': path.resolve('./resources/js'),
             },
+        },
+        build: {
+            // Keep the last complete manifest and hashed assets available while
+            // Vite compiles their replacements. This prevents transient Laravel
+            // 500 responses when a report is opened during a local/watch build.
+            emptyOutDir: false,
         },
     };
 });

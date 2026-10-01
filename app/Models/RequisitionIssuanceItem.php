@@ -7,12 +7,13 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class RequisitionIssuanceItem extends Model
 {
-    protected $fillable = ['request_item_id', 'warehouse_id', 'unit', 'item_name', 'brand_description', 'expiry', 'quantity', 'warehouse_name', 'warehouse_type', 'allocation_guide', 'wit_stock_balance', 'remaining_balance', 'allocation_status', 'remarks', 'source_row_number'];
+    protected $fillable = ['request_item_id', 'warehouse_id', 'unit', 'item_name', 'brand_description', 'expiry', 'quantity', 'unit_cost', 'warehouse_name', 'warehouse_type', 'allocation_guide', 'wit_stock_balance', 'remaining_balance', 'allocation_status', 'remarks', 'source_row_number'];
 
     protected function casts(): array
     {
         return [
             'quantity' => 'integer',
+            'unit_cost' => 'decimal:2',
             'allocation_guide' => 'integer',
             // Stock balances may be fractional in WIT; UI truncates for display.
             'wit_stock_balance' => 'decimal:2',

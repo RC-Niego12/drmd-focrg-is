@@ -111,11 +111,11 @@ export default function AlertAcknowledgements({ alerts = [], selectedAlert, reci
             <Head title="Regional Alert Acknowledgment Monitor" />
             <div className="space-y-6 print:space-y-3">
                 <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-                    <div className="grid gap-5 bg-gradient-to-r from-slate-950 via-blue-950 to-brand-800 p-6 text-white lg:grid-cols-[1fr_auto] lg:items-center">
+                    <div className="grid gap-5 bg-gradient-to-br from-slate-950 via-slate-900 to-teal-950 p-6 text-white lg:grid-cols-[1fr_auto] lg:items-center">
                         <div>
-                            <p className="text-xs font-black uppercase tracking-[.22em] text-blue-200">OCD Caraga and DSWD Consolidated Monitoring</p>
+                            <p className="text-xs font-black uppercase tracking-[.22em] text-cyan-200">OCD Caraga and DSWD Consolidated Monitoring</p>
                             <h1 className="mt-2 text-3xl font-black">Regional Alert Acknowledgment Board</h1>
-                            <p className="mt-2 max-w-3xl text-sm leading-6 text-blue-100">Live accountability list of LGUs and DSWD DRMD/QRT personnel who received and explicitly acknowledged the selected regional alert.</p>
+                            <p className="mt-2 max-w-3xl text-sm leading-6 text-cyan-100">Live accountability list of LGUs and DSWD DRMD/QRT personnel who received and explicitly acknowledged the selected regional alert.</p>
                         </div>
                         <RadioTower className="h-16 w-16 text-blue-200" />
                     </div>

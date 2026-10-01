@@ -21,6 +21,7 @@ class OperationalLibraryValue extends Model
         'program_activity_type' => 'Program / Activity Type',
         'incident_type' => 'Disaster / Incident Type',
         'drrs_signatory' => 'DRRS Signatories',
+        'drims_signatory' => 'DRIMS Signatories',
         'rros_ris_signatory' => 'RROS RIS Signatories',
         'rros_dr_signatory' => 'RROS DR Signatories',
         'rros_stf_signatory' => 'RROS STF Signatories',
@@ -143,7 +144,7 @@ class OperationalLibraryValue extends Model
 
     public static function signatoryLibraryTypes(): array
     {
-        return ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory'];
+        return ['drrs_signatory', 'drims_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory'];
     }
 
     public static function normalizeSignatoryEmployeeKey(mixed $name): string

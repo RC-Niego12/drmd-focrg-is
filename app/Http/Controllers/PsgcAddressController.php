@@ -7,6 +7,7 @@ use App\Models\SystemSetting;
 use App\Models\User;
 use App\Services\AuditLogger;
 use App\Services\PsgcDistrictService;
+use App\Services\PsgcPopulationAreaCrossmatchService;
 use App\Services\PsgcSyncService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -72,6 +73,9 @@ class PsgcAddressController extends Controller
             'barangays' => $barangayCodes->count(),
         ];
 
+        $populationCrossmatch = app(PsgcPopulationAreaCrossmatchService::class)
+            ->build($provinces, $citiesMunicipalities);
+
         return Inertia::render('PsgcAddresses/Index', [
             'metrics' => $metrics,
             'regions' => PsgcAddress::query()
@@ -83,6 +87,7 @@ class PsgcAddressController extends Controller
             'provinces' => $provinces,
             'districts' => $districts,
             'citiesMunicipalities' => $citiesMunicipalities,
+            'populationCrossmatch' => $populationCrossmatch,
             'settings' => [
                 'field_office_label' => SystemSetting::getValue('field_office_label', 'DSWD Field Office Caraga'),
             ],
@@ -141,7 +146,11 @@ class PsgcAddressController extends Controller
             return back()->with('error', $exception->getMessage() ?: 'District reference sheet sync failed.');
         }
 
-        return back()->with('success', "District reference synced: {$summary['created']} created, {$summary['updated']} updated, {$summary['assigned_cities']} city/municipality assignments updated, {$summary['skipped']} skipped.");
+        $warehouseNote = isset($summary['warehouses_updated'])
+            ? ", {$summary['warehouses_updated']} warehouse districts shortened"
+            : '';
+
+        return back()->with('success', "District reference synced: {$summary['created']} created, {$summary['updated']} updated, {$summary['assigned_cities']} city/municipality assignments updated, {$summary['skipped']} skipped{$warehouseNote}.");
     }
 
     public function storeDistrict(Request $request, PsgcDistrictService $districtService, AuditLogger $audit): RedirectResponse
@@ -206,12 +215,14 @@ class PsgcAddressController extends Controller
                 'district' => $district->short_name,
             ]);
 
+        $districtService->normalizeWarehouseDistricts();
+
         $audit->log('psgc_district.updated', $district, $old, $district->fresh()->toArray());
 
         return back()->with('success', 'District option updated.');
     }
 
-    public function assignCityDistrict(Request $request, PsgcAddress $city, AuditLogger $audit): RedirectResponse
+    public function assignCityDistrict(Request $request, PsgcAddress $city, AuditLogger $audit, PsgcDistrictService $districtService): RedirectResponse
     {
         abort_unless($this->canManagePsgcAddresses($request->user()), 403);
         abort_unless($city->level === 'city_municipality', 404);
@@ -234,6 +245,7 @@ class PsgcAddressController extends Controller
             'district_code' => $district->code,
             'district' => $district->short_name ?: $district->name,
         ]);
+        $districtService->normalizeWarehouseDistricts();
         $audit->log('psgc_city.district_assigned', $city, $old, $city->fresh()->toArray());
 
         return back()->with('success', 'City/Municipality district assignment updated.');

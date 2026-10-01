@@ -1,0 +1,49 @@
+{
+    "name": "DROMIS - Disaster Response Operations",
+    "short_name": "DROMIS",
+    "description": "DSWD Field Office Caraga disaster response operations, inventory, requests, dispatch, and coordination system.",
+    "id": "/",
+    "start_url": "/login?source=pwa",
+    "scope": "/",
+    "display": "standalone",
+    "display_override": ["standalone", "minimal-ui"],
+    "orientation": "any",
+    "background_color": "#f8fafc",
+    "theme_color": "#0f766e",
+    "categories": ["productivity", "government", "utilities"],
+    "prefer_related_applications": false,
+    "icons": [
+        {
+            "src": "/images/pwa-icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "any"
+        },
+        {
+            "src": "/images/pwa-icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any"
+        },
+        {
+            "src": "/images/pwa-icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable"
+        }
+    ],
+    "shortcuts": [
+        {
+            "name": "Open Dashboard",
+            "short_name": "Dashboard",
+            "url": "/?source=pwa",
+            "icons": [{ "src": "/images/pwa-icon-192.png", "sizes": "192x192", "type": "image/png" }]
+        },
+        {
+            "name": "LGU Login",
+            "short_name": "LGU Login",
+            "url": "/login-lgu?source=pwa",
+            "icons": [{ "src": "/images/pwa-icon-192.png", "sizes": "192x192", "type": "image/png" }]
+        }
+    ]
+}

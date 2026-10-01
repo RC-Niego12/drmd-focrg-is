@@ -56,7 +56,12 @@ class HandleInertiaRequests extends Middleware
                     'avatar_source' => $user->avatar,
                     'sso_profile' => $user->sso_profile_payload,
                     'identity_profile' => $identityProfile,
-                    'lgu_profile' => $lguProfile,
+                    'lgu_profile' => $lguProfile
+                        ? [
+                            ...$lguProfile,
+                            ...$user->lguProfileEditCapabilities(),
+                        ]
+                        : null,
                     'agency_profile' => $user->hasRole('OCD Caraga')
                         ? $user->agencyProfile?->append('logo_url')
                         : null,
@@ -76,6 +81,7 @@ class HandleInertiaRequests extends Middleware
                     'lgu_psgc_code' => $user->lgu_psgc_code,
                     'lgu_level' => $user->lgu_level,
                     'lgu_name' => $user->lgu_name,
+                    'lgu_directory_role' => $user->lgu_directory_role,
                     'aor_provinces' => $user->aor_provinces ?? [],
                     'aor_districts' => $user->aor_districts ?? [],
                     'aor_cities_municipalities' => $user->aor_cities_municipalities ?? [],
@@ -86,8 +92,12 @@ class HandleInertiaRequests extends Middleware
             'flash' => [
                 'success' => fn () => $request->session()->get('success'),
                 'error' => fn () => $request->session()->get('error'),
+                'lgu_issued_credentials' => fn () => $request->session()->get('lgu_issued_credentials'),
                 'preview_report_id' => fn () => $request->session()->get('preview_report_id'),
+                'preview_mode' => fn () => $request->session()->get('preview_mode'),
                 'correction_draft_id' => fn () => $request->session()->get('correction_draft_id'),
+                'reopen_draft_id' => fn () => $request->session()->get('reopen_draft_id'),
+                'reopen_draft_mode' => fn () => $request->session()->get('reopen_draft_mode'),
             ],
             'activeRegion' => [
                 'code' => $activeRegion?->code ?? '1600000000',
@@ -143,14 +153,14 @@ class HandleInertiaRequests extends Middleware
 
         if ($user->lgu_psgc_code) {
             $directory = LguDirectoryEntry::query()
-                ->with(['officials', 'contacts', 'ldrrmoOfficers', 'lswdoAlternates'])
+                ->with(['officials', 'contacts', 'ldrrmoOfficers', 'lswdoAlternates', 'staffMembers'])
                 ->where('psgc_code', $user->lgu_psgc_code)
                 ->first();
         }
 
         if (! $directory && $user->lgu_name) {
             $directory = LguDirectoryEntry::query()
-                ->with(['officials', 'contacts', 'ldrrmoOfficers', 'lswdoAlternates'])
+                ->with(['officials', 'contacts', 'ldrrmoOfficers', 'lswdoAlternates', 'staffMembers'])
                 ->where(function ($query) use ($user): void {
                     $query->where('lgu_name', $user->lgu_name)
                         ->orWhere('override_lgu_name', $user->lgu_name);
@@ -196,6 +206,9 @@ class HandleInertiaRequests extends Middleware
                     $official->role => [
                         'name' => $official->override_name ?: $official->name,
                         'position' => $official->override_position_designation ?: $official->position_designation,
+                        'id_number' => filled($official->id_number) ? $official->id_number : null,
+                        'login_username' => $official->login_username,
+                        'user_id' => $official->user_id,
                         'email' => $ownerContacts['email'] ?? null,
                         'alternate_email' => $ownerContacts['alternate_email'] ?? null,
                         'phone' => $ownerContacts['phone'] ?? $ownerContacts['contact'] ?? null,
@@ -217,6 +230,21 @@ class HandleInertiaRequests extends Middleware
             ];
         }
 
+        $staffByType = $directory?->staffMembers
+            ->groupBy('staff_type')
+            ->map(fn ($group) => $group->map(fn ($member) => $member->only([
+                'id',
+                'office',
+                'name',
+                'position',
+                'id_number',
+                'contact_number',
+                'email',
+                'login_username',
+                'user_id',
+            ]))->values()->all())
+            ->all() ?? [];
+
         $contacts = $directory?->contacts
             ->map(fn ($contact) => [
                 'owner_role' => $contact->owner_role,
@@ -232,11 +260,23 @@ class HandleInertiaRequests extends Middleware
         $provinceName = $this->provinceNameForDirectory($directory, $user->lgu_psgc_code ?: $directory?->psgc_code);
         $logoUrl = $directory?->logo_url;
 
+        $linkedPersonnel = app(\App\Services\LguPersonnelAccountService::class)->findLinkedPersonnel($user);
+        $personnelPhotoUrl = null;
+        if ($directory && is_array($linkedPersonnel)) {
+            $personnelPhotoUrl = match ((string) ($linkedPersonnel['role'] ?? '')) {
+                'lce' => $directory->lce_photo_url,
+                'lswd_officer', 'lswd_officer_alternate' => $directory->lswd_photo_url,
+                'ldrrmo', 'ldrrmo_alternate' => $directory->ldrrmo_photo_url,
+                default => null,
+            };
+        }
+
         return [
             'name' => $directory?->override_lgu_name ?: $directory?->lgu_name ?: $user->lgu_name ?: $user->area_of_assignment ?: $user->name,
             'level' => $directory?->lgu_level ?: $this->normalizeLguLevel($user->lgu_level) ?: 'LGU',
             'psgc_code' => $user->lgu_psgc_code ?: $directory?->psgc_code,
             'logo_url' => $logoUrl,
+            'personnel_photo_url' => $personnelPhotoUrl,
             'ldrrmc_logo_url' => $directory?->ldrrmc_logo_url,
             'lce_photo_url' => $directory?->lce_photo_url,
             'lswd_photo_url' => $directory?->lswd_photo_url,
@@ -257,9 +297,19 @@ class HandleInertiaRequests extends Middleware
             'source_seen_at' => $directory?->source_seen_at?->toISOString(),
             'officials' => $officials,
             'lswdo_alternates' => $directory?->lswdoAlternates
-                ->map(fn ($alternate) => $alternate->only(['id', 'name', 'position', 'contact_number']))
+                ->map(fn ($alternate) => $alternate->only(['id', 'name', 'position', 'contact_number', 'id_number', 'email', 'login_username', 'user_id']))
                 ->values()
                 ->all() ?? [],
+            'dromic_encoders' => $staffByType['dromic_encoder'] ?? [],
+            'warehouse_focals' => $staffByType['warehouse_focal'] ?? [],
+            'warehouse_storekeepers' => $staffByType['warehouse_storekeeper'] ?? [],
+            'drivers' => $staffByType['driver'] ?? [],
+            'linkable_personnel' => $directory
+                ? app(\App\Services\LguPersonnelAccountService::class)->linkablePersonnelForDirectory($directory)
+                : [],
+            'has_warehouses' => $directory
+                ? app(\App\Services\LguWarehousePersonnelSyncService::class)->directoryHasWarehouses($directory)
+                : false,
             'ldrrmo' => [
                 'name' => $directory?->ldrrmoOfficers->firstWhere('is_primary', true)?->name ?: $directory?->ldrrmo_name,
                 'position' => $directory?->ldrrmoOfficers->firstWhere('is_primary', true)?->designation ?: $directory?->ldrrmo_position,
@@ -267,6 +317,9 @@ class HandleInertiaRequests extends Middleware
                 'email' => $directory?->ldrrmoOfficers->firstWhere('is_primary', true)?->email_address ?: $directory?->ldrrmo_email,
                 'facebook' => $directory?->ldrrmoOfficers->firstWhere('is_primary', true)?->facebook,
                 'vhf' => $directory?->ldrrmoOfficers->firstWhere('is_primary', true)?->vhf_radio_frequency,
+                'id_number' => $directory?->ldrrmoOfficers->firstWhere('is_primary', true)?->id_number,
+                'login_username' => $directory?->ldrrmoOfficers->firstWhere('is_primary', true)?->login_username,
+                'user_id' => $directory?->ldrrmoOfficers->firstWhere('is_primary', true)?->user_id,
                 'photo_url' => $directory?->ldrrmo_photo_url,
                 'officers' => $directory?->ldrrmoOfficers
                     ->map(fn ($officer) => $officer->only([
@@ -275,6 +328,7 @@ class HandleInertiaRequests extends Middleware
                         'office',
                         'name',
                         'designation',
+                        'id_number',
                         'mobile_number',
                         'hotline_number',
                         'landline_number',
@@ -282,6 +336,8 @@ class HandleInertiaRequests extends Middleware
                         'alternate_email_address',
                         'vhf_radio_frequency',
                         'facebook',
+                        'login_username',
+                        'user_id',
                     ]))
                     ->values()
                     ->all() ?? [],

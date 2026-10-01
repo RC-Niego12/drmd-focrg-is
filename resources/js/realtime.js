@@ -59,13 +59,16 @@ const resolveSocketUrl = (configuredUrl) => {
         }
     }
 
-    // Same-origin without an explicit Socket.IO port means the browser hits Herd/Apache
-    // /socket.io and gets 502 when the gateway is not proxied. Prefer :6001.
+    // Prefer the configured Socket.IO gateway port (:6001). Herd/Codex may serve the
+    // HTTPS app on another host port (e.g. :6081); that must not become the Socket.IO port.
+    const configuredPort = String(parsedUrl.port || '');
     const defaultHttpPort = window.location.protocol === 'https:' ? '443' : '80';
     const pagePort = window.location.port || defaultHttpPort;
-    const socketPort = parsedUrl.port || defaultHttpPort;
-    if (parsedUrl.hostname.toLowerCase() === pageHost && (socketPort === defaultHttpPort || socketPort === pagePort)) {
-        parsedUrl.port = '6001';
+    const gatewayPorts = new Set(['6001', '6002']);
+    if (parsedUrl.hostname.toLowerCase() === pageHost) {
+        if (!gatewayPorts.has(configuredPort) || configuredPort === pagePort || configuredPort === defaultHttpPort || configuredPort === '') {
+            parsedUrl.port = '6001';
+        }
     }
 
     return parsedUrl.toString();

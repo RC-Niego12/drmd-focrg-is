@@ -1,11 +1,12 @@
 import { Head, Link, useForm } from '@inertiajs/react';
-import { Camera, Eye, FileCheck2, FilePlus2, Hash, Images, Pencil, Trash2, UploadCloud, X } from 'lucide-react';
+import { Camera, ChevronDown, ChevronUp, Eye, FileCheck2, FilePlus2, Hash, Images, Maximize2, Minimize2, Pencil, Trash2, UploadCloud, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import AppLayout, { Card, DataTable } from '@/Layouts/AppLayout';
 import SearchableSelect from '@/Components/SearchableSelect';
 import { formatDate } from '@/Utils/dateFormat';
 import DrmdAaRequestWorkspaceTabs from '@/Components/DrmdAaRequestWorkspaceTabs';
 import SectionTabs from '@/Components/SectionTabs';
+import SupportingDromicSitrepPanel from '@/Components/SupportingDromicSitrepPanel';
 
 export default function Upload({ requestParties = [], defaultReceivedAt, transactions, submissionType = 'fni_request' }) {
     const isProposal = submissionType === 'proposal';
@@ -247,10 +248,14 @@ function DocumentPreviewModal({ row, tab, setTab, onClose }) {
     const source = row.source_lgu_dromic_report;
     const isLguRequest = Boolean(source);
     const photos = row.drmd_aa_photo_paths ?? [];
-    const src = isLguRequest
-        ? tab === 'report'
-            ? `/lgu/dromic-sitrep/${source.id}/signed-copy/report#toolbar=0&navpanes=0`
-            : `/lgu/dromic-sitrep/${source.id}/signed-copy/request#toolbar=0&navpanes=0`
+    const linkedIncidentReports = Array.isArray(row.linked_incident_reports) && row.linked_incident_reports.length > 0
+        ? row.linked_incident_reports
+        : (Array.isArray(source?.linked_incident_reports) ? source.linked_incident_reports : []);
+    const sourceIsStandaloneLump = Boolean(source?.lgu_dromic_payload?.standalone_relief_request)
+        || (Array.isArray(source?.lgu_dromic_payload?.linked_incident_series_keys) && source.lgu_dromic_payload.linked_incident_series_keys.length > 0);
+    const sitrepFallback = source && !sourceIsStandaloneLump ? source : null;
+    const requestSrc = isLguRequest
+        ? `/lgu/dromic-sitrep/${source.id}/signed-copy/request#toolbar=0&navpanes=0`
         : `/requests/${row.id}/source-document`;
     const tabs = [
         ...(isLguRequest ? [
@@ -263,22 +268,70 @@ function DocumentPreviewModal({ row, tab, setTab, onClose }) {
             { id: 'photos', label: `Captured Photos (${photos.length})`, icon: Images },
         ] : []),
     ];
+    const [controlsCollapsed, setControlsCollapsed] = useState(false);
+    const [wideDocumentView, setWideDocumentView] = useState(false);
+    const enterWideDocumentView = () => {
+        setWideDocumentView(true);
+        setControlsCollapsed(true);
+    };
+    const exitWideDocumentView = () => {
+        setWideDocumentView(false);
+        setControlsCollapsed(false);
+    };
+    const viewingLabel = tab === 'photos'
+        ? 'Captured Photos'
+        : tab === 'report'
+            ? 'Supporting DROMIC / SitRep'
+            : (isLguRequest ? 'Request Letter' : 'Uploaded Document');
 
     return (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm">
-            <div role="dialog" aria-modal="true" aria-label="Request document preview" className="flex h-[92vh] w-[96vw] max-w-[1500px] flex-col overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-900">
-                <div className="flex items-start justify-between border-b p-4">
-                    <div><p className="text-xs font-black uppercase tracking-wide text-emerald-700">Request document preview</p><h2 className="mt-1 font-black">{source?.lgu_relief_request_reference || row.reference_number}</h2></div>
-                    <button type="button" onClick={onClose} className="dromis-tip rounded-md border p-2" data-tip="Close preview" data-tip-side="bottom" aria-label="Close preview"><X className="h-4 w-4" /></button>
+        <div className={`fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/65 backdrop-blur-sm ${wideDocumentView ? 'p-0' : 'p-2 sm:p-4'}`}>
+            <div role="dialog" aria-modal="true" aria-label="Request document preview" className={`relative flex flex-col overflow-hidden bg-white shadow-2xl dark:bg-zinc-900 ${wideDocumentView ? 'h-screen w-screen max-w-none rounded-none' : 'h-[96vh] w-[98vw] max-w-[1700px] rounded-xl'}`}>
+                <div className={`flex items-start justify-between border-b ${wideDocumentView ? 'px-4 py-3' : 'p-4'}`}>
+                    <div className="min-w-0">
+                        <p className="text-xs font-black uppercase tracking-wide text-emerald-700">Request document preview</p>
+                        <h2 className={`mt-1 font-black ${wideDocumentView ? 'truncate text-lg' : ''}`}>{source?.lgu_relief_request_reference || row.reference_number}</h2>
+                    </div>
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                        <button type="button" title={controlsCollapsed ? 'Show document controls' : 'Hide document tabs for more viewing space'} aria-label={controlsCollapsed ? 'Show document controls' : 'Hide document controls'} onClick={() => setControlsCollapsed((value) => !value)} className="rounded-md border p-2">
+                            {controlsCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+                        </button>
+                        <button type="button" title={wideDocumentView ? 'Restore normal preview size' : 'Widen document view — use the full screen'} aria-label={wideDocumentView ? 'Restore normal preview size' : 'Widen document view'} onClick={() => (wideDocumentView ? exitWideDocumentView() : enterWideDocumentView())} className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs font-black uppercase tracking-wide ${wideDocumentView ? 'border-slate-300 bg-white text-slate-700' : 'border-violet-300 bg-violet-50 text-violet-800'}`}>
+                            {wideDocumentView ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                            {wideDocumentView ? 'Exit wide' : 'Widen view'}
+                        </button>
+                        <button type="button" onClick={onClose} className="dromis-tip rounded-md border p-2" data-tip="Close preview" data-tip-side="bottom" aria-label="Close preview"><X className="h-4 w-4" /></button>
+                    </div>
                 </div>
-                {tabs.length > 1 && <div className="border-b bg-white p-3 dark:bg-zinc-900">
+                {tabs.length > 1 && !controlsCollapsed && <div className="border-b bg-white p-3 dark:bg-zinc-900">
                     <SectionTabs appearance="plain" value={tab} onChange={setTab} ariaLabel="Request documents" tabs={tabs} />
                 </div>}
+                {controlsCollapsed && (
+                    <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-white px-3 py-2 dark:bg-zinc-900">
+                        <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Viewing</p>
+                        <p className="text-xs font-semibold text-slate-700">{viewingLabel}</p>
+                        <button type="button" onClick={() => setControlsCollapsed(false)} className="ml-auto text-xs font-black uppercase tracking-wide text-emerald-700 hover:underline">Switch document</button>
+                    </div>
+                )}
                 {tab === 'photos'
                     ? <div className="grid min-h-0 flex-1 auto-rows-max grid-cols-1 gap-4 overflow-y-auto bg-slate-100 p-5 sm:grid-cols-2 lg:grid-cols-3">
                         {photos.map((path, index) => <figure key={`${path}-${index}`} className="overflow-hidden rounded-lg border bg-white shadow-sm"><img src={`/requests/${row.id}/drmd-aa-photo/${index}`} alt={`Captured supporting evidence ${index + 1}`} className="h-64 w-full object-contain bg-slate-900" /><figcaption className="px-3 py-2 text-xs font-bold text-slate-600">Supporting photo {index + 1}</figcaption></figure>)}
                     </div>
-                    : <iframe key={src} title={isLguRequest && tab === 'report' ? 'Supporting DROMIC report' : 'Request document'} src={src} className="min-h-0 w-full flex-1 bg-slate-100" />}
+                    : isLguRequest && tab === 'report'
+                        ? <SupportingDromicSitrepPanel
+                            reports={linkedIncidentReports}
+                            fallbackReport={sitrepFallback}
+                            showCopyTabs={!controlsCollapsed}
+                            defaultCopyTab="advance"
+                            hideSelectors={controlsCollapsed}
+                        />
+                        : <iframe key={requestSrc} title="Request document" src={requestSrc} className="min-h-0 w-full flex-1 bg-slate-100" />}
+                {wideDocumentView && (
+                    <button type="button" onClick={exitWideDocumentView} className="absolute bottom-4 right-4 z-10 inline-flex items-center gap-1.5 rounded-md border border-violet-300 bg-violet-700 px-3 py-2 text-xs font-black uppercase tracking-wide text-white shadow-lg hover:bg-violet-800" title="Exit wide view" aria-label="Exit wide view">
+                        <Minimize2 className="h-4 w-4" />
+                        Exit wide
+                    </button>
+                )}
             </div>
         </div>
     );

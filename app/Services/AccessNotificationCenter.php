@@ -153,18 +153,41 @@ class AccessNotificationCenter
         }
 
         $parts = parse_url($value);
-        $appParts = parse_url((string) config('app.url'));
-        if (! is_array($parts)
-            || ! is_array($appParts)
-            || strcasecmp((string) ($parts['host'] ?? ''), (string) ($appParts['host'] ?? '')) !== 0) {
+        if (! is_array($parts) || blank($parts['path'] ?? null)) {
             return null;
         }
 
         $path = '/'.ltrim((string) ($parts['path'] ?? ''), '/');
         $query = filled($parts['query'] ?? null) ? '?'.$parts['query'] : '';
         $fragment = filled($parts['fragment'] ?? null) ? '#'.$parts['fragment'] : '';
+        $appParts = parse_url((string) config('app.url'));
+        $hostsMatch = is_array($appParts)
+            && strcasecmp((string) ($parts['host'] ?? ''), (string) ($appParts['host'] ?? '')) === 0;
+
+        // Keep absolute app URLs clickable when the browser host differs from
+        // APP_URL (Herd LAN names, custom local domains, etc.).
+        if (! $hostsMatch && ! $this->looksLikeInternalAppPath($path)) {
+            return null;
+        }
 
         return $path.$query.$fragment;
+    }
+
+    private function looksLikeInternalAppPath(string $path): bool
+    {
+        $known = [
+            '/dispatches', '/delivery-monitoring', '/delivery-escort', '/lgu/',
+            '/requests', '/dromic', '/drmd-', '/rros/', '/notifications',
+            '/access-management', '/dashboard', '/alert-acknowledgments', '/ocd/',
+        ];
+
+        foreach ($known as $prefix) {
+            if ($path === rtrim($prefix, '/') || str_starts_with($path, $prefix)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function notificationHasBeenActed(array $data): bool

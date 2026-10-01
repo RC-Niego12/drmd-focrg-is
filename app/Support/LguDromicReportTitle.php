@@ -9,6 +9,16 @@ final class LguDromicReportTitle
     public static function make(AssistanceRequest $report): string
     {
         $payload = (array) ($report->lgu_dromic_payload ?? []);
+        if ((bool) data_get($payload, 'standalone_relief_request')) {
+            $incidentType = trim((string) data_get($payload, 'incident_type', 'Disaster Incident'));
+            $linkedCount = count((array) data_get($payload, 'linked_incident_series_keys', []));
+            $scope = $linkedCount > 1
+                ? "covering {$linkedCount} {$incidentType} incidents"
+                : "for {$incidentType}";
+
+            return "LGU Consolidated Relief Augmentation Request {$scope}";
+        }
+
         $number = $report->lgu_dromic_report_number ?: data_get($payload, 'report_number', 1);
         $classification = $report->lgu_dromic_report_classification ?: data_get($payload, 'report_classification', 'regular');
         $label = match ($classification) {

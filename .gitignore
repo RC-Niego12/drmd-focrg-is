@@ -2,6 +2,8 @@
 /node_modules
 /public/build
 /public/hot
+/public/storage
+/public/downloads
 /.env
 /.phpunit.cache
 /storage/*.key
@@ -11,7 +13,19 @@
 /storage/framework/sessions/*
 /storage/framework/views/*
 /storage/logs/*
+/storage/app/geo
+/storage/app/chrome-*
+/storage/app/generated-documents
+/database/*.sqlite*
+/database/database-before-*
+/database/database.before-*
+/database/backups
+/.codex-dashboard-captures
+/.cursor
+/ENV
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .DS_Store
+tmp-*.png
+Pasted Image*

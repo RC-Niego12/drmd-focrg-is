@@ -145,8 +145,12 @@ it('persists one assessment with multiple reconciled incident occurrences', func
     $payload['affected_families'] = 5;
     $payload['assessment_form_data']['affected_persons'] = 20;
     $payload['assessment_form_data']['incidents'] = [
-        ['incident_type' => 'Fire Incident', 'occurrence_at' => '2026-08-01', 'barangay' => 'Marga', 'affected_families' => 2, 'affected_persons' => 8],
-        ['incident_type' => 'Fire Incident', 'occurrence_at' => '2026-08-09', 'barangay' => 'San Pablo', 'affected_families' => 3, 'affected_persons' => 12],
+        ['incident_type' => 'Fire Incident', 'occurrence_at' => '2026-08-01', 'barangay' => 'Marga', 'affected_families' => 2, 'affected_persons' => 8, 'source_reference' => 'LGU-FIRE-MARGA'],
+        ['incident_type' => 'Fire Incident', 'occurrence_at' => '2026-08-09', 'barangay' => 'San Pablo', 'affected_families' => 3, 'affected_persons' => 12, 'source_reference' => 'LGU-FIRE-SAN-PABLO'],
+    ];
+    $payload['assessment_form_data']['incident_fni_allocations'] = [
+        ['incident_key' => 'LGU-FIRE-MARGA', 'source_reference' => 'LGU-FIRE-MARGA', 'incident_type' => 'Fire Incident', 'barangay' => 'Marga', 'items' => [['item_key' => (string) $fniItem->id, 'fni_library_item_id' => $fniItem->id, 'item_name' => 'Family Food Pack', 'quantity' => 20]]],
+        ['incident_key' => 'LGU-FIRE-SAN-PABLO', 'source_reference' => 'LGU-FIRE-SAN-PABLO', 'incident_type' => 'Fire Incident', 'barangay' => 'San Pablo', 'items' => [['item_key' => (string) $fniItem->id, 'fni_library_item_id' => $fniItem->id, 'item_name' => 'Family Food Pack', 'quantity' => 30]]],
     ];
 
     $this->actingAs($drrs)->patch("/requests/{$record->id}/complete-assessment", $payload)
@@ -158,22 +162,32 @@ it('persists one assessment with multiple reconciled incident occurrences', func
         ->and($saved->affected_families)->toBe(5);
 });
 
-it('rejects a multi-incident assessment whose population does not reconcile', function (): void {
+it('allows a multi-incident assessment when worksheet totals differ from silent incident population fields', function (): void {
     $this->seed(DatabaseSeeder::class);
     $drrs = User::where('email', 'drrs@example.test')->firstOrFail();
     $drrs->forceFill(['position' => 'Social Welfare Officer II'])->save();
-    $party = RequestParty::create(['directory_key' => 'multi-incident-invalid-party', 'requesting_party' => 'Municipality of Tubod', 'source' => 'test', 'is_active' => true]);
+    $party = RequestParty::create(['directory_key' => 'multi-incident-totals-party', 'requesting_party' => 'Municipality of Tubod', 'source' => 'test', 'is_active' => true]);
     $fniItem = FniLibraryItem::query()->create(['item_category' => 'Food', 'item_name' => 'Family Food Pack', 'brand_description' => 'Standard', 'unit_of_measure' => 'pack', 'is_active' => true]);
-    $record = AssistanceRequest::create(['reference_number' => 'REQ-MULTI-INVALID', 'request_party_id' => $party->id, 'requesting_agency' => 'Municipality of Tubod', 'requester' => 'CSWDO', 'date_requested' => '2026-08-10', 'date_received_by_drmd' => '2026-08-10', 'status' => 'endorsed', 'endorsed_to_drrs' => true, 'submission_type' => 'fni_request']);
+    app()->instance(InventoryBalanceService::class, tap(Mockery::mock(InventoryBalanceService::class), fn ($mock) => $mock->shouldReceive('availableTotalsByItem')->once()->andReturn(collect(['familyfoodpack' => 100]))));
+    $record = AssistanceRequest::create(['reference_number' => 'REQ-MULTI-TOTALS', 'request_party_id' => $party->id, 'requesting_agency' => 'Municipality of Tubod', 'requester' => 'CSWDO', 'date_requested' => '2026-08-10', 'date_received_by_drmd' => '2026-08-10', 'status' => 'endorsed', 'endorsed_to_drrs' => true, 'submission_type' => 'fni_request']);
     $payload = drrsCompleteAssessmentPayload($record, $fniItem, $drrs, $party->id);
     $payload['affected_families'] = 10;
+    $payload['assessment_form_data']['affected_persons'] = 40;
     $payload['assessment_form_data']['incidents'] = [
-        ['incident_type' => 'Fire Incident', 'occurrence_at' => '2026-08-01', 'barangay' => 'Marga', 'affected_families' => 2, 'affected_persons' => 40],
+        ['incident_type' => 'Fire Incident', 'occurrence_at' => '2026-08-01', 'barangay' => 'Marga', 'affected_families' => 2, 'affected_persons' => 0, 'source_reference' => 'LGU-FIRE-MARGA'],
+        ['incident_type' => 'Fire Incident', 'occurrence_at' => '2026-08-09', 'barangay' => 'San Pablo', 'affected_families' => 3, 'affected_persons' => '', 'source_reference' => 'LGU-FIRE-SAN-PABLO'],
+    ];
+    $payload['assessment_form_data']['incident_fni_allocations'] = [
+        ['incident_key' => 'LGU-FIRE-MARGA', 'source_reference' => 'LGU-FIRE-MARGA', 'items' => [['item_key' => (string) $fniItem->id, 'fni_library_item_id' => $fniItem->id, 'item_name' => 'Family Food Pack', 'quantity' => 20]]],
+        ['incident_key' => 'LGU-FIRE-SAN-PABLO', 'source_reference' => 'LGU-FIRE-SAN-PABLO', 'items' => [['item_key' => (string) $fniItem->id, 'fni_library_item_id' => $fniItem->id, 'item_name' => 'Family Food Pack', 'quantity' => 30]]],
     ];
 
     $this->actingAs($drrs)->patch("/requests/{$record->id}/complete-assessment", $payload)
-        ->assertSessionHasErrors('assessment_form_data.incidents');
-    expect($record->fresh()->assessment_status)->toBeNull();
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    expect($record->fresh()->affected_families)->toBe(10)
+        ->and(data_get($record->fresh()->assessment_form_data, 'affected_persons'))->toBe(40);
 });
 
 it('blocks a DRRS assessment when requested stock is unavailable', function (): void {

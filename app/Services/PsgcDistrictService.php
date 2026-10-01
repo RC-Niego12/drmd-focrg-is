@@ -34,7 +34,7 @@ class PsgcDistrictService
             return null;
         }
 
-        $shortDistrict = $this->shortDistrictName($provinceName, $districtName);
+        $shortDistrict = $this->toShortName($provinceName, $districtName);
         $district = PsgcAddress::updateOrCreate(
             ['code' => $this->districtCode($province->code, $shortDistrict)],
             [
@@ -116,7 +116,7 @@ class PsgcDistrictService
                 continue;
             }
 
-            $shortDistrict = $this->shortDistrictName($provinceName, $districtName);
+            $shortDistrict = $this->toShortName($provinceName, $districtName);
             $district = PsgcAddress::updateOrCreate(
                 ['code' => $this->districtCode($province->code, $shortDistrict)],
                 [
@@ -162,12 +162,15 @@ class PsgcDistrictService
 
         fclose($handle);
 
+        $warehouseDistricts = $this->normalizeWarehouseDistricts();
+
         return [
             'created' => $created,
             'updated' => $updated,
             'assigned_cities' => $assignedCities,
             'skipped' => $skipped,
             'source' => $csvUrl,
+            'warehouses_updated' => $warehouseDistricts['updated'],
         ];
     }
 
@@ -178,41 +181,49 @@ class PsgcDistrictService
         $skipped = 0;
         $assignedCities = 0;
 
+        $this->normalizeWarehouseDistricts();
+
         $provinceCodes = PsgcAddress::query()
             ->where('level', 'province')
             ->where('is_active', true)
             ->get(['code', 'name'])
-            ->keyBy(fn (PsgcAddress $province): string => $this->normalize($province->name));
+            ->keyBy(fn (PsgcAddress $province): string => $this->normalizeProvince($province->name));
 
         $districtRows = Warehouse::query()
             ->whereNotNull('province')
             ->whereNotNull('district')
-            ->get(['province', 'district'])
+            ->get(['province', 'district', 'municipality'])
             ->map(fn (Warehouse $warehouse): array => [
                 'province' => trim((string) $warehouse->province),
-                'district' => trim((string) $warehouse->district),
+                'district' => $this->resolveForLocality(
+                    (string) $warehouse->province,
+                    (string) $warehouse->district,
+                    (string) $warehouse->municipality,
+                ) ?: trim((string) $warehouse->district),
             ])
             ->filter(fn (array $row): bool => $row['province'] !== '' && $row['district'] !== '' && $row['district'] !== '-')
             ->unique(fn (array $row): string => $this->normalize($row['province']).'|'.$this->normalize($row['district']))
             ->values();
 
         foreach ($districtRows as $row) {
-            $province = $provinceCodes[$this->normalize($row['province'])] ?? null;
+            $province = $provinceCodes[$this->normalizeProvince($row['province'])] ?? null;
 
             if (! $province) {
                 $skipped++;
                 continue;
             }
 
+            $shortDistrict = $this->toShortName($row['province'], $row['district']);
+
             $district = PsgcAddress::updateOrCreate(
-                ['code' => $this->districtCode($province->code, $row['district'])],
+                ['code' => $this->districtCode($province->code, $shortDistrict)],
                 [
                     'parent_code' => $province->code,
                     'level' => 'district',
-                    'name' => $row['district'],
-                    'short_name' => $row['district'],
+                    'name' => $shortDistrict,
+                    'short_name' => $shortDistrict,
                     'type' => 'Warehouse District',
-                    'district' => $row['district'],
+                    'district' => $shortDistrict,
                     'source' => 'warehouse database',
                     'source_version' => 'Current warehouse district values',
                     'synced_at' => now(),
@@ -241,7 +252,7 @@ class PsgcDistrictService
             ->whereNotNull('municipality')
             ->get(['province', 'district', 'municipality'])
             ->each(function (Warehouse $warehouse) use ($provinceCodes, $districts, $cities, &$assignedCities): void {
-                $province = $provinceCodes[$this->normalize((string) $warehouse->province)] ?? null;
+                $province = $provinceCodes[$this->normalizeProvince((string) $warehouse->province)] ?? null;
 
                 if (! $province) {
                     return;
@@ -285,30 +296,113 @@ class PsgcDistrictService
         return 'D'.substr(md5($provinceCode.'|'.$this->normalize($district)), 0, 19);
     }
 
-    private function normalize(string $value): string
+    /**
+     * Resolve the managed short district label (ADS1, Lone ADN, …) for a warehouse locality.
+     * Prefers the city/municipality assignment from psgc_addresses when available.
+     */
+    public function resolveForLocality(?string $province, ?string $district, ?string $municipality = null): ?string
     {
-        return (string) Str::of($value)->lower()->replaceMatches('/[^a-z0-9]+/', '')->trim();
+        $province = trim((string) $province);
+        $district = trim((string) $district);
+        $municipality = trim((string) $municipality);
+
+        if ($province === '' && $district === '' && $municipality === '') {
+            return null;
+        }
+
+        if ($province !== '' && $municipality !== '' && $municipality !== 'Unspecified') {
+            $provinceRow = PsgcAddress::query()
+                ->where('level', 'province')
+                ->where('is_active', true)
+                ->get(['code', 'name'])
+                ->first(fn (PsgcAddress $row): bool => $this->normalizeProvince($row->name) === $this->normalizeProvince($province));
+
+            if ($provinceRow) {
+                $city = PsgcAddress::query()
+                    ->where('level', 'city_municipality')
+                    ->where('is_active', true)
+                    ->where(fn ($query) => $query->where('parent_code', $provinceRow->code)
+                        ->when($provinceRow->code === '1600200000', fn ($query) => $query->orWhere('code', '1630400000')))
+                    ->get(['district', 'district_code', 'name'])
+                    ->first(fn (PsgcAddress $row): bool => $this->sameLocalityName($row->name, $municipality));
+
+                if ($city) {
+                    if (filled($city->district_code)) {
+                        $managed = PsgcAddress::query()
+                            ->where('level', 'district')
+                            ->where('code', $city->district_code)
+                            ->first(['name', 'short_name']);
+
+                        if ($managed) {
+                            return $managed->short_name ?: $managed->name;
+                        }
+                    }
+
+                    if (filled($city->district)) {
+                        return (string) $city->district;
+                    }
+                }
+            }
+        }
+
+        if ($district === '' || $district === '-') {
+            return $district === '-' ? '-' : null;
+        }
+
+        $short = $this->toShortName($province, $district);
+        $managed = $this->managedDistrictNamesForProvince($province);
+
+        if ($managed->isEmpty()) {
+            return $short !== '' ? $short : null;
+        }
+
+        return $managed->first(
+            fn (string $name): bool => $this->same($name, $short) || $this->same($name, $district)
+        );
     }
 
-    private function normalizeProvince(string $value): string
+    /**
+     * Rewrite warehouses.district to the managed short labels used by PSGC district options.
+     */
+    public function normalizeWarehouseDistricts(): array
     {
-        return $this->normalize((string) Str::of($value)->replaceMatches('/^province\s+of\s+/i', ''));
+        $updated = 0;
+        $unchanged = 0;
+
+        Warehouse::query()
+            ->where(fn ($query) => $query->whereNotNull('district')->orWhereNotNull('municipality'))
+            ->get(['id', 'province', 'district', 'municipality'])
+            ->each(function (Warehouse $warehouse) use (&$updated, &$unchanged): void {
+                $resolved = $this->resolveForLocality(
+                    (string) $warehouse->province,
+                    (string) $warehouse->district,
+                    (string) $warehouse->municipality,
+                );
+
+                if ($resolved === null || $resolved === trim((string) $warehouse->district)) {
+                    $unchanged++;
+
+                    return;
+                }
+
+                $warehouse->update(['district' => $resolved]);
+                $updated++;
+            });
+
+        return [
+            'updated' => $updated,
+            'unchanged' => $unchanged,
+        ];
     }
 
-    private function provinceAliases(string $province): \Illuminate\Support\Collection
-    {
-        $normalized = $this->normalizeProvince($province);
-
-        return collect([
-            $normalized,
-            $this->normalize('Province of '.$province),
-        ])->unique()->values();
-    }
-
-    private function shortDistrictName(string $province, string $district): string
+    public function toShortName(string $province, string $district): string
     {
         $province = $this->normalizeProvince($province);
         $district = $this->normalize($district);
+
+        if ($district === '' || $district === '-') {
+            return $district === '-' ? '-' : '';
+        }
 
         if ($province === 'agusandelnorte' && str_contains($district, 'butuan')) {
             return 'Lone Butuan City';
@@ -329,11 +423,64 @@ class PsgcDistrictService
             default => '',
         };
 
-        if ($prefix !== '' && preg_match('/district([0-9]+)/', $district, $match)) {
-            return $prefix.$match[1];
+        if ($prefix !== '') {
+            if (preg_match('/district([0-9]+)/', $district, $match)) {
+                return $prefix.$match[1];
+            }
+
+            if (preg_match('/([0-9]+)(?:st|nd|rd|th)/', $district, $match)) {
+                return $prefix.$match[1];
+            }
+
+            if (preg_match('/^(?:ads|sdn|sds)([0-9]+)$/', $district, $match)) {
+                return $prefix.$match[1];
+            }
         }
 
         return (string) Str::of($district)->replaceMatches('/([a-z])([0-9])/', '$1 $2')->title();
+    }
+
+    private function managedDistrictNamesForProvince(string $province): \Illuminate\Support\Collection
+    {
+        $provinceRow = PsgcAddress::query()
+            ->where('level', 'province')
+            ->where('is_active', true)
+            ->get(['code', 'name'])
+            ->first(fn (PsgcAddress $row): bool => $this->normalizeProvince($row->name) === $this->normalizeProvince($province));
+
+        if (! $provinceRow) {
+            return collect();
+        }
+
+        return PsgcAddress::query()
+            ->where('level', 'district')
+            ->where('is_active', true)
+            ->where('parent_code', $provinceRow->code)
+            ->get(['name', 'short_name'])
+            ->map(fn (PsgcAddress $row): string => (string) ($row->short_name ?: $row->name))
+            ->filter()
+            ->unique()
+            ->values();
+    }
+
+    private function normalize(string $value): string
+    {
+        return (string) Str::of($value)->lower()->replaceMatches('/[^a-z0-9]+/', '')->trim();
+    }
+
+    private function normalizeProvince(string $value): string
+    {
+        return $this->normalize((string) Str::of($value)->replaceMatches('/^province\s+of\s+/i', ''));
+    }
+
+    private function provinceAliases(string $province): \Illuminate\Support\Collection
+    {
+        $normalized = $this->normalizeProvince($province);
+
+        return collect([
+            $normalized,
+            $this->normalize('Province of '.$province),
+        ])->unique()->values();
     }
 
     private function same(?string $left, ?string $right): bool
@@ -345,18 +492,31 @@ class PsgcDistrictService
     {
         $left = preg_replace('/\([^)]*\)/', '', $left) ?? $left;
         $right = preg_replace('/\([^)]*\)/', '', $right) ?? $right;
-        $left = $this->normalize($left);
-        $right = $this->normalize($right);
 
-        if ($left === $right) {
-            return true;
-        }
+        $aliases = function (string $value): array {
+            $normalized = $this->normalize($value);
+            $variants = [
+                $normalized,
+                preg_replace('/^cityof/', '', $normalized) ?? $normalized,
+                preg_replace('/city$/', '', $normalized) ?? $normalized,
+                preg_replace('/^sta(?!nto)/', 'santa', $normalized) ?? $normalized,
+                preg_replace('/^sto/', 'santo', $normalized) ?? $normalized,
+                preg_replace('/^santa/', 'sta', $normalized) ?? $normalized,
+                preg_replace('/^santo/', 'sto', $normalized) ?? $normalized,
+            ];
 
-        $aliases = fn (string $value): array => array_unique([
-            $value,
-            preg_replace('/^cityof/', '', $value),
-            preg_replace('/city$/', '', $value),
-        ]);
+            $expanded = [];
+            foreach ($variants as $variant) {
+                if (! is_string($variant) || $variant === '') {
+                    continue;
+                }
+                $expanded[] = $variant;
+                $expanded[] = preg_replace('/^cityof/', '', $variant) ?? $variant;
+                $expanded[] = preg_replace('/city$/', '', $variant) ?? $variant;
+            }
+
+            return array_values(array_unique($expanded));
+        };
 
         return count(array_intersect($aliases($left), $aliases($right))) > 0;
     }

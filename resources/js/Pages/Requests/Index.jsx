@@ -2,6 +2,8 @@ import { Head, Link, router, useForm, usePage } from "@inertiajs/react";
 import {
   BadgeCheck,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   ClipboardList,
   Clock3,
   FileSpreadsheet,
@@ -10,6 +12,8 @@ import {
   Images,
   ListChecks,
   Mail,
+  Maximize2,
+  Minimize2,
   Download,
   PenLine,
   Printer,
@@ -30,8 +34,17 @@ import AppLayout, {
 import SearchableSelect from "@/Components/SearchableSelect";
 import { currentDrnParts } from "@/Components/DocumentDrnFields";
 import PdfPreviewModal from "@/Components/PdfPreviewModal";
+import SupportingDromicSitrepPanel from "@/Components/SupportingDromicSitrepPanel";
 import { EpirmaTrackStatusPanel } from "@/Components/EpirmaSignedDocumentsModal";
 import { formatDate, formatDateTime } from "@/Utils/dateFormat";
+import {
+  collectAffectedAreasFromIncidents,
+  formatAffectedAreaList,
+  formatIncidentDateDisplay,
+  incidentOccurrenceBounds,
+  personsFromLatestLinkedSitreps,
+  resolveAffectedPersonsCount,
+} from "@/Utils/incidentDisplay";
 import {
   coerceWholeQuantity,
   wholeQuantityInputValue,
@@ -119,9 +132,19 @@ const uniformLguOfficeDetails = (request) => {
 
   return `Local Government Unit of ${locality}${province ? `, ${province}` : ""}`;
 };
-const stockItemKey = (value) =>
-  String(value ?? "").toLocaleLowerCase().replace(/[^a-z0-9]+/g, "");
+const stockItemKey = (value) => {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const base = raw.replace(/\s+-\s+.+$/, "").trim();
+  return String(base || raw).toLocaleLowerCase().replace(/[^a-z0-9]+/g, "");
+};
 
+const normalizeSignatoryValue = (value) => {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const [name, ...rest] = raw.split("|");
+  return [String(name || "").trim().toUpperCase(), ...rest].join("|");
+};
 const displayRequestReference = (request) =>
   request?.source_lgu_dromic_report?.lgu_relief_request_reference
   || request?.assessment_form_data?.source_lgu_request_reference
@@ -259,25 +282,16 @@ export default function Index({
   const currentStockAvailability = (itemName) => {
     const key = stockItemKey(itemName);
     if (!key) return 0;
-    const physicalByWarehouse = warehouseStock
+    const physical = warehouseStock
       .filter((row) => stockItemKey(row.item) === key)
-      .reduce((map, row) => {
-        const warehouseKey = String(row.warehouse_id ?? "");
-        map.set(warehouseKey, (map.get(warehouseKey) || 0) + Math.max(0, Number(row.available) || 0));
-        return map;
-      }, new Map());
-    const reservedByWarehouse = warehouseReservations
-      .filter((row) => (row.item_key || stockItemKey(row.item_name)) === key)
-      .reduce((map, row) => {
-        const warehouseKey = String(row.warehouse_id ?? "");
-        map.set(warehouseKey, (map.get(warehouseKey) || 0) + Math.max(0, Number(row.quantity) || 0));
-        return map;
-      }, new Map());
-    let total = 0;
-    physicalByWarehouse.forEach((physical, warehouseKey) => {
-      total += Math.max(0, physical - (reservedByWarehouse.get(warehouseKey) || 0));
-    });
-    return total;
+      .reduce((sum, row) => sum + Number(row.current ?? row.available ?? 0), 0);
+    const reserved = warehouseReservations
+      .filter((row) => {
+        const reservationKey = row.item_key || stockItemKey(row.item_name);
+        return reservationKey === key || stockItemKey(row.item_name) === key;
+      })
+      .reduce((sum, row) => sum + Math.max(0, Number(row.quantity) || 0), 0);
+    return Math.max(0, physical - reserved);
   };
   const assessmentDrnDefaults = currentDrnParts(drnPrefixes.find((row) => row.context === "assessment")?.value);
   const [provinceCode, setProvinceCode] = useState("");
@@ -569,8 +583,8 @@ export default function Index({
       incidents: [],
       reviewed_at: "",
       approved_at: "",
-      reviewed_by: drrsSignatories.find((row) => row.context === "reviewed_by")?.value ?? "",
-      approved_by: drrsSignatories.find((row) => row.context === "approved_by")?.value ?? "",
+      reviewed_by: normalizeSignatoryValue(drrsSignatories.find((row) => row.context === "reviewed_by")?.value ?? ""),
+      approved_by: normalizeSignatoryValue(drrsSignatories.find((row) => row.context === "approved_by")?.value ?? ""),
       assessment_drn_prefix: assessmentDrnDefaults.prefix,
       assessment_drn_year: assessmentDrnDefaults.year,
       assessment_drn_month: assessmentDrnDefaults.month,
@@ -717,10 +731,51 @@ export default function Index({
       .filter(Boolean);
     const existingPurpose = allowedPurposes.includes(existingMeta.response_purpose || request.purpose) ? (existingMeta.response_purpose || request.purpose) : "Relief Augmentation";
     const sourceIncidentEntries = (() => {
+      const linkedIncidents = Array.isArray(sourcePayload.linked_incidents)
+        ? sourcePayload.linked_incidents
+        : (Array.isArray(existingMeta.linked_incidents) ? existingMeta.linked_incidents : []);
+      const isStandaloneLump = Boolean(
+        sourcePayload.standalone_relief_request
+        || existingMeta.standalone_relief_request
+        || existingMeta.request_mode === "consolidated_multi_incident"
+      );
+      const mapLinkedIncidents = () => linkedIncidents
+        .filter((row) => row && Object.values(row).some((value) => String(value ?? "").trim()))
+        .map((row) => {
+          const barangays = Array.isArray(row.affected_barangays) ? row.affected_barangays.filter(Boolean) : [];
+          return {
+            incident_type: row.incident_type || sourcePayload.incident_type || "",
+            incident_details: row.incident_name || "",
+            occurrence_at: String(row.occurrence_started_at || "").slice(0, 16),
+            city_municipality: row.municipality ?? request.municipality ?? sourceReport?.municipality ?? "",
+            barangay: barangays.length ? barangays.join(", ") : (row.barangay ?? ""),
+            affected_families: row.affected_families ?? "",
+            affected_persons: row.affected_persons ?? "",
+            description: [row.incident_name, row.incident_code ? `(${row.incident_code})` : ""].filter(Boolean).join(" "),
+            source_reference: row.incident_code ?? sourceReport?.reference_number ?? request.request_drn ?? "",
+            series_key: row.series_key ?? "",
+          };
+        });
+
       if (Array.isArray(existingMeta.incidents) && existingMeta.incidents.length) {
+        const draftLike = !request.assessment_status || request.assessment_status === "draft";
+        if (isStandaloneLump && linkedIncidents.length && draftLike) {
+          const looksSynthetic = existingMeta.incidents.some((row) =>
+            /consolidated .+ relief augmentation request/i.test(String(row.incident_type || ""))
+            || /consolidated .+ relief augmentation request/i.test(String(row.incident_details || "")),
+          ) || existingMeta.incidents.length === linkedIncidents.length + 1;
+          if (looksSynthetic) {
+            return mapLinkedIncidents();
+          }
+        }
         return existingMeta.incidents;
       }
       if (existingPurpose !== "Relief Augmentation") return [];
+
+      if (isStandaloneLump && linkedIncidents.length) {
+        return mapLinkedIncidents();
+      }
+
       const primary = {
         incident_type: sourceIncidentName || request.incident?.name || "",
         incident_details: sourceIncidentDetails,
@@ -747,6 +802,27 @@ export default function Index({
         }));
       return [primary, ...related];
     })();
+    const occurrenceBounds = incidentOccurrenceBounds(sourceIncidentEntries);
+    const areasForSpecify = collectAffectedAreasFromIncidents(
+      [
+        ...sourceIncidentEntries,
+        ...(Array.isArray(sourcePayload.linked_incidents) ? sourcePayload.linked_incidents : []),
+      ],
+      sourceAffectedAreas,
+    );
+    const prefilledIncidentDetails = formatAffectedAreaList(areasForSpecify) || sourceIncidentDetails;
+    const resolvedAffectedPersons = resolveAffectedPersonsCount(
+      existingMeta.affected_persons,
+      sourcePayload.affected_persons,
+      sourceIncidentEntries,
+      Array.isArray(sourcePayload.linked_incidents) ? sourcePayload.linked_incidents : [],
+      sourceAreaRows,
+      personsFromLatestLinkedSitreps(
+        Array.isArray(request.linked_incident_reports) && request.linked_incident_reports.length
+          ? request.linked_incident_reports
+          : (Array.isArray(sourceReport?.linked_incident_reports) ? sourceReport.linked_incident_reports : []),
+      ),
+    );
     const displayedRequestingParty = sourceReport
       ? uniformLguName(request)
       : (request.requesting_agency ?? party?.requesting_party ?? "");
@@ -762,6 +838,37 @@ export default function Index({
       priority: item.priority ?? "normal",
       remarks: item.remarks ?? "",
     }));
+    const snapshotFniRows = (() => {
+      const candidates = [
+        existingMeta.requested_fni_items,
+        existingMeta.source_lgu_snapshot?.requested_fni_items,
+        sourcePayload.requested_fni_items,
+      ];
+      for (const rows of candidates) {
+        if (Array.isArray(rows) && rows.length) return rows;
+      }
+      return [];
+    })();
+    const fallbackItems = existingItems.length
+      ? existingItems
+      : snapshotFniRows
+        .filter((row) => row && (row.fni_library_item_id || row.item_name))
+        .map((row) => {
+          const cleanName = String(row.item_name || "").trim();
+          return {
+            inventory_item_id: "",
+            fni_library_item_id: String(row.fni_library_item_id ?? ""),
+            source_warehouse_id: "",
+            source_warehouse_name: "",
+            available_quantity: Math.trunc(Number(currentStockAvailability(cleanName) || 0)),
+            // Keep catalog item name (no brand suffix) so availability matches inventory.
+            item_name: cleanName,
+            requested_quantity: Math.max(1, Math.trunc(Number(row.requested_quantity ?? 1)) || 1),
+            unit: row.unit_of_measure || row.unit || "",
+            priority: "normal",
+            remarks: "",
+          };
+        });
     form.clearErrors();
     form.setData({
       ...form.data,
@@ -774,8 +881,14 @@ export default function Index({
       barangay: request.barangay ?? sourceReport?.barangay ?? sourceAffectedAreas[0] ?? "",
       requester: request.requester ?? sourceReport?.requester ?? party?.office_head ?? "",
       date_requested: (request.date_requested ?? request.date_received_by_drmd ?? new Date().toISOString()).slice(0, 10),
-      incident_name: existingPurpose === "Relief Augmentation" ? (sourceIncidentName || request.incident?.name || "") : "",
-      incident_date: existingPurpose === "Relief Augmentation" ? String(sourceOccurrence).slice(0, 10) : "",
+      incident_name: existingPurpose === "Relief Augmentation"
+        ? ((sourcePayload.standalone_relief_request || existingMeta.standalone_relief_request)
+          ? (sourcePayload.incident_type || sourceIncidentName || request.incident?.name || "")
+          : (sourceIncidentName || request.incident?.name || ""))
+        : "",
+      incident_date: existingPurpose === "Relief Augmentation"
+        ? (occurrenceBounds.start || String(sourceOccurrence).slice(0, 10))
+        : "",
       purpose: existingPurpose,
       assessment_summary: request.assessment_summary ?? sourcePayload.incident_summary ?? sourceReport?.lgu_dromic_narrative ?? "",
       recommendations: request.recommendations ?? "",
@@ -785,8 +898,14 @@ export default function Index({
       office_agency_details: request.office_agency_details ?? "",
       endorsed_to_drrs: true,
       date_endorsed_to_drrs: request.date_endorsed_to_drrs?.slice(0, 10) ?? "",
-      incident_details: existingPurpose === "Relief Augmentation" ? sourceIncidentDetails : "",
-      incident_count: request.incident_count ?? 1,
+      incident_details: existingPurpose === "Relief Augmentation"
+        ? (prefilledIncidentDetails || request.incident_details || "")
+        : "",
+      incident_count: Math.max(
+        1,
+        Number(request.incident_count) || 0,
+        sourceIncidentEntries.length || 0,
+      ),
       response_drn: request.response_drn ?? "",
       assessment_drn: request.assessment_drn ?? "",
       source_document_url: request.source_document_url ?? "",
@@ -805,8 +924,17 @@ export default function Index({
         source_lgu_dromic_reference: existingMeta.source_lgu_dromic_reference ?? sourceReport?.reference_number,
         source_lgu_request_reference: existingMeta.source_lgu_request_reference ?? sourceReport?.lgu_relief_request_reference,
         source_data_prefilled: Boolean(sourceReport),
-        affected_persons: existingMeta.affected_persons ?? sourcePayload.affected_persons ?? "",
-        affected_areas: existingMeta.affected_areas ?? sourceAffectedAreas,
+        standalone_relief_request: existingMeta.standalone_relief_request ?? Boolean(sourcePayload.standalone_relief_request),
+        request_mode: existingMeta.request_mode ?? sourcePayload.request_mode ?? null,
+        linked_incident_series_keys: existingMeta.linked_incident_series_keys
+          ?? sourcePayload.linked_incident_series_keys
+          ?? [],
+        linked_incidents: existingMeta.linked_incidents ?? sourcePayload.linked_incidents ?? [],
+        requested_fni_items: existingMeta.requested_fni_items ?? sourcePayload.requested_fni_items ?? [],
+        affected_persons: resolvedAffectedPersons !== ""
+          ? resolvedAffectedPersons
+          : (existingMeta.affected_persons ?? sourcePayload.affected_persons ?? ""),
+        affected_areas: existingMeta.affected_areas ?? areasForSpecify,
         information_source: sourceReport
           ? displayedRequestingParty
           : (existingMeta.information_source ?? displayedRequestingParty),
@@ -816,8 +944,17 @@ export default function Index({
           : (existingMeta.assessment_date ?? localDateValue()),
         incidents: sourceIncidentEntries,
         incident_type: existingMeta.incident_type ?? sourcePayload.incident_type ?? "",
-        incident_specific_details: sourceIncidentDetails,
-        occurrence_started_at: existingMeta.occurrence_started_at ?? sourceOccurrence,
+        incident_specific_details: prefilledIncidentDetails || sourceIncidentDetails,
+        occurrence_started_at: occurrenceBounds.start || existingMeta.occurrence_started_at || sourceOccurrence,
+        occurrence_ended_span: occurrenceBounds.end || occurrenceBounds.start || existingMeta.occurrence_ended_span || null,
+        incident_occurrence_display: occurrenceBounds.display
+          || formatIncidentDateDisplay(
+            occurrenceBounds.start || String(sourceOccurrence || "").slice(0, 10),
+            occurrenceBounds.end || occurrenceBounds.start || String(sourceOccurrence || "").slice(0, 10),
+          )
+          || existingMeta.incident_occurrence_display
+          || occurrenceBounds.start
+          || String(sourceOccurrence || "").slice(0, 10),
         incident_status: existingMeta.incident_status || sourcePayload.incident_status || "",
         incident_ended_at: existingMeta.incident_ended_at ?? sourcePayload.incident_ended_at ?? "",
         identified_needs: existingMeta.identified_needs ?? sourcePayload.needs ?? "",
@@ -838,8 +975,8 @@ export default function Index({
         prepared_at: existingMeta.prepared_at ?? localDateTimeValue(),
         reviewed_at: "",
         approved_at: "",
-        reviewed_by: existingMeta.reviewed_by ?? drrsSignatories.find((row) => row.context === "reviewed_by")?.value ?? "",
-        approved_by: existingMeta.approved_by ?? drrsSignatories.find((row) => row.context === "approved_by")?.value ?? "",
+        reviewed_by: normalizeSignatoryValue(existingMeta.reviewed_by ?? drrsSignatories.find((row) => row.context === "reviewed_by")?.value ?? ""),
+        approved_by: normalizeSignatoryValue(existingMeta.approved_by ?? drrsSignatories.find((row) => row.context === "approved_by")?.value ?? ""),
         assessment_drn_prefix: existingMeta.assessment_drn_prefix ?? assessmentDrnDefaults.prefix,
         assessment_drn_year: existingMeta.assessment_drn_year ?? assessmentDrnDefaults.year,
         assessment_drn_month: existingMeta.assessment_drn_month ?? assessmentDrnDefaults.month,
@@ -853,7 +990,7 @@ export default function Index({
           quantity: row?.quantity === "" || row?.quantity == null ? "" : coerceWholeQuantity(row.quantity, { min: 0 }),
         })),
       },
-      items: existingItems.length ? existingItems : [{ inventory_item_id: "", fni_library_item_id: "", source_warehouse_id: "", source_warehouse_name: "", available_quantity: "", item_name: "", requested_quantity: 1, unit: "", priority: "normal", remarks: "" }],
+      items: fallbackItems.length ? fallbackItems : [{ inventory_item_id: "", fni_library_item_id: "", source_warehouse_id: "", source_warehouse_name: "", available_quantity: "", item_name: "", requested_quantity: 1, unit: "", priority: "normal", remarks: "" }],
     });
     setAssessmentRecord(request);
   };
@@ -949,8 +1086,7 @@ export default function Index({
     && !["approved", "partially_approved", "rejected"].includes(request.status);
 
   const performResponseAction = (request, action) => {
-    if (action === "preview") window.location.assign(`/requests/${request.id}/assessment-form?document=response&confirmed=1`);
-    else if (action === "print") {
+    if (action === "print") {
       setPdfPreview({
         open: true,
         title: "Response Letter",
@@ -997,6 +1133,7 @@ export default function Index({
       const built = buildRrosDocumentPreviewTabs(request, {
         includeResponseLetter: true,
         includeRdsCsmr: true,
+        preferOperationalRis: true,
       });
       setPdfPreview({
         open: true,
@@ -1954,7 +2091,7 @@ export default function Index({
                         <button
                           type="button"
                           title="Response Letter"
-                          onClick={() => openResponseAction(request, "preview")}
+                          onClick={() => openResponseAction(request, "print")}
                           className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700 shadow-sm transition hover:-translate-y-0.5 hover:bg-emerald-100 hover:text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-100 dark:hover:bg-emerald-900/60"
                         >
                           <FileText className="h-4 w-4" />
@@ -2025,7 +2162,7 @@ export default function Index({
                       <>
                         <Link href={`/requests/${request.id}/assessment-form`} className="rounded-md border px-3 py-1.5 text-xs font-bold">View Documents</Link>
                         {request.assessment_status === "draft" && !request.epirma_forwarded_to_drrs_aa_at && (
-                          <button type="button" onClick={() => openEndorsedAssessment(request)} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Edit Draft</button>
+                          <button type="button" onClick={() => openEndorsedAssessment(request)} className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-black text-amber-800">Edit Draft Assessment</button>
                         )}
                       </>
                     ) : (
@@ -2091,6 +2228,25 @@ export default function Index({
                 </tr>
               ))}
             />
+            {!isRrosWorkspace && (requests.data ?? []).length === 0 && (
+              <div className="space-y-3 px-4 py-10 text-center text-sm text-slate-500">
+                {Number(reliefAssessmentGate?.awaiting_validation || 0) > 0 ? (
+                  <>
+                    <p className="font-semibold text-slate-700 dark:text-zinc-200">
+                      No FNI assessments yet. {Number(reliefAssessmentGate.awaiting_validation)} signed request letter{Number(reliefAssessmentGate.awaiting_validation) === 1 ? '' : 's'} still need DRRS validation first.
+                    </p>
+                    <Link
+                      href="/dromic/lgu-reports?tab=requests&validation=pending_review"
+                      className="inline-flex items-center justify-center rounded-md bg-amber-700 px-4 py-2 text-xs font-black text-white"
+                    >
+                      Open request letters awaiting validation
+                    </Link>
+                  </>
+                ) : (
+                  <p>No FNI requests are still for action.</p>
+                )}
+              </div>
+            )}
           </ExportableCard>
         )}
 
@@ -2483,7 +2639,6 @@ export default function Index({
                 >
                   Preview Assessment
                 </button>
-                <button type="button" onClick={() => openResponseAction(readyRecord, "preview")} className="block rounded-md border px-4 py-2 text-center text-sm font-bold">Preview Response Letter</button>
               </div>
             </div>
           </div>
@@ -2560,12 +2715,14 @@ function RequestDocumentPreview({ request, tab, setTab, onClose }) {
   const source = request.source_lgu_dromic_report;
   const isLguRequest = Boolean(source);
   const photos = request.drmd_aa_photo_paths ?? [];
-  const src = isLguRequest
-    ? tab === "report"
-      ? source.lgu_signed_report_path
-        ? `/lgu/dromic-sitrep/${source.id}/signed-copy/report#toolbar=0&navpanes=0`
-        : `/lgu/dromic-sitrep/${source.id}/pdf?inline=1`
-      : `/lgu/dromic-sitrep/${source.id}/signed-copy/request#toolbar=0&navpanes=0`
+  const linkedIncidentReports = Array.isArray(request.linked_incident_reports) && request.linked_incident_reports.length > 0
+    ? request.linked_incident_reports
+    : (Array.isArray(source?.linked_incident_reports) ? source.linked_incident_reports : []);
+  const sourceIsStandaloneLump = Boolean(source?.lgu_dromic_payload?.standalone_relief_request)
+    || (Array.isArray(source?.lgu_dromic_payload?.linked_incident_series_keys) && source.lgu_dromic_payload.linked_incident_series_keys.length > 0);
+  const sitrepFallback = source && !sourceIsStandaloneLump ? source : null;
+  const requestSrc = isLguRequest
+    ? `/lgu/dromic-sitrep/${source.id}/signed-copy/request#toolbar=0&navpanes=0`
     : `/requests/${request.id}/source-document`;
   const tabs = [
     ...(isLguRequest ? [
@@ -2578,38 +2735,74 @@ function RequestDocumentPreview({ request, tab, setTab, onClose }) {
       { id: "photos", label: `Captured Photos (${photos.length})`, icon: Images },
     ] : []),
   ];
+  const [controlsCollapsed, setControlsCollapsed] = useState(false);
+  const [wideDocumentView, setWideDocumentView] = useState(false);
+  const enterWideDocumentView = () => {
+    setWideDocumentView(true);
+    setControlsCollapsed(true);
+  };
+  const exitWideDocumentView = () => {
+    setWideDocumentView(false);
+    setControlsCollapsed(false);
+  };
+  const viewingLabel = tab === "photos"
+    ? "Captured Photos"
+    : tab === "report"
+      ? "Supporting DROMIC / SitRep"
+      : (isLguRequest ? "Request Letter" : "Uploaded Document");
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm"
+      className={`fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/65 backdrop-blur-sm ${wideDocumentView ? "p-0" : "p-2 sm:p-3"}`}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Request document preview"
-        className="flex h-[92vh] w-[96vw] max-w-[1500px] flex-col overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-900"
+        className={`relative flex flex-col overflow-hidden bg-white shadow-2xl dark:bg-zinc-900 ${wideDocumentView ? "h-screen w-screen max-w-none rounded-none" : "h-[96vh] w-[98vw] max-w-[1700px] rounded-xl"}`}
       >
-        <div className="flex items-start justify-between border-b p-4">
-          <div>
+        <div className={`flex items-start justify-between border-b ${wideDocumentView ? "px-4 py-3" : "p-4"}`}>
+          <div className="min-w-0">
             <p className="text-xs font-black uppercase tracking-wide text-emerald-700">
               Request document preview
             </p>
-            <h2 className="mt-1 font-black">
+            <h2 className={`mt-1 font-black ${wideDocumentView ? "truncate text-lg" : ""}`}>
               {source?.lgu_relief_request_reference || request.reference_number}
             </h2>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="dromis-tip rounded-md border p-2"
-            data-tip="Close preview"
-            data-tip-side="bottom"
-            aria-label="Close preview"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              title={controlsCollapsed ? "Show document controls" : "Hide document tabs for more viewing space"}
+              aria-label={controlsCollapsed ? "Show document controls" : "Hide document controls"}
+              onClick={() => setControlsCollapsed((value) => !value)}
+              className="rounded-md border p-2"
+            >
+              {controlsCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+            </button>
+            <button
+              type="button"
+              title={wideDocumentView ? "Restore normal preview size" : "Widen document view — use the full screen"}
+              aria-label={wideDocumentView ? "Restore normal preview size" : "Widen document view"}
+              onClick={() => (wideDocumentView ? exitWideDocumentView() : enterWideDocumentView())}
+              className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs font-black uppercase tracking-wide ${wideDocumentView ? "border-slate-300 bg-white text-slate-700" : "border-violet-300 bg-violet-50 text-violet-800"}`}
+            >
+              {wideDocumentView ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              {wideDocumentView ? "Exit wide" : "Widen view"}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="dromis-tip rounded-md border p-2"
+              data-tip="Close preview"
+              data-tip-side="bottom"
+              aria-label="Close preview"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
-        {tabs.length > 1 && (
+        {tabs.length > 1 && !controlsCollapsed && (
           <div className="border-b bg-white p-3 dark:bg-zinc-900">
             <SectionTabs
               appearance="plain"
@@ -2618,6 +2811,19 @@ function RequestDocumentPreview({ request, tab, setTab, onClose }) {
               ariaLabel="Request documents"
               tabs={tabs}
             />
+          </div>
+        )}
+        {controlsCollapsed && (
+          <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-white px-3 py-2 dark:bg-zinc-900">
+            <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Viewing</p>
+            <p className="text-xs font-semibold text-slate-700">{viewingLabel}</p>
+            <button
+              type="button"
+              onClick={() => setControlsCollapsed(false)}
+              className="ml-auto text-xs font-black uppercase tracking-wide text-emerald-700 hover:underline"
+            >
+              Switch document
+            </button>
           </div>
         )}
         {tab === "photos" ? (
@@ -2629,13 +2835,33 @@ function RequestDocumentPreview({ request, tab, setTab, onClose }) {
               </figure>
             ))}
           </div>
+        ) : isLguRequest && tab === "report" ? (
+          <SupportingDromicSitrepPanel
+            reports={linkedIncidentReports}
+            fallbackReport={sitrepFallback}
+            showCopyTabs={!controlsCollapsed}
+            defaultCopyTab="advance"
+            hideSelectors={controlsCollapsed}
+          />
         ) : (
           <iframe
-            key={src}
-            title={isLguRequest && tab === "report" ? "Supporting DROMIC report" : "Request document"}
-            src={src}
+            key={requestSrc}
+            title="Request document"
+            src={requestSrc}
             className="min-h-0 w-full flex-1 bg-slate-100"
           />
+        )}
+        {wideDocumentView && (
+          <button
+            type="button"
+            onClick={exitWideDocumentView}
+            className="absolute bottom-4 right-4 z-10 inline-flex items-center gap-1.5 rounded-md border border-violet-300 bg-violet-700 px-3 py-2 text-xs font-black uppercase tracking-wide text-white shadow-lg hover:bg-violet-800"
+            title="Exit wide view"
+            aria-label="Exit wide view"
+          >
+            <Minimize2 className="h-4 w-4" />
+            Exit wide
+          </button>
         )}
       </div>
     </div>

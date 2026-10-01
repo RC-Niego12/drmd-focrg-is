@@ -12,6 +12,7 @@ class LguDirectoryLdrrmoOfficer extends Model
         'office',
         'name',
         'designation',
+        'id_number',
         'mobile_number',
         'hotline_number',
         'landline_number',
@@ -19,6 +20,8 @@ class LguDirectoryLdrrmoOfficer extends Model
         'alternate_email_address',
         'vhf_radio_frequency',
         'facebook',
+        'user_id',
+        'login_username',
         'is_locally_updated',
         'source_signature',
     ];

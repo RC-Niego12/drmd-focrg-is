@@ -23,6 +23,8 @@ export default function DocumentPreviewModal({
   zoom = DEFAULT_DOCUMENT_PREVIEW_ZOOM,
   onZoomChange = null,
   paperWidth = "210mm",
+  /** When false, children fill the pane (e.g. official PDF iframe) instead of A4 paper canvas. */
+  usePaperCanvas = true,
   footer = null,
   children,
   zIndexClass = "z-[190]",
@@ -69,7 +71,7 @@ export default function DocumentPreviewModal({
           </button>
         </div>
 
-        {(tabs?.length || onZoomChange) && (
+        {(tabs?.length || (usePaperCanvas && onZoomChange)) && (
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-3 py-2 dark:border-zinc-800">
             {tabs?.length ? (
               <SectionTabs
@@ -82,7 +84,7 @@ export default function DocumentPreviewModal({
             ) : (
               <span />
             )}
-            {onZoomChange && (
+            {usePaperCanvas && onZoomChange && (
               <div className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1 dark:border-zinc-700 dark:bg-zinc-900">
                 {DOCUMENT_PREVIEW_ZOOM_OPTIONS.map((option) => (
                   <button
@@ -111,9 +113,13 @@ export default function DocumentPreviewModal({
         )}
 
         <div className="min-h-0 flex-1 overflow-hidden">
-          <DocumentPreviewCanvas zoom={zoom} paperWidth={paperWidth} className="h-full">
-            {children}
-          </DocumentPreviewCanvas>
+          {usePaperCanvas ? (
+            <DocumentPreviewCanvas zoom={zoom} paperWidth={paperWidth} className="h-full">
+              {children}
+            </DocumentPreviewCanvas>
+          ) : (
+            <div className="h-full w-full bg-slate-200 dark:bg-zinc-900">{children}</div>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900">

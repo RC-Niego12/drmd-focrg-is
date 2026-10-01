@@ -4,20 +4,11 @@ const registerServiceWorker = async () => {
     }
 
     const host = window.location.hostname.toLowerCase();
-    const pwaAllowed = host === 'localhost'
-        || host === '127.0.0.1'
-        || host.endsWith('.test')
-        || host === 'drmd-focrg-is.test'
-        || window.location.protocol === 'https:' && !host.startsWith('desktop-');
+    const localDevelopment = host === 'localhost' || host === '127.0.0.1';
+    const pwaAllowed = window.isSecureContext || localDevelopment;
 
     if (!pwaAllowed) {
-        try {
-            const registrations = await navigator.serviceWorker.getRegistrations();
-            await Promise.all(registrations.map((registration) => registration.unregister()));
-        } catch (error) {
-            console.info('DROMIS PWA cleanup skipped.', error);
-        }
-
+        console.info('DROMIS PWA requires HTTPS when opened from another phone or computer.');
         return;
     }
 

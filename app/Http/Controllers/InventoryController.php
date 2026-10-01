@@ -26,24 +26,47 @@ class InventoryController extends Controller
 {
     public function index(Request $request, InventoryBalanceService $inventoryBalances): Response
     {
+        $warehouses = Warehouse::where('status', 'active')->orderBy('name')->get();
+
+        return $this->renderInventoryIndex($request, $inventoryBalances, $warehouses);
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, Warehouse>  $warehouses
+     * @param  array<string, mixed>  $viewProps
+     */
+    public function renderInventoryIndex(
+        Request $request,
+        InventoryBalanceService $inventoryBalances,
+        $warehouses,
+        array $viewProps = [],
+    ): Response {
         $currentYear = (int) now()->year;
         $transactionYearInput = $request->input('transaction_year', 'all');
         $transactionYear = $transactionYearInput === 'all' || $transactionYearInput === ''
             ? null
             : (int) $transactionYearInput;
-        $warehouses = Warehouse::where('status', 'active')->orderBy('name')->get();
-        $warehouseIds = $this->filterArray($request, 'warehouse_id');
+        $activeWarehouseIds = $warehouses->pluck('id')->map(fn ($id): int => (int) $id);
+        $requestedWarehouseIds = $this->filterArray($request, 'warehouse_id');
+        $warehouseIds = $requestedWarehouseIds === []
+            ? []
+            : array_values(array_filter(
+                $requestedWarehouseIds,
+                fn (string $id): bool => $activeWarehouseIds->contains((int) $id),
+            ));
         $selectedWarehouse = count($warehouseIds) === 1
             ? $warehouses->firstWhere('id', (int) $warehouseIds[0])
             : null;
 
         $batches = InventoryBatch::with(['item', 'transactions', 'warehouse'])
+            ->whereIn('warehouse_id', $activeWarehouseIds)
             ->when($warehouseIds !== [], fn ($query) => $query->whereIn('warehouse_id', $warehouseIds))
             ->orderBy('warehouse_id')
             ->orderBy('expiration_date')
             ->get();
 
         $transactions = InventoryTransaction::with(['batch.item', 'batch.warehouse'])
+            ->whereHas('batch', fn ($batchQuery) => $batchQuery->whereIn('warehouse_id', $activeWarehouseIds))
             ->when($warehouseIds !== [], fn ($query) => $query->whereHas('batch', fn ($batchQuery) => $batchQuery->whereIn('warehouse_id', $warehouseIds)))
             ->get();
 
@@ -51,11 +74,14 @@ class InventoryController extends Controller
             ->groupBy('inventory_batch_id')
             ->map(fn ($group): float => $group->sum(fn (InventoryTransaction $transaction): float => $this->signedQuantity($transaction)));
 
-        $allBalanceRows = $inventoryBalances->balanceRows(null, $transactionYear);
+        $allBalanceRows = $inventoryBalances->balanceRows(null, $transactionYear)
+            ->filter(fn (array $row): bool => $activeWarehouseIds->contains((int) ($row['warehouse_id'] ?? 0)))
+            ->values();
 
         $activeFilters = [
             'warehouse_id' => $warehouseIds,
             'warehouse_province' => $this->filterArray($request, 'warehouse_province'),
+            'warehouse_district' => $this->filterArray($request, 'warehouse_district'),
             'warehouse_municipality' => $this->filterArray($request, 'warehouse_municipality'),
             'category' => $this->filterArray($request, 'category'),
             'item' => $this->filterArray($request, 'item'),
@@ -70,6 +96,7 @@ class InventoryController extends Controller
             return $rows
                 ->when($except !== 'warehouse_id' && $activeFilters['warehouse_id'] !== [], fn ($rows) => $rows->filter(fn (array $row): bool => in_array((string) ($row['warehouse_id'] ?? ''), $activeFilters['warehouse_id'], true)))
                 ->when($except !== 'warehouse_province' && $activeFilters['warehouse_province'] !== [], fn ($rows) => $rows->filter(fn (array $row): bool => in_array((string) ($row['warehouse_province'] ?? ''), $activeFilters['warehouse_province'], true)))
+                ->when($except !== 'warehouse_district' && $activeFilters['warehouse_district'] !== [], fn ($rows) => $rows->filter(fn (array $row): bool => in_array((string) ($row['warehouse_district'] ?? ''), $activeFilters['warehouse_district'], true)))
                 ->when($except !== 'warehouse_municipality' && $activeFilters['warehouse_municipality'] !== [], fn ($rows) => $rows->filter(fn (array $row): bool => in_array((string) ($row['warehouse_municipality'] ?? ''), $activeFilters['warehouse_municipality'], true)))
                 ->when($except !== 'category' && $activeFilters['category'] !== [], fn ($rows) => $rows->filter(fn (array $row): bool => in_array((string) $row['category'], $activeFilters['category'], true)))
                 ->when($except !== 'item' && $activeFilters['item'] !== [], fn ($rows) => $rows->filter(fn (array $row): bool => in_array((string) $row['item'], $activeFilters['item'], true)))
@@ -80,6 +107,7 @@ class InventoryController extends Controller
                     $haystack = strtolower(implode(' ', [
                         $row['warehouse'] ?? '',
                         $row['warehouse_province'] ?? '',
+                        $row['warehouse_district'] ?? '',
                         $row['warehouse_municipality'] ?? '',
                         $row['category'] ?? '',
                         $row['item'] ?? '',
@@ -97,6 +125,9 @@ class InventoryController extends Controller
         $sortDirection = $request->string('direction')->toString() === 'desc' ? 'desc' : 'asc';
 
         $balanceRows = $this->sortBalanceRows($filterRows($allBalanceRows), $sortKey, $sortDirection);
+        $categoryReferenceRows = $filterRows(collect($this->categoryReferenceRows($transactionYear, $activeWarehouseIds->all())))
+            ->values()
+            ->all();
 
         $warehouseOptions = $filterRows($allBalanceRows, 'warehouse_id');
         $categoryOptions = $filterRows($allBalanceRows, 'category');
@@ -104,11 +135,11 @@ class InventoryController extends Controller
         $brandOptions = $filterRows($allBalanceRows, 'brand');
         $expiryOptions = $filterRows($allBalanceRows, 'expiry');
 
-        return Inertia::render('Inventory/Index', [
+        return Inertia::render($viewProps['page'] ?? 'Inventory/Index', array_merge([
             'warehouses' => $warehouses,
             'selectedWarehouse' => $selectedWarehouse,
             'balanceRows' => $balanceRows,
-            'categoryReferenceRows' => $this->categoryReferenceRows($transactionYear),
+            'categoryReferenceRows' => $categoryReferenceRows,
             'batches' => $batches->map(fn (InventoryBatch $batch) => [
                 'id' => $batch->id,
                 'label' => trim(($batch->item?->name ?? 'Item').' - '.($batch->brand_description ?: $batch->batch_number)),
@@ -136,6 +167,12 @@ class InventoryController extends Controller
                     ->values(),
                 'warehouse_provinces' => $filterRows($allBalanceRows, 'warehouse_province')
                     ->pluck('warehouse_province')
+                    ->filter()
+                    ->unique()
+                    ->sort()
+                    ->values(),
+                'warehouse_districts' => $filterRows($allBalanceRows, 'warehouse_district')
+                    ->pluck('warehouse_district')
                     ->filter()
                     ->unique()
                     ->sort()
@@ -169,13 +206,17 @@ class InventoryController extends Controller
                 'last_synced_at' => WarehouseSheetImport::max('updated_at'),
                 'imported_rows' => WarehouseSheetImport::where('import_status', 'imported')->count(),
             ],
-        ]);
+            'workspace' => 'rros',
+            'filterBasePath' => '/inventory',
+        ], $viewProps));
     }
 
-    private function categoryReferenceRows(?int $year = null): array
+    private function categoryReferenceRows(?int $year = null, ?array $warehouseIds = null): array
     {
-        return WarehouseSheetImport::with(['warehouse', 'batch.item'])
+        $importRows = WarehouseSheetImport::with(['warehouse', 'batch.item'])
             ->where('import_status', 'imported')
+            ->whereHas('warehouse', fn ($query) => $query->where('status', 'active')
+                ->when($warehouseIds !== null, fn ($query) => $query->whereIn('id', $warehouseIds)))
             ->get()
             ->when($year, fn ($imports) => $imports->filter(function (WarehouseSheetImport $import) use ($year): bool {
                 $date = trim((string) (($import->raw_payload['transaction_date'] ?? null)
@@ -206,17 +247,50 @@ class InventoryController extends Controller
                 'warehouse_rtef_capacity' => (float) ($import->warehouse?->rtef_capacity ?? 0),
                 'partnership' => $import->warehouse?->partnership,
                 'item' => $import->raw_payload['item'] ?? $import->batch?->item?->name,
-                'uom' => $import->raw_payload['uom'] ?? $import->batch?->item?->unit,
+                'uom' => trim((string) ($import->raw_payload['uom'] ?? ''))
+                    ?: (trim((string) ($import->batch?->item?->unit ?? '')) ?: 'unit'),
                 'brand_description' => $this->brandDescription($import->raw_payload['brand_description'] ?? null, $import->batch),
                 'expiry' => $this->importExpiryLabel($import),
                 'expiry_sort' => $this->expirySortValue($this->importExpiryLabel($import)),
+                'unit_cost' => $this->storedImportUnitCost($import),
                 'current_balance' => $this->signedImportQuantity($import),
                 'reserved_quantity' => 0,
                 'available_balance' => max(0, $this->signedImportQuantity($import)),
                 'cost' => max(0, $this->signedImportCost($import)),
             ])
-            ->values()
-            ->all();
+            ->values();
+
+        // Keep active capacity-only FFP warehouses visible in the RROS summary.
+        // They have an FFP status (SEVERE) even when no import row/current stock exists.
+        $ffpWarehouseRows = Warehouse::query()
+            ->where('status', 'active')
+            ->where('ffp_capacity', '>', 0)
+            ->when($warehouseIds !== null, fn ($query) => $query->whereIn('id', $warehouseIds))
+            ->get()
+            ->map(fn (Warehouse $warehouse): array => [
+                'category' => 'Family Food Packs',
+                'warehouse' => $warehouse->display_name ?? $warehouse->name,
+                'warehouse_id' => $warehouse->id,
+                'warehouse_province' => $warehouse->province,
+                'warehouse_municipality' => $warehouse->municipality,
+                'warehouse_district' => $warehouse->district,
+                'warehouse_type' => $warehouse->warehouse_type,
+                'warehouse_status' => $warehouse->status,
+                'warehouse_ffp_capacity' => (float) $warehouse->ffp_capacity,
+                'warehouse_rtef_capacity' => (float) ($warehouse->rtef_capacity ?? 0),
+                'partnership' => $warehouse->partnership,
+                'item' => 'Family Food Pack',
+                'uom' => 'box',
+                'brand_description' => 'Prepacked',
+                'expiry' => '-',
+                'expiry_sort' => PHP_INT_MAX,
+                'current_balance' => 0,
+                'reserved_quantity' => 0,
+                'available_balance' => 0,
+                'cost' => 0,
+            ]);
+
+        return $importRows->concat($ffpWarehouseRows)->values()->all();
     }
 
     public function syncGoogleSheet(Request $request, WarehouseSheetImportService $importer, AuditLogger $audit): RedirectResponse
@@ -529,6 +603,27 @@ class InventoryController extends Controller
     private function signedImportCost(WarehouseSheetImport $import): float
     {
         return $this->payloadNumber($import, 'receipt_cost') - $this->payloadNumber($import, 'issuance_cost');
+    }
+
+    private function storedImportUnitCost(WarehouseSheetImport $import): ?float
+    {
+        if ($this->payloadNumber($import, 'receipt') !== 0.0) {
+            return $this->payloadOptionalNumber($import, 'receipt_unit_cost');
+        }
+
+        if ($this->payloadNumber($import, 'issuance') !== 0.0) {
+            return $this->payloadOptionalNumber($import, 'issuance_unit_cost');
+        }
+
+        return $this->payloadOptionalNumber($import, 'receipt_unit_cost')
+            ?? $this->payloadOptionalNumber($import, 'issuance_unit_cost');
+    }
+
+    private function payloadOptionalNumber(WarehouseSheetImport $import, string $key): ?float
+    {
+        $value = trim((string) ($import->raw_payload[$key] ?? ''));
+
+        return $value === '' ? null : (float) str_replace([',', ' '], '', $value);
     }
 
     private function payloadNumber(WarehouseSheetImport $import, string $key): float

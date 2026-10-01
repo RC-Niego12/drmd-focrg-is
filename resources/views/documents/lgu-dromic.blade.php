@@ -88,7 +88,10 @@
     $aggregateRow = ['disaggregation' => $aggregateDisaggregation];
     $hasAggregateAgeSexData = collect($aggregateDisaggregation['age_sex'])->flatten()->contains(fn ($value) => (float) $value > 0);
     $hasAggregateSectoralData = collect($aggregateDisaggregation['sectoral'])->flatten()->contains(fn ($value) => (float) $value > 0);
-    $situationOverview = $request->lgu_dromic_narrative ?: $request->assessment_summary;
+    $situationOverview = $request->lgu_dromic_narrative
+        ?: $request->assessment_summary
+        ?: data_get($payload, 'narrative');
+    $isScreenPreview = (bool) ($screenPreview ?? false);
     $situationOverviewParagraphs = collect(preg_split('/(?:\r\n|\r|\n){2,}/', trim((string) $situationOverview)) ?: [])
         ->map(fn ($paragraph) => preg_replace('/\s+/u', ' ', trim((string) $paragraph)))
         ->filter()
@@ -222,6 +225,12 @@
         .signature-person + .signature-person { margin-top: 34px; }
         .line { border-top: 1px solid #111827; padding-top: 3px; font-weight: 700; }
         .role { font-weight: 700; }
+        @if ($isScreenPreview)
+        html, body { background: #fff; }
+        body { margin: 0; padding: 8px 10px 28px; }
+        .brand-header { position: static; top: auto; height: auto; margin: 0 0 12px; }
+        .brand-header td { height: 48px; }
+        @endif
     </style>
 </head>
 <body>

@@ -439,16 +439,94 @@ class EpirmaDocumentStatusService
     /**
      * Recompute DRRS AA queue status from signed/open route documents.
      * Cancelled/failed routes alone do not keep the request "in_progress".
+     * When routing has fully ended without signatures, return the handoff to DRRS PDRC.
      */
     public function refreshAaStatus(AssistanceRequest $request): string
     {
-        $status = $this->deriveAaStatus($request->fresh() ?? $request);
         $fresh = $request->fresh() ?? $request;
+        if ($this->revertForwardIfRoutingInactive($fresh)) {
+            return '';
+        }
+
+        $status = $this->deriveAaStatus($fresh->fresh() ?? $fresh);
+        $fresh = $fresh->fresh() ?? $fresh;
         if ((string) $fresh->epirma_aa_status !== $status) {
             $fresh->forceFill(['epirma_aa_status' => $status])->save();
         }
 
         return $status;
+    }
+
+    /**
+     * Return the assessment to DRRS PDRC (pre-forward) when e-PIRMA routing is inactive.
+     *
+     * @param  bool  $allowEmptyRoutes  When true (e.g. after deleting the last tracking row),
+     *                                  an empty route set also reverts the forward handoff.
+     */
+    public function revertForwardIfRoutingInactive(AssistanceRequest $request, bool $allowEmptyRoutes = false): bool
+    {
+        $fresh = $request->fresh() ?? $request;
+        if (blank($fresh->epirma_forwarded_to_drrs_aa_at)) {
+            return false;
+        }
+        if (filled($fresh->epirma_assessment_signed_at) || filled($fresh->epirma_response_letter_signed_at)) {
+            return false;
+        }
+
+        $routes = EpirmaSignedDocument::query()
+            ->where('assistance_request_id', $fresh->id)
+            ->where('action', EpirmaSignedDocument::ACTION_ROUTE)
+            ->whereIn('document_type', [
+                EpirmaSignedDocument::TYPE_ASSESSMENT,
+                EpirmaSignedDocument::TYPE_RESPONSE_LETTER,
+            ])
+            ->get(['id', 'routing_status']);
+
+        $hasActive = $routes->contains(function (EpirmaSignedDocument $document): bool {
+            return in_array((string) $document->routing_status, [
+                ...EpirmaSignedDocument::OPEN_STATUSES,
+                EpirmaSignedDocument::STATUS_SIGNED,
+            ], true);
+        });
+        if ($hasActive) {
+            return false;
+        }
+
+        if ($routes->isEmpty()) {
+            if (! $allowEmptyRoutes) {
+                return false;
+            }
+        } else {
+            $allEnded = $routes->every(fn (EpirmaSignedDocument $document): bool => in_array(
+                (string) $document->routing_status,
+                [EpirmaSignedDocument::STATUS_CANCELLED, EpirmaSignedDocument::STATUS_FAILED],
+                true
+            ));
+            if (! $allEnded) {
+                return false;
+            }
+
+            // Fresh re-forward after cancel sets aa_status=pending while cancelled
+            // history rows remain. Do not undo that handoff on page load / capabilities.
+            // Stale in_progress + cancelled-only still reverts so PDRC can edit again.
+            if ((string) $fresh->epirma_aa_status === 'pending') {
+                return false;
+            }
+        }
+
+        $fresh->forceFill([
+            'epirma_forwarded_to_drrs_aa_at' => null,
+            'epirma_forwarded_by' => null,
+            'epirma_aa_status' => null,
+        ])->save();
+
+        app(WorkflowNotificationService::class)->broadcastEpirmaStatusChanged($fresh->fresh() ?? $fresh, [
+            'routing_status' => EpirmaSignedDocument::STATUS_CANCELLED,
+            'source' => 'forward_reverted',
+            'forwarded' => false,
+        ]);
+
+        return true;
     }
 
     /**
@@ -694,10 +772,13 @@ class EpirmaDocumentStatusService
             return 'in_progress';
         }
 
-        // Forwarded with only cancelled/failed (or no) routes → awaiting re-route.
-        return filled($request->epirma_forwarded_to_drrs_aa_at)
-            ? 'pending'
-            : (string) ($request->epirma_aa_status ?: 'pending');
+        // Forwarded with only cancelled/failed (or no) routes → awaiting AA action / PDRC return.
+        if (filled($request->epirma_forwarded_to_drrs_aa_at)) {
+            return 'pending';
+        }
+
+        // Not in the AA queue — keep whatever status is stored (usually null after revert).
+        return (string) ($request->epirma_aa_status ?: '');
     }
 
     /**

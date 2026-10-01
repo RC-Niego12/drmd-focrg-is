@@ -1,10 +1,10 @@
-const CACHE_VERSION = 'dromis-pwa-v20260720-01';
+const CACHE_VERSION = 'dromis-pwa-v20260909-canonical-host-05';
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const OFFLINE_URL = '/offline.html';
 
 const PRECACHE_URLS = [
     OFFLINE_URL,
-    '/manifest.webmanifest',
+    '/manifest.json',
     '/favicon.ico',
     '/images/pwa-icon-192.png',
     '/images/pwa-icon-512.png',
@@ -24,7 +24,7 @@ const isStaticAsset = (request) => {
             || url.pathname.startsWith('/images/')
             || url.pathname === '/favicon.ico'
             || url.pathname === '/favicon.svg'
-            || url.pathname === '/manifest.webmanifest'
+            || url.pathname === '/manifest.json'
             || ['style', 'script', 'font', 'image'].includes(request.destination)
         );
 };

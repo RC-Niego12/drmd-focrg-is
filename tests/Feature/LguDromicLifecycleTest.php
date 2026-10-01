@@ -9,6 +9,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Inertia\Testing\AssertableInertia as Assert;
 use Spatie\Permission\Models\Role;
 use Spatie\Permission\PermissionRegistrar;
@@ -68,6 +69,309 @@ function completeLguDromicPayload(array $overrides = []): array
         ],
     ], $overrides);
 }
+
+it('creates one signed relief request for multiple incidents of the same type', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $user = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $fniItem = FniLibraryItem::query()->create([
+        'item_category' => 'Food',
+        'item_name' => 'Family Food Pack',
+        'brand_description' => 'Standard family food pack',
+        'unit_of_measure' => 'box',
+    ]);
+
+    foreach ([
+        ['incident_name' => 'Purok One Fire', 'incident_date' => '2026-08-01', 'occurrence_started_at' => '2026-08-01T08:00', 'information_received_at' => '2026-08-01T09:00', 'incident_ended_at' => '2026-08-01T10:00'],
+        ['incident_name' => 'Purok Two Fire', 'incident_date' => '2026-08-02', 'occurrence_started_at' => '2026-08-02T09:00', 'information_received_at' => '2026-08-02T10:00', 'incident_ended_at' => '2026-08-02T11:00'],
+    ] as $incident) {
+        $this->actingAs($user)
+            ->post('/lgu/dromic-sitrep', completeLguDromicPayload($incident))
+            ->assertSessionHasNoErrors();
+    }
+
+    $seriesKeys = AssistanceRequest::query()
+        ->where('submission_type', 'lgu_dromic_relief_request')
+        ->pluck('lgu_dromic_series_key')
+        ->all();
+
+    AssistanceRequest::query()
+        ->whereIn('lgu_dromic_series_key', $seriesKeys)
+        ->each(function (AssistanceRequest $report) use ($user): void {
+            $this->actingAs($user)
+                ->post("/lgu/dromic-sitrep/{$report->id}/signed-copies", [
+                    'signed_report' => UploadedFile::fake()->create('signed-report.pdf', 100, 'application/pdf'),
+                ])
+                ->assertSessionHasNoErrors();
+        });
+
+    $this->actingAs($user)
+        ->post('/lgu/dromic-sitrep/relief-requests', [
+            'incident_series_keys' => $seriesKeys,
+            'requested_fni_items' => [[
+                'fni_library_item_id' => $fniItem->id,
+                'requested_quantity' => 25,
+            ]],
+            'signed_request' => UploadedFile::fake()->create('signed-consolidated-request.pdf', 100, 'application/pdf'),
+        ])
+        ->assertRedirect('/lgu/dromic-sitrep?tab=requests')
+        ->assertSessionHasNoErrors();
+
+    $request = AssistanceRequest::query()->where('purpose', 'Relief Augmentation')->latest('id')->firstOrFail();
+    expect(data_get($request->lgu_dromic_payload, 'standalone_relief_request'))->toBeTrue()
+        ->and(data_get($request->lgu_dromic_payload, 'linked_incidents'))->toHaveCount(2)
+        ->and(data_get($request->lgu_dromic_payload, 'incident_type'))->toBe('Fire Incident')
+        ->and($request->lgu_signed_request_path)->not->toBeNull()
+        ->and($request->lgu_signed_report_path)->toBeNull()
+        ->and($request->lguDromicRequestedItems()->count())->toBe(1);
+    Storage::disk('public')->assertExists($request->lgu_signed_request_path);
+
+    $this->actingAs($user)
+        ->post("/lgu/dromic-sitrep/{$request->id}/submit")
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    expect($request->fresh()->lgu_report_status)->toBe('submitted')
+        ->and($request->fresh()->lgu_relief_validation_status)->toBe('pending_review')
+        ->and($request->fresh()->lgu_dromic_validation_status)->toBeNull();
+
+    $this->actingAs($user)
+        ->get('/lgu/dromic-sitrep')
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->where('reliefRequestIncidentOptions', []));
+});
+
+it('hands off a consolidated lump request to DRRS with linked incidents and consolidated FNI', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $user = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $drrs = User::where('email', 'drrs@example.test')->firstOrFail();
+    $fniItem = FniLibraryItem::query()->create([
+        'item_category' => 'Food',
+        'item_name' => 'Family Food Pack',
+        'brand_description' => 'Standard family food pack',
+        'unit_of_measure' => 'box',
+    ]);
+
+    foreach ([
+        ['incident_name' => 'Purok One Fire', 'incident_date' => '2026-08-01', 'occurrence_started_at' => '2026-08-01T08:00', 'information_received_at' => '2026-08-01T09:00', 'incident_ended_at' => '2026-08-01T10:00', 'area_rows' => [['area' => 'Test Barangay', 'affected_families' => 10, 'affected_persons' => 40]]],
+        ['incident_name' => 'Purok Two Fire', 'incident_date' => '2026-08-02', 'occurrence_started_at' => '2026-08-02T09:00', 'information_received_at' => '2026-08-02T10:00', 'incident_ended_at' => '2026-08-02T11:00', 'area_rows' => [['area' => 'Test Barangay', 'affected_families' => 15, 'affected_persons' => 60]]],
+    ] as $incident) {
+        $this->actingAs($user)
+            ->post('/lgu/dromic-sitrep', completeLguDromicPayload($incident))
+            ->assertSessionHasNoErrors();
+    }
+
+    $seriesKeys = AssistanceRequest::query()
+        ->where('submission_type', 'lgu_dromic_relief_request')
+        ->pluck('lgu_dromic_series_key')
+        ->all();
+
+    AssistanceRequest::query()
+        ->whereIn('lgu_dromic_series_key', $seriesKeys)
+        ->each(function (AssistanceRequest $report) use ($user): void {
+            $this->actingAs($user)
+                ->post("/lgu/dromic-sitrep/{$report->id}/signed-copies", [
+                    'signed_report' => UploadedFile::fake()->create('signed-report.pdf', 100, 'application/pdf'),
+                ])
+                ->assertSessionHasNoErrors();
+        });
+
+    $this->actingAs($user)
+        ->post('/lgu/dromic-sitrep/relief-requests', [
+            'incident_series_keys' => $seriesKeys,
+            'requested_fni_items' => [[
+                'fni_library_item_id' => $fniItem->id,
+                'requested_quantity' => 25,
+            ]],
+            'signed_request' => UploadedFile::fake()->create('signed-consolidated-request.pdf', 100, 'application/pdf'),
+        ])
+        ->assertSessionHasNoErrors();
+
+    $lump = AssistanceRequest::query()
+        ->where('lgu_dromic_payload->standalone_relief_request', true)
+        ->latest('id')
+        ->firstOrFail();
+
+    $this->actingAs($user)
+        ->post("/lgu/dromic-sitrep/{$lump->id}/submit")
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($drrs)
+        ->patch("/dromic/lgu-reports/{$lump->id}/relief-validation", [
+            'validation_status' => 'validated_no_findings',
+            'review_note' => 'Lump request letter validated for multi-incident handoff.',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $fniRequest = AssistanceRequest::query()
+        ->where('source_lgu_dromic_request_id', $lump->id)
+        ->where('submission_type', 'fni_request')
+        ->firstOrFail();
+
+    expect($fniRequest->incident_count)->toBe(2)
+        ->and($fniRequest->items()->count())->toBe(1)
+        ->and((float) $fniRequest->items()->first()->requested_quantity)->toBe(25.0)
+        ->and(data_get($fniRequest->assessment_form_data, 'standalone_relief_request'))->toBeTrue()
+        ->and(data_get($fniRequest->assessment_form_data, 'linked_incidents'))->toHaveCount(2)
+        ->and(data_get($fniRequest->assessment_form_data, 'incidents'))->toHaveCount(2)
+        ->and(collect(data_get($fniRequest->assessment_form_data, 'incidents'))->pluck('incident_details')->all())
+        ->toContain('Purok One Fire', 'Purok Two Fire')
+        ->and(collect(data_get($fniRequest->assessment_form_data, 'incidents'))->pluck('incident_type')->unique()->values()->all())
+        ->toBe(['Fire Incident'])
+        ->and(collect(data_get($fniRequest->assessment_form_data, 'incidents'))->contains(
+            fn ($row): bool => str_contains(Str::lower((string) data_get($row, 'incident_type')), 'consolidated')
+        ))->toBeFalse();
+});
+
+it('omits incidents without an uploaded signed report from consolidated relief options', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $user = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $fniItem = FniLibraryItem::query()->create([
+        'item_category' => 'Food',
+        'item_name' => 'Family Food Pack',
+        'brand_description' => 'Standard family food pack',
+        'unit_of_measure' => 'box',
+    ]);
+
+    $this->actingAs($user)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload(['incident_name' => 'Unsigned Fire']))
+        ->assertSessionHasNoErrors();
+
+    $unsigned = AssistanceRequest::query()->where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+
+    $this->actingAs($user)
+        ->get('/lgu/dromic-sitrep')
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->where('reliefRequestIncidentOptions', []));
+
+    $this->actingAs($user)
+        ->post('/lgu/dromic-sitrep/relief-requests', [
+            'incident_series_keys' => [$unsigned->lgu_dromic_series_key],
+            'requested_fni_items' => [[
+                'fni_library_item_id' => $fniItem->id,
+                'requested_quantity' => 10,
+            ]],
+            'signed_request' => UploadedFile::fake()->create('signed-consolidated-request.pdf', 100, 'application/pdf'),
+        ])
+        ->assertSessionHasErrors(['incident_series_keys' => 'Every selected incident must have an uploaded signed DROMIC report.']);
+});
+
+it('keeps per-incident FNI needs without a request letter and exposes them for lump requests', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $user = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $fniItem = FniLibraryItem::query()->create([
+        'item_category' => 'Food',
+        'item_name' => 'Family Food Pack',
+        'brand_description' => 'Standard family food pack',
+        'unit_of_measure' => 'box',
+    ]);
+
+    foreach ([
+        ['quantity' => 10, 'incident_name' => 'Purok One Fire needs', 'incident_date' => '2026-08-01', 'occurrence_started_at' => '2026-08-01T08:00', 'information_received_at' => '2026-08-01T09:00', 'incident_ended_at' => '2026-08-01T10:00'],
+        ['quantity' => 15, 'incident_name' => 'Purok Two Fire needs', 'incident_date' => '2026-08-02', 'occurrence_started_at' => '2026-08-02T09:00', 'information_received_at' => '2026-08-02T10:00', 'incident_ended_at' => '2026-08-02T11:00'],
+    ] as $incident) {
+        $this->actingAs($user)
+            ->post('/lgu/dromic-sitrep', completeLguDromicPayload([
+                'incident_name' => $incident['incident_name'],
+                'incident_date' => $incident['incident_date'],
+                'occurrence_started_at' => $incident['occurrence_started_at'],
+                'information_received_at' => $incident['information_received_at'],
+                'incident_ended_at' => $incident['incident_ended_at'],
+                'has_relief_request' => false,
+                'requested_fni_items' => [[
+                    'fni_library_item_id' => $fniItem->id,
+                    'requested_quantity' => $incident['quantity'],
+                ]],
+            ]))
+            ->assertSessionHasNoErrors();
+    }
+
+    $reports = AssistanceRequest::query()
+        ->where('submission_type', 'lgu_dromic_relief_request')
+        ->orderBy('id')
+        ->get();
+
+    expect($reports)->toHaveCount(2)
+        ->and($reports->every(fn (AssistanceRequest $report): bool => blank($report->lgu_relief_request_reference)))->toBeTrue()
+        ->and((int) data_get($reports[0]->lgu_dromic_payload, 'requested_fni_items.0.requested_quantity'))->toBe(10)
+        ->and((int) data_get($reports[1]->lgu_dromic_payload, 'requested_fni_items.0.requested_quantity'))->toBe(15)
+        ->and($reports[0]->lguDromicRequestedItems()->count())->toBe(1)
+        ->and($reports[1]->lguDromicRequestedItems()->count())->toBe(1);
+
+    foreach ($reports as $report) {
+        $this->actingAs($user)
+            ->post("/lgu/dromic-sitrep/{$report->id}/signed-copies", [
+                'signed_report' => UploadedFile::fake()->create('signed-report.pdf', 100, 'application/pdf'),
+            ])
+            ->assertSessionHasNoErrors();
+    }
+
+    $this->actingAs($user)
+        ->get('/lgu/dromic-sitrep')
+        ->assertOk()
+        ->assertInertia(fn (Assert $page) => $page
+            ->has('reliefRequestIncidentOptions', 2)
+            ->where('reliefRequestIncidentOptions.0.requested_fni_items.0.fni_library_item_id', $fniItem->id)
+            ->where('reliefRequestIncidentOptions.1.requested_fni_items.0.fni_library_item_id', $fniItem->id));
+});
+
+it('does not carry prior FNI needs or include-request onto the next SitRep in the series', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $user = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $fniItem = FniLibraryItem::query()->create([
+        'item_category' => 'Food',
+        'item_name' => 'Family Food Pack',
+        'brand_description' => 'Standard family food pack',
+        'unit_of_measure' => 'box',
+    ]);
+
+    $this->actingAs($user)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload([
+            'has_relief_request' => false,
+            'requested_fni_items' => [[
+                'fni_library_item_id' => $fniItem->id,
+                'requested_quantity' => 20,
+            ]],
+        ]))
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $first = AssistanceRequest::where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+    expect(data_get($first->lgu_dromic_payload, 'requested_fni_items'))->toHaveCount(1);
+
+    $this->actingAs($user)
+        ->post("/lgu/dromic-sitrep/{$first->id}/submit")
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($user)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload([
+            'report_series_key' => $first->lgu_dromic_series_key,
+            'information_received_at' => '2026-07-27T12:00',
+            'has_relief_request' => false,
+            'requested_fni_items' => [],
+        ]))
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $second = AssistanceRequest::query()
+        ->where('lgu_dromic_series_key', $first->lgu_dromic_series_key)
+        ->where('lgu_dromic_report_number', 2)
+        ->firstOrFail();
+
+    expect(data_get($second->lgu_dromic_payload, 'requested_fni_items', []))->toBe([])
+        ->and((bool) data_get($second->lgu_dromic_payload, 'has_relief_request'))->toBeFalse()
+        ->and($second->lgu_relief_request_reference)->toBeNull()
+        ->and($second->lguDromicRequestedItems()->count())->toBe(0)
+        ->and(data_get($first->fresh()->lgu_dromic_payload, 'requested_fni_items'))->toHaveCount(1);
+});
 
 it('allows unresolved sections in drafts but requires an entry or N A choice before finalizing', function (): void {
     $this->seed(DatabaseSeeder::class);
@@ -153,7 +457,8 @@ it('rejects future information received and incident ended timestamps', function
         ->assertSessionHasErrors(['incident_ended_at']);
 });
 
-it('keeps drafts editable and final reports locked before explicit DSWD submission', function (): void {
+it('keeps drafts editable, lets LGU reopen unsubmitted finals, and locks encoding after DSWD submission', function (): void {
+    Storage::fake('public');
     $this->seed(DatabaseSeeder::class);
     $user = User::where('email', 'superadmin@example.test')->firstOrFail();
 
@@ -181,6 +486,57 @@ it('keeps drafts editable and final reports locked before explicit DSWD submissi
         ->get("/lgu/dromic-sitrep/{$report->id}/pdf")
         ->assertOk()
         ->assertHeader('content-type', 'application/pdf');
+
+    $this->actingAs($user)
+        ->patch("/lgu/dromic-sitrep/{$report->id}", completeLguDromicPayload(['submission_status' => 'draft']))
+        ->assertStatus(422);
+
+    $this->actingAs($user)
+        ->post("/lgu/dromic-sitrep/{$report->id}/amendment-request", [
+            'target' => 'report',
+            'reason' => 'Unsubmitted finals must reopen directly instead of requesting DRIMS amendment permission.',
+        ])
+        ->assertStatus(422);
+
+    $this->actingAs($user)
+        ->post("/lgu/dromic-sitrep/{$report->id}/reopen")
+        ->assertRedirect()
+        ->assertSessionHasNoErrors()
+        ->assertSessionHas('reopen_draft_id', $report->id);
+
+    $report->refresh();
+    expect($report->lgu_report_status)->toBe('draft')
+        ->and($report->lgu_finalized_at)->toBeNull()
+        ->and($report->lgu_signed_report_path)->toBeNull();
+
+    $this->actingAs($user)
+        ->patch("/lgu/dromic-sitrep/{$report->id}", completeLguDromicPayload([
+            'submission_status' => 'draft',
+            'incident_name' => 'Revised before submit',
+        ]))
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    expect($report->fresh()->lgu_dromic_payload['incident_name'])->toBe('Revised before submit');
+
+    $this->actingAs($user)
+        ->patch("/lgu/dromic-sitrep/{$report->id}", completeLguDromicPayload([
+            'incident_name' => 'Revised before submit',
+        ]))
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($user)
+        ->post("/lgu/dromic-sitrep/{$report->id}/submit")
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    expect($report->fresh()->lgu_report_status)->toBe('advance_submitted')
+        ->and($report->fresh()->lgu_submitted_to_dswd_at)->not->toBeNull();
+
+    $this->actingAs($user)
+        ->post("/lgu/dromic-sitrep/{$report->id}/reopen")
+        ->assertStatus(422);
 
     $this->actingAs($user)
         ->patch("/lgu/dromic-sitrep/{$report->id}", completeLguDromicPayload(['submission_status' => 'draft']))
@@ -904,6 +1260,30 @@ it('renders the harmonized narrative report with template logos signatories orde
         ->and(substr_count($html, '>Total<'))->toBeGreaterThanOrEqual(2)
         ->and(strpos($html, 'Gaps/Challenges and Status/Actions Undertaken'))->toBeLessThan(strpos($html, 'Response Actions and Interventions'))
         ->and(strpos($html, 'Zmlyc3QtY29sbGFnZQ=='))->toBeLessThan(strpos($html, 'c2Vjb25kLWNvbGxhZ2U='));
+});
+
+it('renders a live LGU narrative report preview from unsaved encoding values', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    $user = User::where('email', 'superadmin@example.test')->firstOrFail();
+
+    $response = $this->actingAs($user)
+        ->postJson('/lgu/dromic-sitrep/preview', completeLguDromicPayload([
+            'narrative' => "The blaze was contained and extinguished by local responders.\n\nTwo families were displaced in Barangay Capayahan.",
+        ]));
+
+    $response->assertOk();
+    $html = (string) $response->json('html');
+
+    expect($html)
+        ->toContain('LGU DROMIC / Situational Report No. 1 on the Fire Incident')
+        ->toContain('Situation Overview')
+        ->toContain('class="narrative-paragraph"')
+        ->toContain('The blaze was contained and extinguished by local responders.')
+        ->toContain('Two families were displaced in Barangay Capayahan.')
+        ->toContain('Status of Affected Population')
+        ->toContain('class="brand-header"')
+        ->toContain('position: static')
+        ->and($html)->not->toContain('Read-only encoded report');
 });
 
 it('renders one consolidated age sex and sectoral table for all completed evacuation centers', function (): void {
@@ -1893,4 +2273,378 @@ it('separates DROMIC and relief document review permissions and locks each valid
     $this->actingAs($owner)->post("/lgu/dromic-sitrep/{$report->id}/signed-copies", [
         'signed_request' => UploadedFile::fake()->create('replacement-request.pdf', 100, 'application/pdf'),
     ])->assertStatus(422);
+});
+
+it('lets LGU request amendment on a submitted report and DRIMS approve into a same-number correction draft', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $owner = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $drims = User::where('email', 'drims@example.test')->firstOrFail();
+
+    $this->actingAs($owner)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload())
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $report = AssistanceRequest::where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+    expect($report->lgu_report_status)->toBe('final');
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/submit")
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    expect($report->fresh()->lgu_report_status)->toBe('advance_submitted');
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/amendment-request", [
+            'reason' => 'Omitted outside EC families were validated after finalize and a next SitRep would be unreasonable within hours.',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    expect($report->fresh()->lgu_amendment_request_status)->toBe('requested')
+        ->and($report->fresh()->lgu_amendment_requested_by)->toBe($owner->id);
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/amendment-request", [
+            'reason' => 'Duplicate amendment request should be rejected by the pending gate.',
+        ])
+        ->assertStatus(422);
+
+    $this->actingAs($drims)
+        ->post("/dromic/lgu-reports/{$report->id}/amendment-request", [
+            'decision' => 'approve',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors()
+        ->assertSessionHas('correction_draft_id');
+
+    $fresh = $report->fresh();
+    $draft = AssistanceRequest::query()
+        ->where('lgu_correction_of_id', $report->id)
+        ->where('lgu_correction_target', 'report')
+        ->firstOrFail();
+
+    expect($fresh->lgu_amendment_request_status)->toBe('approved')
+        ->and($fresh->lgu_dromic_validation_status)->toBe('needs_lgu_action')
+        ->and($fresh->lgu_dromic_correction_scope)->toBe('encoding')
+        ->and($draft->lgu_report_status)->toBe('draft')
+        ->and($draft->lgu_dromic_report_number)->toBe($fresh->lgu_dromic_report_number)
+        ->and((int) $draft->lgu_dromic_revision_number)->toBeGreaterThan((int) $fresh->lgu_dromic_revision_number);
+});
+
+it('keeps encoded FNI needs when a report amendment correction is finalized', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $owner = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $drims = User::where('email', 'drims@example.test')->firstOrFail();
+    $fniItem = FniLibraryItem::query()->create([
+        'item_category' => 'Food',
+        'item_name' => 'Family Food Pack',
+        'brand_description' => 'Standard family food pack',
+        'unit_of_measure' => 'box',
+    ]);
+
+    $this->actingAs($owner)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload([
+            'has_relief_request' => false,
+            'requested_fni_items' => [[
+                'fni_library_item_id' => $fniItem->id,
+                'requested_quantity' => 12,
+            ]],
+        ]))
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $report = AssistanceRequest::where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+    expect(data_get($report->lgu_dromic_payload, 'requested_fni_items.0.requested_quantity'))->toBe(12);
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/submit")
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/amendment-request", [
+            'reason' => 'Need to encode omitted response actions while keeping the already encoded FNI needs.',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($drims)
+        ->post("/dromic/lgu-reports/{$report->id}/amendment-request", [
+            'decision' => 'approve',
+        ])
+        ->assertRedirect()
+        ->assertSessionHas('correction_draft_id');
+
+    $draft = AssistanceRequest::query()
+        ->where('lgu_correction_of_id', $report->id)
+        ->where('lgu_correction_target', 'report')
+        ->firstOrFail();
+
+    expect(data_get($draft->lgu_dromic_payload, 'requested_fni_items.0.requested_quantity'))->toBe(12);
+
+    $payload = completeLguDromicPayload([
+        ...(array) $draft->lgu_dromic_payload,
+        'has_relief_request' => false,
+        'requested_fni_items' => [[
+            'fni_library_item_id' => $fniItem->id,
+            'requested_quantity' => 18,
+        ]],
+        'submission_status' => 'final',
+    ]);
+
+    $this->actingAs($owner)
+        ->patch("/lgu/dromic-sitrep/{$draft->id}", $payload)
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $draft->refresh();
+    expect(data_get($draft->lgu_dromic_payload, 'requested_fni_items'))->toHaveCount(1)
+        ->and((int) data_get($draft->lgu_dromic_payload, 'requested_fni_items.0.requested_quantity'))->toBe(18)
+        ->and((bool) data_get($draft->lgu_dromic_payload, 'has_relief_request'))->toBeFalse()
+        ->and($draft->lguDromicRequestedItems()->count())->toBe(1)
+        ->and((int) $draft->lguDromicRequestedItems()->first()->requested_quantity)->toBe(18);
+});
+
+it('lets LGU request amendment after advance submit and DRIMS deny leaves encoding locked', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $owner = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $drims = User::where('email', 'drims@example.test')->firstOrFail();
+
+    $this->actingAs($owner)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload())
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+    $report = AssistanceRequest::where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+    $this->actingAs($owner)->post("/lgu/dromic-sitrep/{$report->id}/submit")->assertRedirect();
+
+    expect($report->fresh()->lgu_report_status)->toBe('advance_submitted');
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/amendment-request", [
+            'reason' => 'Additional damaged-house counts arrived after the advance copy was sent to DSWD.',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($drims)
+        ->post("/dromic/lgu-reports/{$report->id}/amendment-request", [
+            'decision' => 'deny',
+            'review_note' => 'Create the next sequential SitRep instead of amending this advance copy.',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    expect($report->fresh()->lgu_amendment_request_status)->toBe('denied')
+        ->and(AssistanceRequest::query()->where('lgu_correction_of_id', $report->id)->count())->toBe(0);
+
+    $this->actingAs($owner)
+        ->patch("/lgu/dromic-sitrep/{$report->id}", completeLguDromicPayload())
+        ->assertStatus(422);
+});
+
+it('blocks amendment requests after validated no findings and on drafts or correction drafts', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $owner = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $drims = User::where('email', 'drims@example.test')->firstOrFail();
+
+    $this->actingAs($owner)
+        ->post('/lgu/dromic-sitrep', [...completeLguDromicPayload(), 'submission_status' => 'draft'])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+    $draft = AssistanceRequest::where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$draft->id}/amendment-request", [
+            'reason' => 'Drafts should not be eligible for amendment permission requests.',
+        ])
+        ->assertStatus(422);
+
+    $this->actingAs($owner)
+        ->patch("/lgu/dromic-sitrep/{$draft->id}", completeLguDromicPayload())
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+    $report = $draft->fresh();
+    $this->actingAs($owner)->post("/lgu/dromic-sitrep/{$report->id}/submit")->assertRedirect();
+
+    $this->actingAs($drims)
+        ->patch("/dromic/lgu-reports/{$report->id}/validation", [
+            'validation_status' => 'validated_no_findings',
+            'review_note' => 'Advance copy is complete and accurate.',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/amendment-request", [
+            'reason' => 'Validated reports should no longer accept amendment requests from the LGU.',
+        ])
+        ->assertStatus(422);
+});
+
+it('lets LGU request amendment on a relief request and DRRS approve into a request correction draft', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $owner = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $drrs = User::where('email', 'drrs@example.test')->firstOrFail();
+    $fniItem = FniLibraryItem::query()->create([
+        'item_category' => 'Food',
+        'item_name' => 'Family Food Pack',
+        'brand_description' => 'Standard family food pack',
+        'unit_of_measure' => 'box',
+    ]);
+
+    $this->actingAs($owner)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload([
+            'has_relief_request' => true,
+            'requested_fni_items' => [[
+                'fni_library_item_id' => $fniItem->id,
+                'requested_quantity' => 10,
+            ]],
+        ]))
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $report = AssistanceRequest::where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+    expect($report->lgu_relief_request_reference)->not->toBeNull();
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/signed-copies", [
+            'signed_report' => UploadedFile::fake()->create('signed-report.pdf', 100, 'application/pdf'),
+            'signed_request' => UploadedFile::fake()->create('signed-request.pdf', 100, 'application/pdf'),
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/submit")
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/amendment-request", [
+            'target' => 'request',
+            'reason' => 'Omitted FNI quantities were confirmed after finalize and creating a new relief request letter is unreasonable.',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    expect($report->fresh()->lgu_amendment_request_status)->toBe('requested')
+        ->and($report->fresh()->lgu_amendment_request_target)->toBe('request');
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/amendment-request", [
+            'target' => 'request',
+            'reason' => 'Duplicate amendment request should be rejected by the pending gate.',
+        ])
+        ->assertStatus(422);
+
+    $this->actingAs($drrs)
+        ->post("/dromic/lgu-reports/{$report->id}/amendment-request", [
+            'decision' => 'approve',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors()
+        ->assertSessionHas('correction_draft_id');
+
+    $fresh = $report->fresh();
+    $draft = AssistanceRequest::query()
+        ->where('lgu_correction_of_id', $report->id)
+        ->where('lgu_correction_target', 'request')
+        ->firstOrFail();
+
+    expect($fresh->lgu_amendment_request_status)->toBe('approved')
+        ->and($fresh->lgu_relief_validation_status)->toBe('needs_lgu_action')
+        ->and($fresh->lgu_relief_correction_scope)->toBe('both')
+        ->and($draft->lgu_report_status)->toBe('draft')
+        ->and($draft->lgu_correction_target)->toBe('request');
+});
+
+it('blocks LGU relief amendment when DRRS already returned the request for correction', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $owner = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $drrs = User::where('email', 'drrs@example.test')->firstOrFail();
+    $fniItem = FniLibraryItem::query()->create([
+        'item_category' => 'Food',
+        'item_name' => 'Family Food Pack',
+        'brand_description' => 'Standard family food pack',
+        'unit_of_measure' => 'box',
+    ]);
+
+    $this->actingAs($owner)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload([
+            'has_relief_request' => true,
+            'requested_fni_items' => [[
+                'fni_library_item_id' => $fniItem->id,
+                'requested_quantity' => 8,
+            ]],
+        ]))
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $report = AssistanceRequest::where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/signed-copies", [
+            'signed_report' => UploadedFile::fake()->create('signed-report.pdf', 100, 'application/pdf'),
+            'signed_request' => UploadedFile::fake()->create('signed-request.pdf', 100, 'application/pdf'),
+        ])
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/submit")
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($drrs)
+        ->patch("/dromic/lgu-reports/{$report->id}/relief-validation", [
+            'validation_status' => 'needs_lgu_action',
+            'review_note' => 'Requested quantities do not match the attached request letter narrative.',
+            'correction_scope' => 'both',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/amendment-request", [
+            'target' => 'request',
+            'reason' => 'Should not request amendment when DRRS already returned the letter for correction.',
+        ])
+        ->assertStatus(422);
+});
+
+it('blocks LGU report amendment when DSWD already returned the report for correction', function (): void {
+    Storage::fake('public');
+    $this->seed(DatabaseSeeder::class);
+    $owner = User::where('email', 'superadmin@example.test')->firstOrFail();
+    $drims = User::where('email', 'drims@example.test')->firstOrFail();
+
+    $this->actingAs($owner)
+        ->post('/lgu/dromic-sitrep', completeLguDromicPayload())
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $report = AssistanceRequest::where('submission_type', 'lgu_dromic_relief_request')->latest('id')->firstOrFail();
+    $this->actingAs($owner)->post("/lgu/dromic-sitrep/{$report->id}/submit")->assertRedirect();
+
+    $this->actingAs($drims)
+        ->patch("/dromic/lgu-reports/{$report->id}/validation", [
+            'validation_status' => 'needs_lgu_action',
+            'review_note' => 'Encoded families are incomplete and must be corrected.',
+            'correction_scope' => 'encoding',
+        ])
+        ->assertRedirect()
+        ->assertSessionHasNoErrors();
+
+    $this->actingAs($owner)
+        ->post("/lgu/dromic-sitrep/{$report->id}/amendment-request", [
+            'target' => 'report',
+            'reason' => 'Should not request amendment when DSWD already returned the report for correction.',
+        ])
+        ->assertStatus(422);
 });

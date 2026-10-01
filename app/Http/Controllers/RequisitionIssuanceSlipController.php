@@ -217,6 +217,7 @@ class RequisitionIssuanceSlipController extends Controller
             'items.*.brand_description' => ['nullable', 'string', 'max:1000'],
             'items.*.expiry' => ['nullable', 'string', 'max:1000'],
             'items.*.unit' => ['nullable', 'string', 'max:80'],
+            'items.*.unit_cost' => ['nullable', 'numeric', 'min:0'],
             'items.*.warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
             'items.*.warehouse_name' => ['nullable', 'string', 'max:255'],
             'items.*.warehouse_type' => ['nullable', 'string', 'max:255'],
@@ -512,6 +513,7 @@ class RequisitionIssuanceSlipController extends Controller
                 $slip->allocationItems()->createMany(collect($data['items'])->map(fn (array $item): array => [
                     'request_item_id' => $item['request_item_id'] ?? null, 'warehouse_id' => $item['warehouse_id'] ?? null,
                     'unit' => $item['unit'] ?? null, 'item_name' => $item['item_name'], 'quantity' => (int) ($item['quantity'] ?? 0),
+                    'unit_cost' => isset($item['unit_cost']) && $item['unit_cost'] !== '' ? round((float) $item['unit_cost'], 2) : null,
                     'brand_description' => $item['brand_description'] ?? null,
                     'expiry' => $item['expiry'] ?? null,
                     'warehouse_name' => $item['warehouse_name'] ?? null,

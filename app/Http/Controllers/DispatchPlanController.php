@@ -13,9 +13,11 @@ use App\Models\OperationalLibraryValue;
 use App\Models\RequisitionIssuanceSlip;
 use App\Models\User;
 use App\Models\Warehouse;
+use App\Notifications\WorkflowNotification;
 use App\Services\AuditLogger;
 use App\Services\DispatchInventoryIssuanceService;
 use App\Services\DispatchInventoryReturnService;
+use App\Services\DeliveryEvidencePhotoService;
 use App\Services\InventoryBalanceService;
 use App\Services\RealtimePublisher;
 use App\Services\RisDrDocumentPdfService;
@@ -28,6 +30,7 @@ use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -42,30 +45,87 @@ class DispatchPlanController extends Controller
     public function reverseLocation(Request $request): JsonResponse
     {
         abort_unless($request->user() && $this->isDswdEmployee($request->user()), 403);
-        $data = $request->validate(['latitude' => ['required', 'numeric', 'between:-90,90'], 'longitude' => ['required', 'numeric', 'between:-180,180']]);
+        $data = $request->validate([
+            'latitude' => ['required', 'numeric', 'between:-90,90'],
+            'longitude' => ['required', 'numeric', 'between:-180,180'],
+            'detailed' => ['sometimes', 'boolean'],
+        ]);
+        $detailed = (bool) ($data['detailed'] ?? false);
         $fallback = number_format((float) $data['latitude'], 6).', '.number_format((float) $data['longitude'], 6);
-        try {
+        $cacheKey = sprintf('dispatch:reverse-location:v2:%s:%.4f:%.4f', $detailed ? 'detailed' : 'quick', (float) $data['latitude'], (float) $data['longitude']);
+
+        $resolved = Cache::remember($cacheKey, now()->addDays(30), function () use ($data, $fallback, $detailed): array {
+          try {
+            $geoapifyKey = trim((string) config('services.geoapify.api_key'));
+            if ($geoapifyKey !== '') {
+                $geoapify = Http::connectTimeout(1)->timeout(2)->get('https://api.geoapify.com/v1/geocode/reverse', [
+                    'lat' => $data['latitude'],
+                    'lon' => $data['longitude'],
+                    'format' => 'json',
+                    'apiKey' => $geoapifyKey,
+                ])->json();
+                $geoapifyAddress = trim((string) data_get($geoapify, 'results.0.formatted', ''));
+                if ($geoapifyAddress !== '') {
+                    return ['location' => $geoapifyAddress, 'provider' => 'geoapify'];
+                }
+            }
+
+            // This endpoint is optimized for browser/mobile coordinate lookup
+            // and requires no API key, making it a quick fallback in development.
+            if (! $detailed) {
+                $bigData = Http::connectTimeout(1)->timeout(2)->get('https://api.bigdatacloud.net/data/reverse-geocode-client', [
+                    'latitude' => $data['latitude'],
+                    'longitude' => $data['longitude'],
+                    'localityLanguage' => 'en',
+                ])->json();
+                $cleanPart = static fn ($part): string => trim((string) preg_replace('/\s*\((?:Region [^)]+|the)\)\s*/i', '', (string) $part));
+                $bigDataAddress = collect([
+                    data_get($bigData, 'locality'),
+                    data_get($bigData, 'city'),
+                    data_get($bigData, 'principalSubdivision'),
+                    data_get($bigData, 'postcode'),
+                    data_get($bigData, 'countryName'),
+                ])->map($cleanPart)->filter()->unique()->implode(', ');
+                if ($bigDataAddress !== '') {
+                    return ['location' => $bigDataAddress, 'provider' => 'bigdatacloud'];
+                }
+            }
+
             $result = Http::withHeaders(['User-Agent' => 'DROMIS-FO-Caraga/1.0'])
-                ->timeout(3)->get('https://nominatim.openstreetmap.org/reverse', ['format' => 'jsonv2', 'lat' => $data['latitude'], 'lon' => $data['longitude'], 'zoom' => 16])->json();
-            return response()->json(['location' => trim((string) ($result['display_name'] ?? '')) ?: $fallback]);
-        } catch (\Throwable) {
-            return response()->json(['location' => $fallback]);
-        }
+                ->connectTimeout(1)->timeout($detailed ? 5 : 2)->get('https://nominatim.openstreetmap.org/reverse', ['format' => 'jsonv2', 'lat' => $data['latitude'], 'lon' => $data['longitude'], 'zoom' => 18, 'addressdetails' => 1])->json();
+            $address = trim((string) ($result['display_name'] ?? ''));
+            return ['location' => $address ?: $fallback, 'provider' => $address !== '' ? 'openstreetmap' : 'coordinates'];
+          } catch (\Throwable) {
+            return ['location' => $fallback, 'provider' => 'coordinates'];
+          }
+        });
+
+        // Coordinate-only failures are deliberately not retained so a retry can
+        // resolve the readable address as soon as connectivity improves.
+        if (($resolved['provider'] ?? null) === 'coordinates') Cache::forget($cacheKey);
+
+        return response()->json($resolved);
     }
-    public function storeDeliveryUpdate(Request $request, DispatchPlan $dispatch, AuditLogger $audit, RealtimePublisher $realtime): RedirectResponse
+    public function storeDeliveryUpdate(Request $request, DispatchPlan $dispatch, AuditLogger $audit, RealtimePublisher $realtime, DeliveryEvidencePhotoService $evidencePhotos): RedirectResponse
     {
         $this->authorizeDispatchAccess($request, $dispatch);
+        abort_unless(
+            $request->user() && ($this->deliveryUpdateDevelopmentAccess() || $this->isAssignedEscort($dispatch, $request->user())),
+            403,
+            'Only the assigned escort may record GPS and delivery field updates through the Delivery Escort Workspace.'
+        );
         abort_unless(in_array($dispatch->status, [DispatchPlan::STATUS_RELEASED, DispatchPlan::STATUS_IN_TRANSIT], true), 422, 'Delivery updates are available after release and while the delivery is in transit.');
         $data = $request->validate([
             'vehicle_index' => ['required', 'integer', 'min:0'],
             'stage' => ['required', Rule::in([
-                'departed', 'in_transit', 'arrived', 'unloading_started',
+                'departed', 'arrived', 'unloading_started',
                 'unloading_completed', 'delay', 'incident', 'checkpoint',
             ])],
             'occurred_at' => ['required', 'date', 'before_or_equal:now'],
             'location' => ['required', 'string', 'max:500'],
             'latitude' => ['nullable', 'numeric', 'between:-90,90'],
             'longitude' => ['nullable', 'numeric', 'between:-180,180'],
+            'accuracy_meters' => ['nullable', 'numeric', 'min:0', 'max:10000'],
             'message' => ['required', 'string', 'min:10', 'max:3000'],
             'photos' => ['required', 'array', 'min:1', 'max:6'],
             'photos.*' => ['file', 'image', 'mimes:jpg,jpeg,png,webp', 'max:10240'],
@@ -73,23 +133,122 @@ class DispatchPlanController extends Controller
         abort_unless(isset($dispatch->resolvedVehicleDetails()[(int) $data['vehicle_index']]), 422, 'Select a valid vehicle.');
         $this->authorizeVehicleAccess($request->user(), $dispatch, (int) $data['vehicle_index']);
         $this->assertDeliveryUpdateSequence($dispatch, $data);
-        $paths = collect($request->file('photos', []))->map(fn ($photo) => $photo->store("dispatch-delivery-updates/{$dispatch->id}", 'local'))->values()->all();
-        $update = $dispatch->deliveryUpdates()->create([
-            ...Arr::except($data, ['photos']),
-            'reported_by' => $request->user()->id,
-            'reporter_role' => $this->deliveryUpdateReporterRole($request->user(), $dispatch),
-            'photo_paths' => $paths,
-        ]);
+        $paths = [];
+        try {
+            foreach ($request->file('photos', []) as $photo) {
+                $paths[] = $evidencePhotos->store(
+                    $photo,
+                    "dispatch-delivery-updates/{$dispatch->id}",
+                    Arr::only($data, ['stage', 'occurred_at', 'location', 'latitude', 'longitude']),
+                );
+            }
+        } catch (\RuntimeException $exception) {
+            foreach ($paths as $path) Storage::disk('local')->delete($path);
+            throw ValidationException::withMessages(['photos' => $exception->getMessage()]);
+        }
+        $update = DB::transaction(function () use ($request, $dispatch, $data, $paths): DispatchDeliveryUpdate {
+            $lockedDispatch = DispatchPlan::query()->lockForUpdate()->findOrFail($dispatch->id);
+            $update = $lockedDispatch->deliveryUpdates()->create([
+                ...Arr::except($data, ['photos']),
+                'reported_by' => $request->user()->id,
+                'reporter_role' => $this->deliveryUpdateReporterRole($request->user(), $lockedDispatch),
+                'photo_paths' => $paths,
+            ]);
+
+            // A posted departure update and Mark In Transit describe the same
+            // event. Persist them together so the progress tracker, stage
+            // button, and field timeline can never disagree.
+            if ($data['stage'] === 'departed') {
+                $vehicles = array_values($lockedDispatch->resolvedVehicleDetails());
+                $vehicleIndex = (int) $data['vehicle_index'];
+                if (isset($vehicles[$vehicleIndex])) {
+                    $vehicles[$vehicleIndex]['departed_at'] = Carbon::parse($data['occurred_at'])->format('Y-m-d H:i:s');
+                    $payload = [
+                        ...$lockedDispatch->toArray(),
+                        'vehicle_details' => $vehicles,
+                    ];
+                    $lockedDispatch->forceFill([
+                        'vehicle_details' => $vehicles,
+                        'status' => $this->deriveDispatchStatusFromTransactions($payload),
+                    ])->save();
+                }
+            }
+
+            return $update;
+        });
+        $dispatch->refresh();
         $audit->log('dispatch.delivery_update.created', $update, [], $update->toArray());
         $this->publishDeliveryUpdateRealtime($realtime, $dispatch);
+        $this->notifyDeliveryUpdateStakeholders($request->user(), $dispatch, $update);
 
-        return back()->with('success', 'Delivery update posted for Vehicle '.((int) $data['vehicle_index'] + 1).'.');
+        return back()->with('success', $data['stage'] === 'departed'
+            ? 'Departure update posted and Vehicle '.((int) $data['vehicle_index'] + 1).' marked In Transit.'
+            : 'Delivery update posted for Vehicle '.((int) $data['vehicle_index'] + 1).'.');
+    }
+
+    /**
+     * Restore a release marker lost by plan recovery when the audit timeline
+     * and vehicle movement independently prove the release already occurred.
+     *
+     * @param  list<array<string, mixed>>  $vehicles
+     * @return list<array<string, mixed>>
+     */
+    private function restoreConfirmedVehicleReleaseMarkers(DispatchPlan $dispatch, array $vehicles): array
+    {
+        $releaseAt = collect($dispatch->status_timeline ?? [])
+            ->filter(function ($entry): bool {
+                if (! is_array($entry) || ($entry['status'] ?? null) !== DispatchPlan::STATUS_RELEASED) {
+                    return false;
+                }
+
+                return str_contains(strtolower((string) ($entry['note'] ?? '')), 'warehouse release confirmed');
+            })
+            ->pluck('at')
+            ->filter()
+            ->map(fn ($at) => Carbon::parse($at))
+            ->sortBy(fn (Carbon $at) => $at->getTimestamp())
+            ->first();
+
+        if (! $releaseAt) {
+            return $vehicles;
+        }
+
+        $savedVehicles = $dispatch->resolvedVehicleDetails();
+        foreach ($vehicles as $index => &$vehicle) {
+            if (filled($vehicle['warehouse_released_at'] ?? null)) {
+                continue;
+            }
+
+            $savedIndex = (int) ($vehicle['source_vehicle_index'] ?? $index);
+            $savedVehicle = $savedVehicles[$savedIndex] ?? [];
+            $firstMovement = $dispatch->deliveryUpdates()
+                ->where('vehicle_index', $savedIndex)
+                ->oldest('occurred_at')
+                ->value('occurred_at');
+            $departedAt = $vehicle['departed_at'] ?? $savedVehicle['departed_at'] ?? null;
+            $movementAt = $firstMovement ?: $departedAt;
+
+            if (! $movementAt || $releaseAt->greaterThan(Carbon::parse($movementAt))) {
+                continue;
+            }
+
+            $vehicle['warehouse_released_at'] = $releaseAt->format('Y-m-d H:i:s');
+        }
+        unset($vehicle);
+
+        return $vehicles;
     }
 
     private function assertDeliveryUpdateSequence(DispatchPlan $dispatch, array $data): void
     {
         $vehicleIndex = (int) $data['vehicle_index'];
         $stage = (string) $data['stage'];
+        if (in_array($stage, ['departed', 'arrived', 'unloading_started', 'unloading_completed'], true)) {
+            throw_if(
+                $dispatch->deliveryUpdates()->where('vehicle_index', $vehicleIndex)->where('stage', $stage)->exists(),
+                ValidationException::withMessages(['stage' => Str::headline($stage).' has already been posted for this vehicle. Open the timeline and choose Edit message if only the narrative needs correction.'])
+            );
+        }
         $requirements = [
             'arrived' => ['departed', 'Record the vehicle departure before reporting its arrival.'],
             'unloading_started' => ['arrived', 'Record arrival at the destination before starting unloading.'],
@@ -116,19 +275,51 @@ class DispatchPlanController extends Controller
 
     public function deliveryUpdatePhoto(Request $request, DispatchPlan $dispatch, DispatchDeliveryUpdate $update, int $photoIndex): HttpResponse
     {
-        $this->authorizeDispatchAccess($request, $dispatch);
+        if (! DispatchMonitoringController::userCanView($request->user())) {
+            $this->authorizeDispatchAccess($request, $dispatch);
+        }
         abort_unless((int) $update->dispatch_plan_id === (int) $dispatch->id, 404);
-        $this->authorizeVehicleAccess($request->user(), $dispatch, (int) $update->vehicle_index);
+        if (! DispatchMonitoringController::userCanView($request->user())) {
+            $this->authorizeVehicleAccess($request->user(), $dispatch, (int) $update->vehicle_index);
+        }
         $path = ($update->photo_paths ?? [])[$photoIndex] ?? null;
         abort_unless($path && Storage::disk('local')->exists($path), 404);
-        return Storage::disk('local')->response($path);
+        return $request->boolean('download')
+            ? Storage::disk('local')->download($path, 'delivery-'.$dispatch->id.'-'.$update->stage.'-'.($photoIndex + 1).'.jpg')
+            : Storage::disk('local')->response($path);
     }
 
     private function deliveryUpdateReporterRole(User $user, DispatchPlan $dispatch): string
     {
         if ($this->isAssignedEscort($dispatch, $user)) return 'DSWD Escort';
+        if ($this->deliveryUpdateDevelopmentAccess()) return 'Development Workspace Tester';
         if ($this->canManageDispatches($user)) return 'Dispatch Officer';
         return 'Nearby DSWD Storekeeper';
+    }
+
+    public function updateDeliveryUpdateMessage(Request $request, DispatchPlan $dispatch, DispatchDeliveryUpdate $update, AuditLogger $audit, RealtimePublisher $realtime): RedirectResponse
+    {
+        $this->authorizeDispatchAccess($request, $dispatch);
+        abort_unless((int) $update->dispatch_plan_id === (int) $dispatch->id, 404);
+        abort_unless(
+            $request->user() && ($this->deliveryUpdateDevelopmentAccess() || $this->isAssignedEscort($dispatch, $request->user())),
+            403,
+            'Only the assigned escort may revise a posted field-update message.'
+        );
+        $this->authorizeVehicleAccess($request->user(), $dispatch, (int) $update->vehicle_index);
+        $data = $request->validate(['message' => ['required', 'string', 'min:10', 'max:3000']]);
+        $before = $update->only(['message']);
+        $update->forceFill(['message' => trim((string) $data['message'])])->save();
+        $audit->log('dispatch.delivery_update.message_updated', $update, $before, $update->only(['message']));
+        $this->publishDeliveryUpdateRealtime($realtime, $dispatch->fresh());
+
+        return back()->with('success', 'The posted field-update message was revised. Its stage, time, GPS, and evidence remain unchanged.');
+    }
+
+    /** Allow complete workflow testing locally without weakening production escort controls. */
+    private function deliveryUpdateDevelopmentAccess(): bool
+    {
+        return app()->environment(['local', 'testing']);
     }
     public function vehicleDr(Request $request, DispatchPlan $dispatch, int $vehicleIndex, RisDrDocumentPdfService $pdf): HttpResponse
     {
@@ -163,9 +354,10 @@ class DispatchPlanController extends Controller
     {
         $escortWorkspace = $request->attributes->getBoolean('delivery_escort_workspace');
         $this->authorizeDispatchAccess($request, escortWorkspace: $escortWorkspace);
-        $assignedDispatchIds = $escortWorkspace
-            ? $this->assignedEscortDispatchIds($request->user())
-            : null;
+        // During the shared monitoring rollout, every authorized workspace
+        // user may see active deliveries. Edit authority remains separately
+        // restricted to the escort actually assigned to each vehicle.
+        $assignedDispatchIds = null;
 
         // Escort workspace has no Still for Action tab (drafts / ready-to-plan).
         $defaultBucket = $escortWorkspace ? 'in_progress' : 'still_for_action';
@@ -194,25 +386,47 @@ class DispatchPlanController extends Controller
             ])
             ->latest();
 
+        // The escort workspace is only for an actual transport assignment.
+        // Direct/local handovers (including replacement follow-ups sourced from
+        // the recipient LGU warehouse) stay in Dispatch/Delivery and must never
+        // acquire a synthetic "Vehicle 1" through legacy model normalization.
+        if ($escortWorkspace) {
+            $dispatchesQuery->where(function ($query): void {
+                $query->where('vehicles_needed', true)
+                    ->orWhere('number_of_vehicles', '>', 0);
+            });
+        }
+
         if ($assignedDispatchIds !== null) {
             $dispatchesQuery->whereIn('id', $assignedDispatchIds);
         }
 
         $countQuery = fn () => DispatchPlan::query()
-            ->when($assignedDispatchIds !== null, fn ($query) => $query->whereIn('id', $assignedDispatchIds));
+            ->when($assignedDispatchIds !== null, fn ($query) => $query->whereIn('id', $assignedDispatchIds))
+            ->when($escortWorkspace, fn ($query) => $query->where(function ($transport): void {
+                $transport->where('vehicles_needed', true)
+                    ->orWhere('number_of_vehicles', '>', 0);
+            }));
         $hasDeferredBalance = fn ($query) => $query
             ->whereIn('variance_disposition', DispatchPlan::REPLACEMENT_REQUIRED_DISPOSITIONS)
             ->whereRaw('COALESCE(allocated_quantity, 0) > COALESCE(received_quantity, 0)');
         $counts = [
             'still_for_action' => $countQuery()->whereIn('status', DispatchPlan::STILL_FOR_ACTION)->count(),
-            'in_progress' => $countQuery()->where(function ($query) use ($hasDeferredBalance): void {
-                $query->whereIn('status', DispatchPlan::IN_PROGRESS)
-                    ->orWhere(fn ($received) => $received
-                        ->where('status', DispatchPlan::STATUS_RECEIVED)
-                        ->whereHas('items', $hasDeferredBalance));
-            })->count(),
-            'completed' => $countQuery()->whereIn('status', DispatchPlan::COMPLETED)
-                ->whereDoesntHave('items', $hasDeferredBalance)->count(),
+            // The escort workspace tracks completion of the physical delivery.
+            // A returned/deferred item still requires dispatch-officer follow-up,
+            // but must not leave an acknowledged delivery under Active Deliveries.
+            'in_progress' => $escortWorkspace
+                ? $countQuery()->whereIn('status', DispatchPlan::IN_PROGRESS)->count()
+                : $countQuery()->where(function ($query) use ($hasDeferredBalance): void {
+                    $query->whereIn('status', DispatchPlan::IN_PROGRESS)
+                        ->orWhere(fn ($received) => $received
+                            ->where('status', DispatchPlan::STATUS_RECEIVED)
+                            ->whereHas('items', $hasDeferredBalance));
+                })->count(),
+            'completed' => $escortWorkspace
+                ? $countQuery()->whereIn('status', DispatchPlan::COMPLETED)->count()
+                : $countQuery()->whereIn('status', DispatchPlan::COMPLETED)
+                    ->whereDoesntHave('items', $hasDeferredBalance)->count(),
             'all' => $countQuery()->count(),
         ];
 
@@ -222,7 +436,11 @@ class DispatchPlanController extends Controller
                 'in_progress' => DispatchPlan::IN_PROGRESS,
                 'completed' => DispatchPlan::COMPLETED,
             ];
-            if ($bucket === 'in_progress') {
+            if ($escortWorkspace && $bucket === 'in_progress') {
+                $dispatchesQuery->whereIn('status', DispatchPlan::IN_PROGRESS);
+            } elseif ($escortWorkspace && $bucket === 'completed') {
+                $dispatchesQuery->whereIn('status', DispatchPlan::COMPLETED);
+            } elseif ($bucket === 'in_progress') {
                 $dispatchesQuery->where(function ($query) use ($hasDeferredBalance): void {
                     $query->whereIn('status', DispatchPlan::IN_PROGRESS)
                         ->orWhere(fn ($received) => $received
@@ -238,7 +456,7 @@ class DispatchPlanController extends Controller
         }
 
         $dispatches = $dispatchesQuery->paginate(15)->withQueryString()
-            ->through(fn (DispatchPlan $dispatch) => $this->serializeDispatch($dispatch, $request->user()));
+            ->through(fn (DispatchPlan $dispatch) => $this->serializeDispatch($dispatch, $request->user(), $escortWorkspace));
 
         $eligibleRelations = [
             'requisitionIssuanceSlip.allocationItems',
@@ -284,6 +502,10 @@ class DispatchPlanController extends Controller
                     'updater:id,name',
                 ])
                 ->when($assignedDispatchIds !== null, fn ($query) => $query->whereIn('id', $assignedDispatchIds))
+                ->when($escortWorkspace, fn ($query) => $query->where(function ($transport): void {
+                    $transport->where('vehicles_needed', true)
+                        ->orWhere('number_of_vehicles', '>', 0);
+                }))
                 ->find($selectedId);
         }
 
@@ -339,6 +561,10 @@ class DispatchPlanController extends Controller
                     'contact_number' => $warehouse->contact_number,
                     'designated_storekeepers' => $warehouse->designated_storekeepers,
                     'storekeeper_contact_number' => $warehouse->storekeeper_contact_number,
+                    'storekeeper_id_number' => null,
+                    'storekeeper_position' => filled($warehouse->designated_storekeepers)
+                        ? 'Warehouse Storekeeper'
+                        : null,
                 ],
             ]);
 
@@ -349,7 +575,7 @@ class DispatchPlanController extends Controller
             'eligibleRequests' => $escortWorkspace
                 ? []
                 : $eligibleRequests->map(fn (AssistanceRequest $row) => $this->serializeEligibleRequest($row))->values(),
-            'selectedDispatch' => $selectedDispatch ? $this->serializeDispatch($selectedDispatch, $request->user()) : null,
+            'selectedDispatch' => $selectedDispatch ? $this->serializeDispatch($selectedDispatch, $request->user(), $escortWorkspace) : null,
             'sourceRequest' => ! $escortWorkspace && $sourceRequest
                 ? $this->serializeEligibleRequest($sourceRequest)
                 : null,
@@ -358,7 +584,7 @@ class DispatchPlanController extends Controller
                 ->where('library_type', 'transportation_source')->where('context', 'land')->where('is_active', true)
                 ->orderBy('value')->pluck('value')->unique()->values(),
             'dispatchContactLibraries' => [
-                'dispatch_driver' => OperationalLibraryValue::catalogEntries('dispatch_driver'),
+                'dispatch_driver' => $this->driverCatalogWithMetadata(),
                 'dispatch_received_by' => $this->receivedByCatalogWithLguMetadata(),
             ],
             'rrosSignatories' => OperationalLibraryValue::query()
@@ -372,6 +598,9 @@ class DispatchPlanController extends Controller
             'warehouseReservations' => app(RisReservationService::class)->payload(),
             'warehouseCatalog' => $warehouseCatalog,
             'escortWorkspace' => $escortWorkspace,
+            'focusVehicleIndex' => $escortWorkspace && $request->query->has('focus_vehicle')
+                ? max(0, $request->integer('focus_vehicle'))
+                : null,
             'canManageDispatches' => $this->canManageDispatches($request->user()),
         ]);
     }
@@ -480,6 +709,90 @@ class DispatchPlanController extends Controller
         $before = $dispatch->toArray();
         $previousStatus = (string) $dispatch->status;
         $data = $this->validatedPayload($request, creating: false, existing: $dispatch);
+        // A direct/local release is submitted from a workspace that may carry
+        // an empty transport form. Never let that stale form silently erase
+        // vehicle transactions that were already confirmed during Planning.
+        $protectVehiclesFromLocalTransaction = $request->boolean('release_local_handover')
+            || $request->boolean('update_local_receipt');
+        if ($this->canManageDispatches($request->user()) && $protectVehiclesFromLocalTransaction && $previousStatus !== DispatchPlan::STATUS_DRAFT) {
+            $savedVehicles = collect($dispatch->resolvedVehicleDetails());
+            $submittedVehicles = array_key_exists('vehicle_details', $data) && is_array($data['vehicle_details'])
+                ? array_values($data['vehicle_details'])
+                : null;
+            if ($submittedVehicles !== null) {
+                foreach ($savedVehicles as $index => $savedVehicle) {
+                    $confirmed = filled($savedVehicle['plan_confirmed_at'] ?? null)
+                        || filled($savedVehicle['warehouse_released_at'] ?? null)
+                        || filled($savedVehicle['departed_at'] ?? null)
+                        || filled($savedVehicle['received_at'] ?? null);
+                    if ($confirmed && ! array_key_exists($index, $submittedVehicles)) {
+                        $submittedVehicles[$index] = $savedVehicle;
+                    }
+                }
+                ksort($submittedVehicles);
+                $data['vehicle_details'] = array_values($submittedVehicles);
+            }
+            if ($savedVehicles->contains(fn (array $vehicle): bool => filled($vehicle['plan_confirmed_at'] ?? null))) {
+                $data['vehicles_needed'] = true;
+                $data['number_of_vehicles'] = max((int) ($data['number_of_vehicles'] ?? 0), $savedVehicles->count());
+            }
+        }
+        // Never let a stale browser form erase already-confirmed workflow
+        // milestones. This is especially important for the independent
+        // no-transport plan, whose confirmation is nested in the local
+        // handover JSON and may not be present in a vehicle-only submission.
+        if (array_key_exists('local_handover_details', $data)) {
+            $submittedLocal = is_array($data['local_handover_details'] ?? null)
+                ? $data['local_handover_details']
+                : [];
+            $savedLocal = is_array($dispatch->local_handover_details)
+                ? $dispatch->local_handover_details
+                : [];
+            foreach (['plan_confirmed_at', 'released_at', 'received_at', 'dr_number'] as $milestone) {
+                if (filled($savedLocal[$milestone] ?? null) && blank($submittedLocal[$milestone] ?? null)) {
+                    $submittedLocal[$milestone] = $savedLocal[$milestone];
+                }
+            }
+            if (($savedLocal['receipt_acknowledged'] ?? false) && ! ($submittedLocal['receipt_acknowledged'] ?? false)) {
+                $submittedLocal['receipt_acknowledged'] = true;
+            }
+            $data['local_handover_details'] = $submittedLocal;
+        }
+        if (array_key_exists('vehicle_details', $data)) {
+            $savedVehicles = $dispatch->resolvedVehicleDetails();
+            $data['vehicle_details'] = collect($data['vehicle_details'] ?? [])
+                ->values()
+                ->map(function (array $row, int $index) use ($savedVehicles): array {
+                    // Escort workspaces submit a compact list containing only
+                    // their assigned vehicles. Keep milestones aligned with
+                    // the persisted fleet row rather than the compact index.
+                    $savedIndex = (int) ($row['source_vehicle_index'] ?? $index);
+                    $saved = $savedVehicles[$savedIndex] ?? [];
+                    foreach (['plan_confirmed_at', 'warehouse_released_at', 'departed_at', 'received_at', 'dr_number'] as $milestone) {
+                        if (filled($saved[$milestone] ?? null) && blank($row[$milestone] ?? null)) {
+                            $row[$milestone] = $saved[$milestone];
+                        }
+                    }
+                    if (($saved['receipt_acknowledged'] ?? false) && ! ($row['receipt_acknowledged'] ?? false)) {
+                        $row['receipt_acknowledged'] = true;
+                    }
+                    return $row;
+                })->all();
+
+            // A recovered vehicle plan can retain its delivery updates while
+            // losing the nested release timestamp. Restore that workflow
+            // marker from the confirmed-release timeline only when the same
+            // vehicle has recorded movement. Inventory is not posted here.
+            $data['vehicle_details'] = $this->restoreConfirmedVehicleReleaseMarkers(
+                $dispatch,
+                $data['vehicle_details'],
+            );
+        }
+        // Workspace context and authorization are separate concerns. An RROS
+        // administrator may test or monitor the escort workspace without being
+        // treated as an escort for write constraints, but must still return to
+        // the page where the transaction was submitted.
+        $returnToEscortWorkspace = $request->boolean('return_to_escort_workspace');
         $escortUpdate = ! $this->canManageDispatches($request->user());
         if ($escortUpdate) {
             $data = $this->constrainEscortUpdate($dispatch, $data, $request->user());
@@ -542,6 +855,9 @@ class DispatchPlanController extends Controller
         $assertPayload = $this->assignLocalHandoverDrNumber($assertPayload, $dispatch->requisitionIssuanceSlip);
         $data['local_handover_details'] = $assertPayload['local_handover_details'] ?? ($data['local_handover_details'] ?? []);
 
+        $planVehicleIndexes = collect($data['plan_vehicle_indexes'] ?? [])
+            ->map(fn ($index) => (int) $index)->unique()->values()->all();
+        $planLocalHandover = (bool) ($data['plan_local_handover'] ?? false);
         $releaseVehicleIndexes = collect($data['release_vehicle_indexes'] ?? [])
             ->map(fn ($index) => (int) $index)
             ->unique()
@@ -549,25 +865,78 @@ class DispatchPlanController extends Controller
             ->all();
         $transitVehicleIndexes = collect($data['transit_vehicle_indexes'] ?? [])
             ->map(fn ($index) => (int) $index)->unique()->values()->all();
-        $scopedVehicleTransit = $transitVehicleIndexes !== []
-            && in_array($previousStatus, [DispatchPlan::STATUS_PLANNED, DispatchPlan::STATUS_RELEASED], true);
-        $scopedWarehouseRelease = $releaseVehicleIndexes !== []
-            && $previousStatus === DispatchPlan::STATUS_PLANNED;
+        $receiptVehicleIndexes = collect($data['receipt_vehicle_indexes'] ?? [])
+            ->map(fn ($index) => (int) $index)->unique()->values()->all();
+        $scopedVehiclePlan = $planVehicleIndexes !== [];
+        $scopedLocalPlan = $planLocalHandover;
+        $scopedVehicleTransit = $transitVehicleIndexes !== [];
+        $scopedWarehouseRelease = $releaseVehicleIndexes !== [];
+        $scopedVehicleReceipt = $receiptVehicleIndexes !== [];
+        // Read the transaction command from both the validated payload and the
+        // original request. This prevents a direct/no-transport release from
+        // falling through to the legacy dispatch-wide status validator.
         $scopedLocalRelease = (bool) ($data['release_local_handover'] ?? false)
-            && $previousStatus === DispatchPlan::STATUS_PLANNED;
+            || $request->boolean('release_local_handover');
+        $scopedLocalReceiptUpdate = (bool) ($data['update_local_receipt'] ?? false)
+            || $request->boolean('update_local_receipt');
         if ($scopedLocalRelease) {
+            $data['release_local_handover'] = true;
+            $assertPayload['release_local_handover'] = true;
+        }
+
+        if ($scopedVehiclePlan) {
+            $this->assertVehicleTransactionsPlannable($assertPayload, $planVehicleIndexes);
+            foreach ($planVehicleIndexes as $index) {
+                $assertPayload['vehicle_details'][$index]['plan_confirmed_at'] ??= now()->format('Y-m-d H:i:s');
+            }
+            $data['vehicle_details'] = $assertPayload['vehicle_details'];
+        }
+        if ($scopedLocalPlan) {
             $local = $assertPayload['local_handover_details'] ?? [];
+            $localErrors = [];
+            if (blank($local['expected_release_at'] ?? null)) {
+                $localErrors['local_handover_details.expected_release_at'] = 'Expected release date and time is required before confirming this direct-release plan.';
+            }
+            if ($localErrors !== []) throw ValidationException::withMessages($localErrors);
+            $assertPayload['local_handover_details']['plan_confirmed_at'] ??= now()->format('Y-m-d H:i:s');
+            $data['local_handover_details'] = $assertPayload['local_handover_details'];
+        }
+        if ($scopedVehiclePlan || $scopedLocalPlan) {
+            $assertPayload = $this->assignDrNumbersByPlanSequence(
+                $assertPayload,
+                $dispatch->resolvedVehicleDetails(),
+                $dispatch->local_handover_details ?? [],
+                $dispatch->requisitionIssuanceSlip,
+                $planVehicleIndexes,
+                $scopedLocalPlan,
+            );
+            $data['vehicle_details'] = $assertPayload['vehicle_details'] ?? [];
+            $data['local_handover_details'] = $assertPayload['local_handover_details'] ?? [];
+        }
+        if ($scopedWarehouseRelease) {
+            $this->assertVehicleTransactionsReleasable($assertPayload, $releaseVehicleIndexes);
+        }
+
+        if ($scopedLocalRelease || $scopedLocalReceiptUpdate) {
+            $local = $assertPayload['local_handover_details'] ?? [];
+            $legacyAlreadyPlanned = in_array($data['status'] ?? null, [
+                DispatchPlan::STATUS_PLANNED,
+                DispatchPlan::STATUS_RELEASED,
+                DispatchPlan::STATUS_IN_TRANSIT,
+                DispatchPlan::STATUS_RECEIVED,
+            ], true);
+            if (blank($local['plan_confirmed_at'] ?? null) && ! $legacyAlreadyPlanned) {
+                throw ValidationException::withMessages(['local_handover_details.plan_confirmed_at' => 'Confirm this direct-release plan before release and receipt.']);
+            }
             $requiredLocal = [
                 'released_at' => 'Actual release date and time',
                 'release_witness_affiliation' => 'Released/witnessed by organization',
                 'released_by' => 'Released/witnessed by',
                 'releaser_contact' => 'Witness contact number',
-                'releaser_id_number' => 'Witness ID number',
                 'releaser_position' => 'Witness position',
                 'releaser_office' => 'Witness office',
                 'received_by' => 'Actual receiving representative',
                 'receiver_contact' => 'Recipient contact number',
-                'receiver_id_number' => 'Recipient ID number',
                 'receiver_position' => 'Recipient position',
                 'receiver_office' => 'Recipient office',
                 'received_at' => 'Receipt date and time',
@@ -590,9 +959,81 @@ class DispatchPlanController extends Controller
             }
             if ($transitErrors !== []) throw ValidationException::withMessages($transitErrors);
         }
+        if ($scopedVehicleReceipt) {
+            $receiptErrors = [];
+            foreach ($receiptVehicleIndexes as $index) {
+                // The receipt UI defaults this value to the current local time.
+                // Keep the command reliable for stale/mobile clients as well:
+                // default only a blank value and never replace a user-selected
+                // earlier receipt time.
+                if (blank($assertPayload['vehicle_details'][$index]['received_at'] ?? null)) {
+                    $assertPayload['vehicle_details'][$index]['received_at'] = now()->format('Y-m-d H:i:s');
+                    $data['vehicle_details'][$index]['received_at'] = $assertPayload['vehicle_details'][$index]['received_at'];
+                }
+                $row = $assertPayload['vehicle_details'][$index] ?? [];
+                $savedRow = $dispatch->resolvedVehicleDetails()[$index] ?? [];
+                $isPickup = ($row['fulfillment_type'] ?? $assertPayload['fulfillment_type'] ?? DispatchPlan::FULFILLMENT_FIELD_DELIVERY)
+                    === DispatchPlan::FULFILLMENT_WAREHOUSE_PICKUP;
+                if (blank($row['warehouse_released_at'] ?? null)) $receiptErrors["vehicle_details.$index.warehouse_released_at"] = 'Confirm this vehicle release before recipient receipt.';
+                foreach (['received_by', 'received_by_position', 'received_by_office', 'receiver_contact'] as $field) {
+                    if (blank($row[$field] ?? null)) $receiptErrors["vehicle_details.$index.$field"] = 'This recipient receipt field is required.';
+                }
+                if (blank($row['received_at'] ?? null)) $receiptErrors["vehicle_details.$index.received_at"] = 'Receipt date and time is required.';
+                if (! $isPickup && blank($row['departed_at'] ?? null)) $receiptErrors["vehicle_details.$index.departed_at"] = 'Mark this vehicle In Transit before recipient receipt.';
+                $unloadingCompletedUpdate = $isPickup ? null : $dispatch->deliveryUpdates()
+                    ->where('vehicle_index', $index)
+                    ->where('stage', 'unloading_completed')
+                    ->latest('occurred_at')
+                    ->first();
+                if (! $isPickup
+                    && ! (filled($savedRow['received_at'] ?? null) && (bool) ($savedRow['receipt_acknowledged'] ?? false))
+                    && ! $unloadingCompletedUpdate) {
+                    $receiptErrors["vehicle_details.$index.transit_completed"] = 'The assigned escort must post Unloading Completed before Recipient Receipt can be confirmed.';
+                }
+                if (filled($row['received_at'] ?? null)) {
+                    $receiptAt = Carbon::parse($row['received_at']);
+                    if ($receiptAt->isFuture()) {
+                        $receiptErrors["vehicle_details.$index.received_at"] = 'Receipt date and time cannot be later than the current date and time.';
+                    } elseif ($unloadingCompletedUpdate && $receiptAt->lessThan($unloadingCompletedUpdate->occurred_at)) {
+                        $receiptErrors["vehicle_details.$index.received_at"] = 'Receipt date and time cannot be earlier than the Unloading Completed update.';
+                    }
+                }
+                if (! ($row['receipt_acknowledged'] ?? false)) $receiptErrors["vehicle_details.$index.receipt_acknowledged"] = 'Confirm that the recipient received the goods.';
+
+                // Arrival and delivery completion are workflow facts, not
+                // duplicate receipt inputs. Derive arrival from the escort's
+                // field timeline and completion from the recorded quantities.
+                if (! $isPickup) {
+                    $arrivalUpdate = $dispatch->deliveryUpdates()
+                        ->where('vehicle_index', $index)
+                        ->where('stage', 'arrived')
+                        ->latest('occurred_at')
+                        ->first();
+                    $arrivalUpdate ??= $dispatch->deliveryUpdates()
+                        ->where('vehicle_index', $index)
+                        ->whereIn('stage', ['unloading_started', 'unloading_completed'])
+                        ->oldest('occurred_at')
+                        ->first();
+                    $row['actual_arrival'] = $arrivalUpdate?->occurred_at?->format('Y-m-d\TH:i')
+                        ?? ($row['received_at'] ?? null);
+                    $row['delivered_at'] = filled($row['actual_arrival'] ?? null)
+                        ? substr((string) $row['actual_arrival'], 0, 10)
+                        : null;
+                }
+                $hasUndelivered = collect($assertPayload['items'] ?? [])->contains(function ($item): bool {
+                    $expected = (int) ($item['allocated_quantity'] ?? 0);
+                    $accepted = (int) ($item['received_quantity'] ?? $expected);
+                    return $accepted < $expected;
+                });
+                $row['fully_delivered'] = $hasUndelivered ? 'No' : 'Yes';
+                $assertPayload['vehicle_details'][$index] = $row;
+                $data['vehicle_details'][$index] = $row;
+            }
+            if ($receiptErrors !== []) throw ValidationException::withMessages($receiptErrors);
+        }
 
         if ($scopedLocalRelease) {
-            $assertPayload = $this->assignDrNumbersByReleaseSequence(
+            $assertPayload = $this->assignDrNumbersByPlanSequence(
                 $assertPayload,
                 $dispatch->resolvedVehicleDetails(),
                 $dispatch->local_handover_details ?? [],
@@ -602,7 +1043,7 @@ class DispatchPlanController extends Controller
             );
             $data['local_handover_details'] = $assertPayload['local_handover_details'] ?? [];
         } elseif ($scopedWarehouseRelease) {
-            $assertPayload = $this->assignDrNumbersByReleaseSequence(
+            $assertPayload = $this->assignDrNumbersByPlanSequence(
                 $assertPayload,
                 $dispatch->resolvedVehicleDetails(),
                 $dispatch->local_handover_details ?? [],
@@ -615,7 +1056,7 @@ class DispatchPlanController extends Controller
             in_array($status, [DispatchPlan::STATUS_RELEASED, DispatchPlan::STATUS_IN_TRANSIT, DispatchPlan::STATUS_RECEIVED], true)
             && in_array($previousStatus, [DispatchPlan::STATUS_DRAFT, DispatchPlan::STATUS_PLANNED], true)
         ) {
-            $assertPayload = $this->assignDrNumbersByReleaseSequence(
+            $assertPayload = $this->assignDrNumbersByPlanSequence(
                 $assertPayload,
                 $dispatch->resolvedVehicleDetails(),
                 $dispatch->local_handover_details ?? [],
@@ -627,39 +1068,30 @@ class DispatchPlanController extends Controller
             $data['local_handover_details'] = $assertPayload['local_handover_details'] ?? [];
         }
 
-        // Completing the last warehouse: promote to released when every transport vehicle is stamped.
-        if (
-            $scopedWarehouseRelease
-            && $status === DispatchPlan::STATUS_PLANNED
-            && $this->allTransportVehiclesReleased($assertPayload)
-        ) {
-            $status = DispatchPlan::STATUS_RELEASED;
+        $transactionCommand = $scopedVehiclePlan || $scopedLocalPlan || $scopedWarehouseRelease
+            || $scopedLocalRelease || $scopedLocalReceiptUpdate || $scopedVehicleTransit || $scopedVehicleReceipt;
+        if ($transactionCommand) {
+            $status = $this->deriveDispatchStatusFromTransactions($assertPayload);
             $data['status'] = $status;
-        }
-        if ($scopedVehicleTransit && $this->allTransportVehiclesReleased($assertPayload)) {
-            $allDeparted = collect($assertPayload['vehicle_details'] ?? [])->every(fn (array $row): bool => filled($row['departed_at'] ?? null));
-            $status = $allDeparted ? DispatchPlan::STATUS_IN_TRANSIT : DispatchPlan::STATUS_RELEASED;
+            // Every scoped command is validated against its own transaction
+            // above. Do not run the legacy dispatch-wide status gate here: a
+            // direct/no-transport receipt must not require vehicle/loading data,
+            // and one vehicle receipt must not require unfinished sibling
+            // vehicles. The roll-up status remains derived from all persisted
+            // transaction milestones.
+        } else {
+            // Status is always a roll-up of persisted transaction milestones;
+            // never accept a stale client-side downgrade to Draft.
+            $status = $this->deriveDispatchStatusFromTransactions($assertPayload);
             $data['status'] = $status;
+            $this->assertStatusRequirements(
+                $assertPayload,
+                $status,
+                fromStatus: $previousStatus,
+            );
         }
 
-        if (
-            $status === DispatchPlan::STATUS_RELEASED
-            && $scopedWarehouseRelease
-            && ! $this->allTransportVehiclesReleased($assertPayload)
-        ) {
-            throw ValidationException::withMessages([
-                'status' => 'Confirm release for each remaining source warehouse before marking the dispatch Released.',
-            ]);
-        }
-
-        $this->assertStatusRequirements(
-            $assertPayload,
-            $status,
-            fromStatus: $previousStatus,
-            releaseVehicleIndexes: $scopedWarehouseRelease ? $releaseVehicleIndexes : null,
-        );
-
-        $recordsFullRelease = in_array($status, [
+        $recordsFullRelease = ! $transactionCommand && in_array($status, [
             DispatchPlan::STATUS_RELEASED,
             DispatchPlan::STATUS_IN_TRANSIT,
             DispatchPlan::STATUS_RECEIVED,
@@ -667,6 +1099,9 @@ class DispatchPlanController extends Controller
         $recordsPartialRelease = $scopedWarehouseRelease || $scopedLocalRelease;
         $recordsRelease = $recordsFullRelease || $recordsPartialRelease;
         $issuanceVehicleIndexes = $scopedWarehouseRelease ? $releaseVehicleIndexes : null;
+        $allReleaseTransactionsComplete = $this->allTransportVehiclesReleased($assertPayload)
+            && (! $this->hasLocalSourceAllocation($assertPayload)
+                || filled(data_get($assertPayload, 'local_handover_details.released_at')));
 
         DB::transaction(function () use (
             $request,
@@ -681,8 +1116,11 @@ class DispatchPlanController extends Controller
             $recordsPartialRelease,
             $issuanceVehicleIndexes,
             $scopedLocalRelease,
+            $scopedLocalReceiptUpdate,
+            $scopedVehicleReceipt,
+            $allReleaseTransactionsComplete,
         ): void {
-            $payload = Arr::except($data, ['items', 'request_id', 'status', 'dispatch_officer', 'release_vehicle_indexes', 'release_local_handover', 'transit_vehicle_indexes']);
+            $payload = Arr::except($data, ['items', 'request_id', 'status', 'dispatch_officer', 'plan_vehicle_indexes', 'plan_local_handover', 'release_vehicle_indexes', 'release_local_handover', 'update_local_receipt', 'receipt_vehicle_indexes', 'transit_vehicle_indexes', 'return_to_escort_workspace']);
             $dispatch->fill([
                 ...$payload,
                 'dispatcher' => $data['dispatcher'],
@@ -732,7 +1170,11 @@ class DispatchPlanController extends Controller
                                 ? 'Partial warehouse release confirmed (inventory already posted for these Delivery Receipts).'
                                 : 'Partial warehouse release confirmed; system inventory issuance transaction(s) '.implode(', ', $issuanceIds).' recorded pending WIT reconciliation'
                         )
-                        : 'Plan details updated',
+                        : ($scopedLocalReceiptUpdate
+                            ? 'Direct release and recipient receipt details updated'
+                            : ($scopedVehicleReceipt
+                                ? 'Recipient receipt confirmed by the assigned delivery escort'
+                                : 'Plan details updated')),
                     fromStatus: $previousStatus,
                     type: $recordsPartialRelease ? 'status_change' : 'plan_update',
                     byName: $request->user()?->name,
@@ -749,14 +1191,17 @@ class DispatchPlanController extends Controller
             // WIT issuance belongs to the actual Dispatch release event. Releasing the
             // reservation here makes the quantities available without prematurely
             // marking an approved RIS Completed when its Post-RIS uploads are incomplete.
-            if ($recordsFullRelease || ($status === DispatchPlan::STATUS_RELEASED && $previousStatus !== DispatchPlan::STATUS_RELEASED)) {
+            if ($recordsFullRelease || $allReleaseTransactionsComplete) {
                 $slip = $dispatch->requisitionIssuanceSlip()->lockForUpdate()->first();
                 if ($slip && $slip->reservation_status === 'active') {
                     $slipUpdates = ['reservation_status' => 'released'];
                     $slip->update($slipUpdates);
                 }
             }
-            if (array_key_exists('items', $data) && ! $recordsRelease) {
+            // A direct/no-transport confirmation can release and receive in one
+            // command. Persist its item outcomes after posting the release so
+            // return/cancellation quantities are not lost before return handling.
+            if (array_key_exists('items', $data) && (! $recordsRelease || $status === DispatchPlan::STATUS_RECEIVED)) {
                 $this->syncItems($dispatch, $data['items'], $dispatch->requisitionIssuanceSlip);
             }
             if ($status === DispatchPlan::STATUS_RECEIVED) {
@@ -771,17 +1216,45 @@ class DispatchPlanController extends Controller
         $this->syncRequestWorkflowStatus($dispatch);
         $audit->log('dispatch.updated', $dispatch, $before, $dispatch->toArray());
         $workflowNotifications->notifyDispatchStatusChanged($dispatch->request, $dispatch, $previousStatus, $before);
+        $previousHandover = is_array($before['local_handover_details'] ?? null) ? $before['local_handover_details'] : [];
+        $currentHandover = is_array($dispatch->local_handover_details) ? $dispatch->local_handover_details : [];
+        if (blank($previousHandover['released_at'] ?? null) && filled($currentHandover['released_at'] ?? null)) {
+            $workflowNotifications->notifyLocalHandoverMilestone($dispatch->request, $dispatch, 'released', $request->user()?->id);
+        }
+        if (blank($previousHandover['received_at'] ?? null) && filled($currentHandover['received_at'] ?? null)) {
+            $workflowNotifications->notifyLocalHandoverMilestone($dispatch->request, $dispatch, 'received', $request->user()?->id);
+        }
+
+        // Notify DRMD + concerned LGU only when the plan becomes fully confirmed
+        // (every vehicle / local handover). Do not fire on the first partial plan.
+        $wasTransportPlanComplete = DispatchPlan::transportPlanIsComplete(
+            is_array($before['vehicle_details'] ?? null) ? $before['vehicle_details'] : [],
+            is_array($before['local_handover_details'] ?? null) ? $before['local_handover_details'] : null,
+        );
+        if (! $wasTransportPlanComplete && $dispatch->isTransportPlanComplete()) {
+            $workflowNotifications->notifyDispatchPlanReadyForRelease(
+                $dispatch->request,
+                $dispatch,
+                $request->user()?->id,
+            );
+        }
+
         $this->publishRealtime($realtime, $dispatch, 'dispatch.updated');
 
+        $escortDestination = $escortUpdate || $returnToEscortWorkspace;
+        $destinationBucket = $escortDestination
+            ? ($dispatch->status === DispatchPlan::STATUS_RECEIVED ? 'completed' : 'in_progress')
+            : $dispatch->bucket();
+
         return redirect()
-            ->route($escortUpdate ? 'delivery-escort.index' : 'dispatches.index', [
-                'bucket' => $dispatch->bucket(),
+            ->route($escortDestination ? 'delivery-escort.index' : 'dispatches.index', [
+                'bucket' => $destinationBucket,
                 'dispatch_id' => $dispatch->id,
             ])
             ->with(
                 'success',
                 $recordsRelease
-                    ? 'Dispatch released and deducted from system inventory. Encode the same issuance manually in WIT for reconciliation.'
+                    ? 'The selected transaction was released and its confirmed quantities were deducted from system inventory. Encode the same issuance manually in WIT for reconciliation.'
                     : count($dispatch->resolvedVehicleDetails()) + (filled(data_get($dispatch->local_handover_details, 'dr_number')) ? 1 : 0).' Delivery Receipt(s) are ready. The dispatch plan was updated.',
             );
     }
@@ -796,11 +1269,15 @@ class DispatchPlanController extends Controller
         $this->authorizeDispatchAccess($request, $dispatch);
         $dispatch->loadMissing(['items', 'request', 'requisitionIssuanceSlip']);
 
-        abort_unless($dispatch->status === DispatchPlan::STATUS_RECEIVED, 422, 'A follow-up dispatch can only be created after receipt is recorded.');
+        if ($dispatch->status !== DispatchPlan::STATUS_RECEIVED) {
+            return back()->with('error', 'Complete all current transaction receipts before creating the follow-up dispatch and DR.');
+        }
         $deferred = $dispatch->items->filter(fn (DispatchPlanItem $item): bool =>
             in_array($item->variance_disposition, DispatchPlan::REPLACEMENT_REQUIRED_DISPOSITIONS, true)
             && (int) $item->allocated_quantity > (int) ($item->received_quantity ?? 0));
-        abort_if($deferred->isEmpty(), 422, 'There are no unresolved balances requiring a follow-up delivery.');
+        if ($deferred->isEmpty()) {
+            return back()->with('error', 'There are no unresolved balances requiring a follow-up delivery.');
+        }
 
         $existingDraft = DispatchPlan::query()
             ->where('parent_dispatch_plan_id', $dispatch->id)
@@ -834,6 +1311,7 @@ class DispatchPlanController extends Controller
                 'dispatch_number' => 'DSP-'.now()->format('Ymd').'-'.Str::upper(Str::random(5)),
                 'dispatcher' => $this->dispatchOfficerName($request),
                 'number_of_vehicles' => 0,
+                'vehicles_needed' => false,
                 'vehicle_details' => [],
                 'status' => DispatchPlan::STATUS_DRAFT,
                 'remarks' => 'Follow-up delivery for unresolved deferred/returned/cancelled balances from '.$dispatch->dispatch_number.'.',
@@ -852,6 +1330,32 @@ class DispatchPlanController extends Controller
                 'allocated_quantity' => max(0, (int) $item->allocated_quantity - (int) ($item->received_quantity ?? 0)),
                 'remarks' => ucfirst(str_replace('_', ' ', (string) $item->variance_disposition)).' from '.$dispatch->dispatch_number.': '.($item->variance_resolution ?: $item->return_reason),
             ])->all());
+            $plan = $plan->fresh(['items', 'request', 'requisitionIssuanceSlip']);
+
+            // Re-evaluate the replacement items instead of inheriting the original
+            // trip's transport decision. Returned/cancelled stock that is fulfilled
+            // from the receiving LGU's own warehouse is a direct custody handover:
+            // it has no vehicle, driver, or escort assignment.
+            $sourceData = $this->pruneLocalOnlyTransportVehicles([
+                ...$plan->toArray(),
+                'items' => $plan->items->map(fn (DispatchPlanItem $item): array => $item->toArray())->all(),
+            ]);
+            $requiresTransport = $this->classifiedSourceWarehouses($sourceData)
+                ->contains(fn (array $warehouse): bool => (bool) ($warehouse['requires_transport'] ?? true));
+            $localWarehouse = $this->classifiedSourceWarehouses($sourceData)
+                ->first(fn (array $warehouse): bool => ! ($warehouse['requires_transport'] ?? true));
+
+            $plan->forceFill([
+                'vehicles_needed' => $requiresTransport,
+                'number_of_vehicles' => 0,
+                'vehicle_details' => [],
+                'local_handover_details' => $localWarehouse ? [
+                    'source_warehouse_id' => $localWarehouse['id'] ?? null,
+                    'source_warehouse_name' => $localWarehouse['name'] ?? null,
+                    'remarks' => $plan->purpose,
+                ] : [],
+            ])->save();
+
             return $plan->fresh(['items', 'request', 'requisitionIssuanceSlip']);
         });
 
@@ -860,7 +1364,9 @@ class DispatchPlanController extends Controller
         $this->publishRealtime($realtime, $followUp, 'dispatch.created');
 
         return redirect()->route('dispatches.index', ['bucket' => 'still_for_action', 'dispatch_id' => $followUp->id])
-            ->with('success', 'A separate follow-up dispatch was created with only the unresolved replacement quantities. Assign a new vehicle when the schedule is known; the system will generate a different DR number for this trip.');
+            ->with('success', $followUp->vehicles_needed
+                ? 'A separate follow-up dispatch was created with only the unresolved replacement quantities. Assign a new vehicle when the schedule is known; the system will generate a different DR number for this trip.'
+                : 'A separate no-transport follow-up was created for the unresolved replacement quantities. Confirm the local warehouse release and recipient receipt; no vehicle, driver, or escort is required.');
     }
 
     private function constrainEscortUpdate(DispatchPlan $dispatch, array $data, User $user): array
@@ -907,6 +1413,34 @@ class DispatchPlanController extends Controller
         $existingVehicles = $dispatch->resolvedVehicleDetails();
         $submittedVehicles = is_array($data['vehicle_details'] ?? null) ? $data['vehicle_details'] : [];
         $allowedIndexes = $this->authorizedVehicleIndexes($dispatch, $user);
+
+        // The escort workspace sends a compact, zero-based list containing only
+        // vehicles assigned to the signed-in escort. Translate transaction command
+        // indexes back to their persisted vehicle indexes before validation. Without
+        // this translation, confirming receipt for a displayed "Vehicle 1" could
+        // validate/update the dispatch's actual vehicle 1 instead of (for example)
+        // the escort's persisted vehicle 3.
+        $sourceIndexBySubmittedIndex = collect($submittedVehicles)
+            ->mapWithKeys(fn ($row, $localIndex): array => [
+                (int) $localIndex => (int) (is_array($row)
+                    ? ($row['source_vehicle_index'] ?? $localIndex)
+                    : $localIndex),
+            ]);
+        foreach ([
+            'plan_vehicle_indexes',
+            'release_vehicle_indexes',
+            'transit_vehicle_indexes',
+            'receipt_vehicle_indexes',
+        ] as $commandKey) {
+            if (! is_array($data[$commandKey] ?? null)) continue;
+
+            $data[$commandKey] = collect($data[$commandKey])
+                ->map(fn ($index): int => (int) $sourceIndexBySubmittedIndex->get((int) $index, (int) $index))
+                ->filter(fn (int $index): bool => in_array($index, $allowedIndexes, true))
+                ->unique()
+                ->values()
+                ->all();
+        }
         $data['vehicle_details'] = collect($existingVehicles)
             ->map(function (array $vehicle, int $index) use ($submittedVehicles, $operationalVehicleKeys, $allowedIndexes): array {
                 if (! in_array($index, $allowedIndexes, true)) return $vehicle;
@@ -1061,11 +1595,13 @@ class DispatchPlanController extends Controller
         $contact = preg_replace('/\s+/u', ' ', trim((string) $request->input('contact_number', ''))) ?? '';
         $position = preg_replace('/\s+/u', ' ', trim((string) $request->input('position', ''))) ?? '';
         $office = preg_replace('/\s+/u', ' ', trim((string) $request->input('office', ''))) ?? '';
+        $idNumber = preg_replace('/\s+/u', ' ', trim((string) $request->input('id_number', ''))) ?? '';
         $request->merge([
             'name' => $name,
             'contact_number' => $contact,
             'position' => $position !== '' ? $position : null,
             'office' => $office !== '' ? $office : null,
+            'id_number' => $idNumber !== '' ? $idNumber : null,
             'is_active' => $request->boolean('is_active', true),
         ]);
 
@@ -1074,6 +1610,7 @@ class DispatchPlanController extends Controller
             'contact_number' => ['required', 'string', 'max:80'],
             'position' => ['nullable', 'string', 'max:255'],
             'office' => ['nullable', 'string', 'max:255'],
+            'id_number' => ['nullable', 'string', 'max:80'],
             'is_active' => ['sometimes', 'boolean'],
         ]);
 
@@ -1093,6 +1630,7 @@ class DispatchPlanController extends Controller
             'contact_number' => $data['contact_number'] ?? null,
             'position' => $data['position'] ?? null,
             'office' => $data['office'] ?? null,
+            'id_number' => $data['id_number'] ?? null,
         ], fn ($value) => filled($value));
 
         $entry = OperationalLibraryValue::create([
@@ -1111,6 +1649,7 @@ class DispatchPlanController extends Controller
             'contact_number' => data_get($entry->metadata, 'contact_number'),
             'position' => data_get($entry->metadata, 'position'),
             'office' => data_get($entry->metadata, 'office'),
+            'id_number' => data_get($entry->metadata, 'id_number'),
             'metadata' => $entry->metadata ?? [],
             'is_active' => (bool) $entry->is_active,
         ], 201);
@@ -1292,6 +1831,7 @@ class DispatchPlanController extends Controller
 
     private function authorizeVehicleAccess(User $user, DispatchPlan $dispatch, int $vehicleIndex): void
     {
+        if ($this->deliveryUpdateDevelopmentAccess()) return;
         if ($this->canManageDispatches($user)) return;
         abort_unless(
             in_array($vehicleIndex, $this->authorizedVehicleIndexes($dispatch, $user), true),
@@ -1360,6 +1900,7 @@ class DispatchPlanController extends Controller
         $rules = [
             'request_id' => [$creating ? 'required' : 'nullable', 'exists:requests,id'],
             'vehicle_id' => ['nullable'], // Cleared on save; fleet linkage is not used in dispatch planning.
+            'vehicles_needed' => ['nullable', Rule::in(['yes', 'no', true, false, 1, 0, '1', '0'])],
             'destination' => ['nullable', 'string', 'max:255'],
             'receiving_agency_lgu' => ['nullable', 'string', 'max:255'],
             'source_of_goods' => ['nullable', 'string', 'max:255'],
@@ -1380,6 +1921,11 @@ class DispatchPlanController extends Controller
             'vehicle_details.*.dr_number' => ['nullable', 'string', 'max:120'],
             'vehicle_details.*.source_warehouse_id' => ['nullable', 'integer'],
             'vehicle_details.*.source_warehouse_name' => ['nullable', 'string', 'max:255'],
+            'vehicle_details.*.source_warehouses' => ['nullable', 'array'],
+            'vehicle_details.*.source_warehouses.*.id' => ['nullable', 'integer'],
+            'vehicle_details.*.source_warehouses.*.name' => ['nullable', 'string', 'max:255'],
+            'vehicle_details.*.fulfillment_type' => ['nullable', Rule::in(DispatchPlan::FULFILLMENT_TYPES)],
+            'vehicle_details.*.plan_confirmed_at' => ['nullable', 'date'],
             'vehicle_details.*.driver' => ['nullable', 'string', 'max:255'],
             'vehicle_details.*.driver_contact_number' => ['nullable', 'string', 'max:80'],
             'vehicle_details.*.driver_id_number' => ['nullable', 'string', 'max:80'],
@@ -1394,6 +1940,7 @@ class DispatchPlanController extends Controller
             'vehicle_details.*.escort_office' => ['nullable', 'string', 'max:255'],
             'vehicle_details.*.estimated_departure' => ['nullable', 'date'],
             'vehicle_details.*.estimated_arrival' => ['nullable', 'date'],
+            'vehicle_details.*.planning_remarks' => ['nullable', 'string', 'max:2000'],
             'vehicle_details.*.allows_multi_day_run' => ['nullable', 'boolean'],
             'vehicle_details.*.mode_of_transportation' => ['nullable', 'string', Rule::in($modeOptions)],
             'vehicle_details.*.land_transportation_source' => ['nullable', 'string', 'max:255'],
@@ -1455,15 +2002,24 @@ class DispatchPlanController extends Controller
             'release_vehicle_indexes' => ['nullable', 'array'],
             'release_vehicle_indexes.*' => ['integer', 'min:0'],
             'release_local_handover' => ['nullable', 'boolean'],
+            'update_local_receipt' => ['nullable', 'boolean'],
+            'plan_vehicle_indexes' => ['nullable', 'array'],
+            'plan_vehicle_indexes.*' => ['integer', 'min:0'],
+            'plan_local_handover' => ['nullable', 'boolean'],
+            'receipt_vehicle_indexes' => ['nullable', 'array'],
+            'receipt_vehicle_indexes.*' => ['integer', 'min:0'],
             'transit_vehicle_indexes' => ['nullable', 'array'],
             'transit_vehicle_indexes.*' => ['integer', 'min:0'],
+            'return_to_escort_workspace' => ['nullable', 'boolean'],
             'fulfillment_type' => ['nullable', Rule::in(DispatchPlan::FULFILLMENT_TYPES)],
             'fulfillment_type_confirmed' => ['nullable', 'boolean'],
             'local_handover_details' => ['nullable', 'array'],
             'local_handover_details.source_warehouse_id' => ['nullable', 'integer'],
             'local_handover_details.source_warehouse_name' => ['nullable', 'string', 'max:255'],
+            'local_handover_details.plan_confirmed_at' => ['nullable', 'date'],
             'local_handover_details.dr_number' => ['nullable', 'string', 'max:120'],
             'local_handover_details.expected_release_at' => ['nullable', 'date'],
+            'local_handover_details.planning_remarks' => ['nullable', 'string', 'max:2000'],
             'local_handover_details.release_authorized_by' => ['nullable', 'string', 'max:255'],
             'local_handover_details.release_authorizer_position' => ['nullable', 'string', 'max:255'],
             'local_handover_details.release_authorizer_office' => ['nullable', 'string', 'max:255'],
@@ -1493,6 +2049,7 @@ class DispatchPlanController extends Controller
             'items.*.allocated_quantity' => ['nullable', 'integer', 'min:0'],
             'items.*.loaded_quantity' => ['nullable', 'integer', 'min:0'],
             'items.*.received_quantity' => ['nullable', 'integer', 'min:0'],
+            'items.*.unit_cost' => ['nullable', 'numeric', 'min:0'],
             'items.*.variance_disposition' => ['nullable', Rule::in(['deferred', 'returned', 'cancelled', 'lost_damaged', 'other', 'fulfilled_followup'])],
             'items.*.variance_resolution' => ['nullable', 'string', 'max:2000'],
             'items.*.return_condition' => ['nullable', Rule::in(['serviceable', 'near_expiry', 'damaged', 'expired'])],
@@ -1504,9 +2061,50 @@ class DispatchPlanController extends Controller
         ];
 
         $data = $request->validate($rules);
+        if (blank($data['source_of_goods'] ?? null)
+            && (filled($data['request_id'] ?? $existing?->request_id)
+                || filled($data['requisition_issuance_slip_id'] ?? $existing?->requisition_issuance_slip_id))) {
+            $data['source_of_goods'] = 'FO Stockpile/Prepo';
+        }
+        $vehicleArrangementErrors = [];
+        foreach ($data['plan_vehicle_indexes'] ?? [] as $vehicleIndex) {
+            $vehicleIndex = (int) $vehicleIndex;
+            $vehicleRow = data_get($data, "vehicle_details.$vehicleIndex");
+            if (! is_array($vehicleRow)) {
+                $vehicleRow = collect($data['vehicle_details'] ?? [])
+                    ->first(function ($row, $localIndex) use ($vehicleIndex): bool {
+                        if (! is_array($row)) {
+                            return false;
+                        }
+
+                        return (int) ($row['source_vehicle_index'] ?? $localIndex) === $vehicleIndex;
+                    }, []);
+            }
+            if (blank(data_get($vehicleRow, 'fulfillment_type'))) {
+                $vehicleArrangementErrors["vehicle_details.$vehicleIndex.fulfillment_type"] =
+                    'Select DSWD delivery or Partner/recipient pickup for this vehicle.';
+            }
+        }
+        if ($vehicleArrangementErrors !== []) {
+            throw ValidationException::withMessages($vehicleArrangementErrors);
+        }
+        // These identifiers may be typed manually for an LGU-held/direct
+        // release. Keep the submitted values on the canonical handover record;
+        // they must not depend on the transport-vehicle receipt aliases.
+        if (isset($data['local_handover_details']) && is_array($data['local_handover_details'])) {
+            foreach (['releaser_id_number', 'receiver_id_number'] as $idField) {
+                if (array_key_exists($idField, $data['local_handover_details'])) {
+                    $value = trim((string) $data['local_handover_details'][$idField]);
+                    $data['local_handover_details'][$idField] = $value !== '' ? $value : null;
+                }
+            }
+        }
+        if (array_key_exists('vehicles_needed', $data)) {
+            $data['vehicles_needed'] = in_array($data['vehicles_needed'], ['yes', true, 1, '1'], true);
+        }
         // The interactive editor always sends this flag. Older integrations and
         // test fixtures predate the explicit confirmation step; a supplied
-        // fulfillment type remains an intentional selection for those callers.
+        // delivery mode remains an intentional selection for those callers.
         if (! array_key_exists('fulfillment_type_confirmed', $data)) {
             $data['fulfillment_type_confirmed'] = true;
         }
@@ -1531,18 +2129,37 @@ class DispatchPlanController extends Controller
         if (! in_array($data['fulfillment_type'], DispatchPlan::FULFILLMENT_TYPES, true)) {
             $data['fulfillment_type'] = DispatchPlan::FULFILLMENT_FIELD_DELIVERY;
         }
-        if ($data['fulfillment_type'] === DispatchPlan::FULFILLMENT_WAREHOUSE_PICKUP) {
-            $confirmingPickup = ($data['status'] ?? null) === DispatchPlan::STATUS_RECEIVED;
-            $data['vehicle_details'] = collect($data['vehicle_details'] ?? [])->map(function (array $vehicle) use ($confirmingPickup): array {
+        $defaultFulfillmentType = $data['fulfillment_type'];
+        $receiptIndexSet = array_fill_keys(array_map('intval', $data['receipt_vehicle_indexes'] ?? []), true);
+        $confirmingAllReceipts = ($data['status'] ?? null) === DispatchPlan::STATUS_RECEIVED
+            && $receiptIndexSet === [];
+        $data['vehicle_details'] = collect($data['vehicle_details'] ?? [])->map(function (array $vehicle, int $index) use ($defaultFulfillmentType, $confirmingAllReceipts, $receiptIndexSet): array {
+            $hasConfirmedVehicleWorkflow = filled($vehicle['plan_confirmed_at'] ?? null)
+                || filled($vehicle['warehouse_released_at'] ?? null)
+                || filled($vehicle['received_at'] ?? null);
+            $explicitFulfillmentType = in_array($vehicle['fulfillment_type'] ?? null, DispatchPlan::FULFILLMENT_TYPES, true)
+                ? $vehicle['fulfillment_type']
+                : null;
+            // Never turn an unconfirmed vehicle's blank arrangement into the
+            // dispatch-level legacy default during an unrelated save (such as a
+            // direct/no-transport plan confirmation).
+            $vehicle['fulfillment_type'] = $explicitFulfillmentType
+                ?? ($hasConfirmedVehicleWorkflow ? $defaultFulfillmentType : null);
+            $effectiveFulfillmentType = $vehicle['fulfillment_type'] ?? $defaultFulfillmentType;
+            if ($effectiveFulfillmentType === DispatchPlan::FULFILLMENT_WAREHOUSE_PICKUP) {
                 $vehicle['mode_of_transportation'] = 'Partner';
-                if ($confirmingPickup && blank($vehicle['warehouse_released_at'] ?? null)) {
+                $confirmingThisReceipt = $confirmingAllReceipts || isset($receiptIndexSet[$index]);
+                if ($confirmingThisReceipt && blank($vehicle['warehouse_released_at'] ?? null)) {
                     $vehicle['warehouse_released_at'] = now()->format('Y-m-d H:i:s');
                 }
-                if (filled($vehicle['warehouse_released_at'] ?? null)) {
+                if ($confirmingThisReceipt && filled($vehicle['warehouse_released_at'] ?? null)) {
                     $vehicle['received_at'] = $vehicle['warehouse_released_at'];
                 }
-                return $vehicle;
-            })->all();
+            }
+
+            return $vehicle;
+        })->all();
+        if ($data['fulfillment_type'] === DispatchPlan::FULFILLMENT_WAREHOUSE_PICKUP) {
             $data['mode_of_transportation'] = ['Partner'];
         }
 
@@ -1577,12 +2194,15 @@ class DispatchPlanController extends Controller
             $data['returned_quantity'] = null;
         }
 
-        // Returned/cancelled details are derived from item reconciliation, never
-        // independently keyed totals. Loaded quantity is the receipt expectation;
-        // allocation is the fallback for local/no-vehicle fulfillment.
+        // Returned/cancelled details are derived from the item outcomes captured
+        // during release/recipient receipt, never from independently keyed totals.
         if (
             array_key_exists('items', $data)
-            && ($data['status'] ?? $existing?->status) === DispatchPlan::STATUS_RECEIVED
+            && (
+                ($data['status'] ?? $existing?->status) === DispatchPlan::STATUS_RECEIVED
+                || (bool) ($data['update_local_receipt'] ?? false)
+                || ! empty($data['receipt_vehicle_indexes'] ?? [])
+            )
         ) {
             $variances = collect($data['items'])->map(function (array $item): array {
                 $loaded = (int) ($item['loaded_quantity'] ?? 0);
@@ -1648,15 +2268,25 @@ class DispatchPlanController extends Controller
 
             $estimatedDeparture = $this->parseScheduleDateTime($row['estimated_departure'] ?? null);
             $estimatedArrival = $this->parseScheduleDateTime($row['estimated_arrival'] ?? null);
+            $previousEstimatedDeparture = $this->parseScheduleDateTime($previous['estimated_departure'] ?? null);
+            $previousEstimatedArrival = $this->parseScheduleDateTime($previous['estimated_arrival'] ?? null);
             $departedAt = $this->parseScheduleDateTime($row['departed_at'] ?? null);
             $actualArrival = $this->parseScheduleDateTime($row['actual_arrival'] ?? null);
 
-            if ($estimatedDeparture && $estimatedDeparture->lt($now)) {
+            if (
+                $estimatedDeparture
+                && $estimatedDeparture->lt($now)
+                && (! $previousEstimatedDeparture || ! $estimatedDeparture->equalTo($previousEstimatedDeparture))
+            ) {
                 $errors["vehicle_details.$index.estimated_departure"] =
                     'Estimated departure cannot be earlier than the current date and time.';
             }
 
-            if ($estimatedArrival && $estimatedArrival->lt($now)) {
+            if (
+                $estimatedArrival
+                && $estimatedArrival->lt($now)
+                && (! $previousEstimatedArrival || ! $estimatedArrival->equalTo($previousEstimatedArrival))
+            ) {
                 $errors["vehicle_details.$index.estimated_arrival"] =
                     'Estimated arrival cannot be earlier than the current date and time.';
             } elseif (
@@ -1731,6 +2361,146 @@ class DispatchPlanController extends Controller
         $name = trim((string) ($request->user()?->name ?? ''));
 
         return $name !== '' ? $name : null;
+    }
+
+    /** Validate only the vehicle transactions explicitly being confirmed as planned. */
+    private function assertVehicleTransactionsPlannable(array $data, array $indexes): void
+    {
+        $errors = [];
+        if (blank($data['destination'] ?? null)) $errors['destination'] = 'Delivery site / destination is required.';
+        if (blank($data['receiving_agency_lgu'] ?? null)) $errors['receiving_agency_lgu'] = 'Receiving agency / organization is required.';
+
+        foreach ($indexes as $index) {
+            $index = (int) $index;
+            $row = $data['vehicle_details'][$index] ?? null;
+            if (! is_array($row)) {
+                $row = collect($data['vehicle_details'] ?? [])
+                    ->first(function ($candidate, $localIndex) use ($index): bool {
+                        if (! is_array($candidate)) {
+                            return false;
+                        }
+
+                        return (int) ($candidate['source_vehicle_index'] ?? $localIndex) === $index;
+                    });
+            }
+            if (! is_array($row)) {
+                $errors["vehicle_details.$index"] = 'Vehicle transaction was not found.';
+                continue;
+            }
+            $pickup = ($row['fulfillment_type'] ?? $data['fulfillment_type'] ?? DispatchPlan::FULFILLMENT_FIELD_DELIVERY)
+                === DispatchPlan::FULFILLMENT_WAREHOUSE_PICKUP;
+            foreach ([
+                'source_warehouse_id' => 'Source warehouse',
+                'mode_of_transportation' => 'Mode of transportation',
+                'land_transportation_source' => 'Transportation source',
+                'vehicle_type' => 'Vehicle type',
+            ] as $field => $label) {
+                if (blank($row[$field] ?? null) && ($field !== 'source_warehouse_id' || blank($row['source_warehouse_name'] ?? null))) {
+                    $errors["vehicle_details.$index.$field"] = "$label is required for this vehicle plan.";
+                }
+            }
+            $softCrew = $pickup && $this->vehicleAllowsSoftCrew($row);
+            if (! $softCrew) {
+                foreach (['driver' => 'Driver', 'driver_contact_number' => 'Driver contact number', 'vehicle_plate_number' => 'Plate number'] as $field => $label) {
+                    if (blank($row[$field] ?? null)) $errors["vehicle_details.$index.$field"] = "$label is required for this vehicle plan.";
+                }
+            }
+            if (! $pickup) {
+                if (blank($row['estimated_departure'] ?? null)) $errors["vehicle_details.$index.estimated_departure"] = 'Estimated departure is required for this vehicle plan.';
+                if (blank($row['estimated_arrival'] ?? null)) $errors["vehicle_details.$index.estimated_arrival"] = 'Estimated arrival is required for this vehicle plan.';
+            }
+            $planned = collect($row['loaded_items'] ?? [])->sum(fn ($line) => (int) (($line['planned_quantity'] ?? $line['loaded_quantity'] ?? 0)));
+            if ($planned <= 0) $errors["vehicle_details.$index.loaded_items"] = 'Assign at least one item quantity to this vehicle plan.';
+        }
+
+        // A vehicle may be planned before later batches are assigned. Enforce the
+        // allocation ceiling now; full allocation coverage is a dispatch summary,
+        // not a blocker for this individual vehicle transaction.
+        $this->assertLoadedQuantitiesWithinAllocation($data, $errors, true, true);
+        if ($errors !== []) throw ValidationException::withMessages($errors);
+    }
+
+    /** Validate only the warehouse releases selected by the user. */
+    private function assertVehicleTransactionsReleasable(array $data, array $indexes): void
+    {
+        $errors = [];
+        if (blank($data['source_of_goods'] ?? null)) $errors['source_of_goods'] = 'Select the Source of Goods before confirming release.';
+        if (blank($data['purpose'] ?? null)) $errors['purpose'] = 'Select the Purpose before confirming release.';
+        foreach ($indexes as $index) {
+            $row = $data['vehicle_details'][$index] ?? [];
+            $legacyAlreadyPlanned = in_array($data['status'] ?? null, [
+                DispatchPlan::STATUS_PLANNED,
+                DispatchPlan::STATUS_RELEASED,
+                DispatchPlan::STATUS_IN_TRANSIT,
+                DispatchPlan::STATUS_RECEIVED,
+            ], true);
+            if (blank($row['plan_confirmed_at'] ?? null) && ! $legacyAlreadyPlanned) {
+                $errors["vehicle_details.$index.plan_confirmed_at"] = 'Confirm this vehicle plan before warehouse release.';
+            }
+            foreach ([
+                'warehouse_released_at' => 'Warehouse release date and time',
+                'release_witnessed_by' => 'Released/Witnessed by',
+                'release_witness_contact_number' => 'Witness contact number',
+                'release_witness_position' => 'Witness position',
+                'release_witness_office' => 'Witness office',
+            ] as $field => $label) {
+                if (blank($row[$field] ?? null)) $errors["vehicle_details.$index.$field"] = "$label is required for this vehicle release.";
+            }
+            $loaded = collect($row['loaded_items'] ?? [])->sum(fn ($line) => (int) ($line['loaded_quantity'] ?? 0));
+            if ($loaded <= 0) $errors["vehicle_details.$index.loaded_items"] = 'Enter the quantities actually loaded on this vehicle.';
+            if (! DispatchPlan::vehicleAllowsMultiDayRun($row)
+                && filled($row['estimated_departure'] ?? null)
+                && filled($row['estimated_arrival'] ?? null)
+                && ! DispatchPlan::isSameManilaCalendarDate($row['estimated_departure'], $row['estimated_arrival'])) {
+                $errors["vehicle_details.$index.estimated_arrival"] = 'Confirm Release requires a same-day estimated schedule unless Multi-day run is checked.';
+            }
+        }
+        $this->assertLoadedQuantitiesWithinAllocation($data, $errors);
+        if ($errors !== []) throw ValidationException::withMessages($errors);
+    }
+
+    /** Dispatch status is a read-only roll-up of vehicle and direct-release transactions. */
+    private function deriveDispatchStatusFromTransactions(array $data): string
+    {
+        $vehicles = collect($data['vehicle_details'] ?? [])->filter(fn ($row) => is_array($row)
+            && (filled($row['source_warehouse_id'] ?? null) || filled($row['source_warehouse_name'] ?? null)))->values();
+        $local = is_array($data['local_handover_details'] ?? null) ? $data['local_handover_details'] : [];
+        $hasLocal = $this->hasLocalSourceAllocation($data);
+        $hasRemote = $this->classifiedSourceWarehouses($data)
+            ->contains(fn (array $warehouse): bool => (bool) ($warehouse['requires_transport'] ?? true));
+        $transactionCount = $vehicles->count() + ($hasLocal ? 1 : 0);
+        if ($transactionCount === 0) return DispatchPlan::STATUS_DRAFT;
+
+        $vehicleComplete = fn (array $row): bool => filled($row['received_at'] ?? null) && (bool) ($row['receipt_acknowledged'] ?? false);
+        // A completed no-transport handover must not make the whole dispatch
+        // Received while a separate transport allocation still has no vehicle
+        // transaction. Without this guard, the received roll-up invokes the
+        // dispatch-wide validator and incorrectly asks the local transaction
+        // for vehicle and loaded-quantity data.
+        $allComplete = (! $hasRemote || $vehicles->isNotEmpty())
+            && $vehicles->every($vehicleComplete)
+            && (! $hasLocal || (filled($local['received_at'] ?? null) && (bool) ($local['receipt_acknowledged'] ?? false)));
+        if ($allComplete) return DispatchPlan::STATUS_RECEIVED;
+
+        if ($vehicles->contains(fn (array $row): bool => filled($row['departed_at'] ?? null))) return DispatchPlan::STATUS_IN_TRANSIT;
+        if ($vehicles->contains(fn (array $row): bool => filled($row['warehouse_released_at'] ?? null))
+            || ($hasLocal && filled($local['released_at'] ?? null))) return DispatchPlan::STATUS_RELEASED;
+
+        $legacyDispatchPlanned = in_array($data['status'] ?? null, [
+            DispatchPlan::STATUS_PLANNED,
+            DispatchPlan::STATUS_RELEASED,
+            DispatchPlan::STATUS_IN_TRANSIT,
+            DispatchPlan::STATUS_RECEIVED,
+        ], true);
+        // No-transport and vehicle plans are independent transactions. As soon
+        // as any one of them is confirmed, the dispatch has active operational
+        // work and belongs in the In Progress queue. The remaining modules can
+        // still be planned separately inside that dispatch.
+        $anyPlanned = $legacyDispatchPlanned
+            || $vehicles->contains(fn (array $row): bool => filled($row['plan_confirmed_at'] ?? null))
+            || ($hasLocal && filled($local['plan_confirmed_at'] ?? null));
+
+        return $anyPlanned ? DispatchPlan::STATUS_PLANNED : DispatchPlan::STATUS_DRAFT;
     }
 
     /**
@@ -1850,14 +2620,8 @@ class DispatchPlanController extends Controller
                 }
 
                 foreach ($remoteWarehouses as $warehouse) {
-                    $covered = $vehicleRows->contains(
-                        fn (array $row) => $this->warehouseKeysMatch(
-                            $row['source_warehouse_id'] ?? null,
-                            $row['source_warehouse_name'] ?? null,
-                            $warehouse['id'] ?? null,
-                            $warehouse['name'] ?? null,
-                        )
-                    );
+                    $covered = $vehicleRows->contains(fn (array $row) =>
+                        $this->vehicleMatchesSourceWarehouse($row, collect([$warehouse])));
                     if (! $covered) {
                         $label = $warehouse['name'] !== '' ? $warehouse['name'] : 'a remote warehouse';
                         $errors['vehicle_details'] = ($errors['vehicle_details'] ?? null)
@@ -1871,6 +2635,8 @@ class DispatchPlanController extends Controller
 
                 foreach ($vehicleRows as $index => $row) {
                     $row = is_array($row) ? $row : [];
+                    $rowIsPickup = ($row['fulfillment_type'] ?? $data['fulfillment_type'] ?? DispatchPlan::FULFILLMENT_FIELD_DELIVERY)
+                        === DispatchPlan::FULFILLMENT_WAREHOUSE_PICKUP;
                     if ($this->vehicleSourceRequiresNoTransport($row, $data, $classifiedWarehouses)) {
                         $errors["vehicle_details.$index.source_warehouse_id"] =
                             'Vehicle delivery planning is not allowed for a source already at the recipient custody location. Assign a remote source warehouse or remove this vehicle.';
@@ -1878,8 +2644,7 @@ class DispatchPlanController extends Controller
                         continue;
                     }
                     if ($sourceWarehouses->isNotEmpty()) {
-                        $hasWarehouse = filled($row['source_warehouse_id'] ?? null)
-                            || filled($row['source_warehouse_name'] ?? null);
+                        $hasWarehouse = $this->vehicleSourceWarehouses($row) !== [];
                         if (! $hasWarehouse) {
                             $errors["vehicle_details.$index.source_warehouse_id"] =
                                 'Source warehouse is required for each vehicle.';
@@ -1888,7 +2653,7 @@ class DispatchPlanController extends Controller
                                 'Source warehouse must match an allocated remote warehouse on this plan.';
                         }
                     }
-                    if (! $isWarehousePickup) {
+                    if (! $rowIsPickup) {
                         if (blank($row['estimated_departure'] ?? null)) {
                             $errors["vehicle_details.$index.estimated_departure"] = 'Estimated departure date/time is required for each vehicle.';
                         }
@@ -1908,7 +2673,7 @@ class DispatchPlanController extends Controller
                     if (blank($row['vehicle_type'] ?? null)) {
                         $errors["vehicle_details.$index.vehicle_type"] = 'Vehicle type is required for each vehicle.';
                     }
-                    $softCrew = $isWarehousePickup && $this->vehicleAllowsSoftCrew($row);
+                    $softCrew = $rowIsPickup && $this->vehicleAllowsSoftCrew($row);
                     if (! $softCrew && blank($row['driver'] ?? null)) {
                         $errors["vehicle_details.$index.driver"] = 'Driver is required for each vehicle.';
                     }
@@ -1921,7 +2686,6 @@ class DispatchPlanController extends Controller
                     }
                     if (! $softCrew && $modeLabel === 'DSWD-Owned') {
                         foreach ([
-                            'driver_id_number' => 'Driver ID number',
                             'driver_position' => 'Driver position',
                             'driver_office' => 'Driver office',
                         ] as $field => $label) {
@@ -1934,7 +2698,6 @@ class DispatchPlanController extends Controller
                         foreach ([
                             'escort_name' => 'Escort name',
                             'escort_contact_number' => 'Escort contact number',
-                            'escort_id_number' => 'Escort ID number',
                             'escort_position' => 'Escort position',
                             'escort_office' => 'Escort office',
                         ] as $field => $label) {
@@ -1993,7 +2756,6 @@ class DispatchPlanController extends Controller
                 foreach ([
                     'release_witness_affiliation' => 'Released/witnessed by organization',
                     'released_by' => 'Personnel who released the items',
-                    'releaser_id_number' => 'Releasing personnel ID number',
                     'releaser_position' => 'Releasing personnel position',
                     'releaser_office' => 'Releasing personnel office',
                     'releaser_contact' => 'Releasing personnel contact number',
@@ -2033,9 +2795,6 @@ class DispatchPlanController extends Controller
                 if (blank($row['release_witness_contact_number'] ?? null)) {
                     $errors["vehicle_details.$index.release_witness_contact_number"] = 'Witness contact number is required for each vehicle.';
                 }
-                if (blank($row['release_witness_id_number'] ?? null)) {
-                    $errors["vehicle_details.$index.release_witness_id_number"] = 'Witness ID number is required for each vehicle.';
-                }
                 if (blank($row['release_witness_position'] ?? null)) {
                     $errors["vehicle_details.$index.release_witness_position"] = 'Witness position is required for each vehicle.';
                 }
@@ -2059,11 +2818,15 @@ class DispatchPlanController extends Controller
         // Local-only and warehouse pickup skip transit departure checks.
         if (
             $needsTransit
-            && ! $isWarehousePickup
             && $remoteWarehouses->isNotEmpty()
         ) {
             foreach ($vehicleRows as $index => $row) {
                 $row = is_array($row) ? $row : [];
+                $rowIsPickup = ($row['fulfillment_type'] ?? $data['fulfillment_type'] ?? DispatchPlan::FULFILLMENT_FIELD_DELIVERY)
+                    === DispatchPlan::FULFILLMENT_WAREHOUSE_PICKUP;
+                if ($rowIsPickup) {
+                    continue;
+                }
                 if ($this->vehicleSourceRequiresNoTransport($row, $data, $classifiedWarehouses)) {
                     continue;
                 }
@@ -2077,7 +2840,6 @@ class DispatchPlanController extends Controller
             if ($hasLocalWarehouse) {
                 foreach ([
                     'received_by' => 'Actual receiving representative',
-                    'receiver_id_number' => 'Receiving representative ID number',
                     'receiver_position' => 'Receiving representative position',
                     'receiver_office' => 'Receiving representative office',
                     'receiver_contact' => 'Receiving representative contact number',
@@ -2097,15 +2859,13 @@ class DispatchPlanController extends Controller
             if ($remoteWarehouses->isNotEmpty()) {
                 foreach ($vehicleRows as $index => $row) {
                     $row = is_array($row) ? $row : [];
+                    $rowIsPickup = ($row['fulfillment_type'] ?? $data['fulfillment_type'] ?? DispatchPlan::FULFILLMENT_FIELD_DELIVERY)
+                        === DispatchPlan::FULFILLMENT_WAREHOUSE_PICKUP;
                     if ($this->vehicleSourceRequiresNoTransport($row, $data, $classifiedWarehouses)) {
                         continue;
                     }
                     if (blank($row['received_by'] ?? null)) {
                         $errors["vehicle_details.$index.received_by"] = 'Actual Receiving Representative is required for each vehicle.';
-                    }
-                    $recipientId = $row['received_by_id_number'] ?? $row['recipient_id_number'] ?? null;
-                    if (blank($recipientId)) {
-                        $errors["vehicle_details.$index.received_by_id_number"] = 'Recipient ID number is required for each vehicle.';
                     }
                     if (blank($row['received_by_position'] ?? null)) {
                         $errors["vehicle_details.$index.received_by_position"] = 'Recipient position is required for each vehicle.';
@@ -2122,16 +2882,13 @@ class DispatchPlanController extends Controller
                     if (! ($row['receipt_acknowledged'] ?? false)) {
                         $errors["vehicle_details.$index.receipt_acknowledged"] = 'Acknowledge recipient receipt for each vehicle.';
                     }
-                    if (! $isWarehousePickup && blank($row['actual_arrival'] ?? null)) {
-                        $errors["vehicle_details.$index.actual_arrival"] =
-                            'Actual arrival date and time is required for each vehicle.';
-                    }
-                    if ($this->normalizeYesNo($row['fully_delivered'] ?? null) === null) {
-                        $errors["vehicle_details.$index.fully_delivered"] = 'Fully delivered / picked-up must be Yes or No for each vehicle.';
+                    if ($rowIsPickup && $this->normalizeYesNo($row['fully_delivered'] ?? null) === null) {
+                        $errors["vehicle_details.$index.fully_delivered"] = 'Fully picked-up must be Yes or No for each pickup transaction.';
                     }
                 }
             }
 
+            $hasUndeliveredItem = false;
             foreach (array_values($data['items'] ?? []) as $index => $item) {
                 $loaded = (int) ($item['loaded_quantity'] ?? 0);
                 $expected = (int) ($item['allocated_quantity'] ?? 0);
@@ -2141,6 +2898,7 @@ class DispatchPlanController extends Controller
                     continue;
                 }
                 $received = (int) $item['received_quantity'];
+                $hasUndeliveredItem = $hasUndeliveredItem || $expected > $received;
                 if ($received > $expected) {
                     $errors["items.$index.received_quantity"] = 'Received quantity cannot exceed the loaded or allocated quantity.';
                 }
@@ -2173,6 +2931,18 @@ class DispatchPlanController extends Controller
                         $errors["items.$index.return_stock_disposition"] = 'Damaged or expired returns must be quarantined for disposal and cannot return to available stock.';
                     }
                 }
+            }
+            if (
+                $this->normalizeYesNo($data['has_returned_items'] ?? null) === true
+                && ! $hasUndeliveredItem
+            ) {
+                $errors['has_returned_items'] = 'Enter at least one returned or cancelled quantity, or select No.';
+            }
+            if (
+                $this->normalizeYesNo($data['has_returned_items'] ?? null) === false
+                && $hasUndeliveredItem
+            ) {
+                $errors['has_returned_items'] = 'Select Yes to record the undelivered balance and its disposition.';
             }
         }
 
@@ -2279,7 +3049,7 @@ class DispatchPlanController extends Controller
      * @param  array<string, mixed>  $data
      * @param  array<string, string>  $errors
      */
-    private function assertLoadedQuantitiesWithinAllocation(array $data, array &$errors, bool $requireExact = false): void
+    private function assertLoadedQuantitiesWithinAllocation(array $data, array &$errors, bool $requireExact = false, bool $allowUnderAllocation = false): void
     {
         $items = collect($data['items'] ?? []);
         if ($items->isEmpty()) {
@@ -2345,7 +3115,7 @@ class DispatchPlanController extends Controller
             $loaded = (int) ($totals[$key] ?? 0);
             if ($loaded > $allocated) {
                 $errors["items.$itemIndex.loaded_quantity"] = "Total loaded quantity across vehicles ({$loaded}) exceeds allocated ({$allocated}) for {$item['item_name']}.";
-            } elseif ($requireExact && $loaded !== $allocated) {
+            } elseif ($requireExact && ! $allowUnderAllocation && $loaded !== $allocated) {
                 $errors["items.$itemIndex.loaded_quantity"] = "Total To Be Loaded across all vehicles ({$loaded}) must equal allocated ({$allocated}) for {$item['item_name']}.";
             }
         }
@@ -2500,6 +3270,9 @@ class DispatchPlanController extends Controller
         $seeded = [
             'destination' => $data['destination'] ?? $slip->delivery_site,
             'receiving_agency_lgu' => $data['receiving_agency_lgu'] ?? $slip->recipient,
+            'source_of_goods' => $data['source_of_goods'] ?? null,
+            'purpose' => $data['purpose']
+                ?? ($slip->purpose_of_release ?: ($slip->request?->purpose ?? null)),
             'driver' => $normalizedVehicles['driver'] ?? $driver,
             'driver_contact_number' => $normalizedVehicles['driver_contact_number'] ?? $driverContact,
             'vehicle_plate_number' => $normalizedVehicles['vehicle_plate_number'] ?? $plate,
@@ -2610,6 +3383,9 @@ class DispatchPlanController extends Controller
                 'received_quantity' => array_key_exists('received_quantity', $item) && $item['received_quantity'] !== null && $item['received_quantity'] !== ''
                     ? (int) $item['received_quantity']
                     : null,
+                'unit_cost' => array_key_exists('unit_cost', $item) && $item['unit_cost'] !== null && $item['unit_cost'] !== ''
+                    ? round((float) $item['unit_cost'], 2)
+                    : ($existing?->unit_cost ?? $allocation?->unit_cost ?? $this->allocationUnitCost($item['remarks'] ?? null)),
                 'variance_disposition' => $item['variance_disposition'] ?? null,
                 'variance_resolution' => $item['variance_resolution'] ?? $item['return_reason'] ?? null,
                 'return_condition' => $item['return_condition'] ?? null,
@@ -2646,7 +3422,7 @@ class DispatchPlanController extends Controller
                 // must not be replaced by a later live warehouse balance.
                 'current_stockpile' => $item->wit_stock_balance,
                 'available_to_plan' => $item->allocation_guide ?? $item->wit_stock_balance,
-                'unit_cost' => $this->allocationUnitCost($item->remarks),
+                'unit_cost' => $item->unit_cost ?? $this->allocationUnitCost($item->remarks),
                 'allocated_quantity' => (int) $item->quantity,
                 'loaded_quantity' => null,
                 'received_quantity' => null,
@@ -2954,7 +3730,7 @@ class DispatchPlanController extends Controller
         ];
     }
 
-    private function serializeDispatch(DispatchPlan $dispatch, ?User $viewer = null): array
+    private function serializeDispatch(DispatchPlan $dispatch, ?User $viewer = null, bool $monitorAllVehicles = false): array
     {
         $dispatch->loadMissing(['creator:id,name', 'updater:id,name', 'request', 'requisitionIssuanceSlip', 'items', 'deliveryUpdates.reporter:id,name']);
         $legacy = $this->serializeSlipSummary($dispatch->requisitionIssuanceSlip, $dispatch->request) ?? [];
@@ -2962,13 +3738,13 @@ class DispatchPlanController extends Controller
             ? $this->serializeEligibleRequest($dispatch->request)
             : null;
         $allVehicles = collect($dispatch->resolvedVehicleDetails())->values();
-        $visibleVehicleIndexes = $viewer && ! $this->canManageDispatches($viewer)
+        $visibleVehicleIndexes = $viewer && ! $monitorAllVehicles && ! $this->canManageDispatches($viewer)
             ? $this->authorizedVehicleIndexes($dispatch, $viewer)
             : $allVehicles->keys()->map(fn ($index): int => (int) $index)->all();
         $visibleVehicles = $allVehicles->only($visibleVehicleIndexes);
         $visibleItemIds = $visibleVehicles->flatMap(fn (array $vehicle) => collect($vehicle['loaded_items'] ?? [])
             ->pluck('requisition_issuance_item_id'))->filter()->map(fn ($id) => (string) $id)->unique();
-        $visibleItems = ($viewer && ! $this->canManageDispatches($viewer))
+        $visibleItems = ($viewer && ! $monitorAllVehicles && ! $this->canManageDispatches($viewer))
             ? $dispatch->items->filter(fn (DispatchPlanItem $item): bool => $visibleItemIds->contains((string) $item->requisition_issuance_item_id))
             : $dispatch->items;
         $allocatedTotal = (int) $visibleItems->sum('allocated_quantity');
@@ -2989,6 +3765,25 @@ class DispatchPlanController extends Controller
             'request_id' => $dispatch->request_id,
             'requisition_issuance_slip_id' => $dispatch->requisition_issuance_slip_id,
             'status' => $dispatch->status,
+            'can_edit_delivery_updates' => $viewer
+                ? ($this->deliveryUpdateDevelopmentAccess() || $this->isAssignedEscort($dispatch, $viewer))
+                : false,
+            'editable_delivery_vehicle_indexes' => $viewer && $this->deliveryUpdateDevelopmentAccess()
+                ? $allVehicles->keys()->map(fn ($index): int => (int) $index)->all()
+                : ($viewer && $this->isAssignedEscort($dispatch, $viewer)
+                    ? $this->authorizedVehicleIndexes($dispatch, $viewer)
+                    : []),
+            // Receipt revisions are intentionally broader than movement-update
+            // authorship: the assigned escort or an authorized dispatch officer
+            // may correct receipt details while the audit trail retains history.
+            'can_edit_receipts' => $viewer
+                ? ($this->canManageDispatches($viewer) || $this->isAssignedEscort($dispatch, $viewer))
+                : false,
+            'editable_receipt_vehicle_indexes' => $viewer && $this->canManageDispatches($viewer)
+                ? $allVehicles->keys()->map(fn ($index): int => (int) $index)->all()
+                : ($viewer && $this->isAssignedEscort($dispatch, $viewer)
+                    ? $this->authorizedVehicleIndexes($dispatch, $viewer)
+                    : []),
             'updated_at' => optional($dispatch->updated_at)?->toIso8601String(),
             'fulfillment_type' => $dispatch->fulfillment_type
                 ?: DispatchPlan::FULFILLMENT_FIELD_DELIVERY,
@@ -3054,6 +3849,7 @@ class DispatchPlanController extends Controller
                 'location' => $update->location,
                 'latitude' => $update->latitude,
                 'longitude' => $update->longitude,
+                'accuracy_meters' => $update->accuracy_meters,
                 'message' => $update->message,
                 'reporter_name' => $update->reporter?->name,
                 'reporter_role' => $update->reporter_role,
@@ -3390,15 +4186,39 @@ class DispatchPlanController extends Controller
             })
             ->values()
             ->all();
+        $sourceWarehouses = collect($row['source_warehouses'] ?? [])
+            ->filter(fn ($warehouse) => is_array($warehouse) && (filled($warehouse['id'] ?? null) || filled($warehouse['name'] ?? null)))
+            ->map(fn (array $warehouse): array => [
+                'id' => filled($warehouse['id'] ?? null) ? (int) $warehouse['id'] : null,
+                'name' => filled($warehouse['name'] ?? null) ? trim((string) $warehouse['name']) : null,
+            ])->unique(fn (array $warehouse): string => filled($warehouse['id']) ? 'id:'.$warehouse['id'] : 'name:'.strtolower((string) $warehouse['name']))
+            ->values()->all();
+        if ($sourceWarehouses === [] && (filled($row['source_warehouse_id'] ?? null) || filled($row['source_warehouse_name'] ?? null))) {
+            $sourceWarehouses[] = ['id' => $row['source_warehouse_id'] ?? null, 'name' => $row['source_warehouse_name'] ?? null];
+        }
+        $primarySource = $sourceWarehouses[0] ?? [];
 
         return [
+            // Retain the persisted fleet index used by filtered escort
+            // workspaces. This is a transport key only; it lets scoped
+            // receipt/transit commands address the correct saved vehicle.
+            ...(array_key_exists('source_vehicle_index', $row)
+                && $row['source_vehicle_index'] !== null
+                && $row['source_vehicle_index'] !== ''
+                    ? ['source_vehicle_index' => (int) $row['source_vehicle_index']]
+                    : []),
+            'fulfillment_type' => in_array($row['fulfillment_type'] ?? null, DispatchPlan::FULFILLMENT_TYPES, true)
+                ? $row['fulfillment_type']
+                : DispatchPlan::FULFILLMENT_FIELD_DELIVERY,
+            'plan_confirmed_at' => filled($row['plan_confirmed_at'] ?? null) ? (string) $row['plan_confirmed_at'] : null,
             'dr_number' => filled($row['dr_number'] ?? null) ? trim((string) $row['dr_number']) : null,
-            'source_warehouse_id' => filled($row['source_warehouse_id'] ?? null)
-                ? (int) $row['source_warehouse_id']
+            'source_warehouse_id' => filled($primarySource['id'] ?? $row['source_warehouse_id'] ?? null)
+                ? (int) ($primarySource['id'] ?? $row['source_warehouse_id'])
                 : null,
-            'source_warehouse_name' => filled($row['source_warehouse_name'] ?? null)
-                ? trim((string) $row['source_warehouse_name'])
+            'source_warehouse_name' => filled($primarySource['name'] ?? $row['source_warehouse_name'] ?? null)
+                ? trim((string) ($primarySource['name'] ?? $row['source_warehouse_name']))
                 : null,
+            'source_warehouses' => $sourceWarehouses,
             'vehicle_type' => filled($row['vehicle_type'] ?? null) ? trim((string) $row['vehicle_type']) : null,
             'driver' => filled($row['driver'] ?? null) ? trim((string) $row['driver']) : null,
             'driver_contact_number' => filled($row['driver_contact_number'] ?? null)
@@ -3529,14 +4349,14 @@ class DispatchPlanController extends Controller
 
         return collect($rows)->map(function (array $row, int $index) use ($base, $multiple, $offset, $existing): array {
             $saved = $existing[$index] ?? [];
-            // Once released, a DR number represents its actual release order
-            // and must never be renumbered by later array-order saves.
-            if (filled($saved['warehouse_released_at'] ?? null) && filled($saved['dr_number'] ?? null)) {
+            // A DR number is reserved when this transaction is planned. Keep
+            // that identity on every later save, including before release.
+            if (filled($saved['dr_number'] ?? null)) {
                 $row['dr_number'] = $saved['dr_number'];
                 return $row;
             }
-            // DR identity is created only when release is confirmed. Array
-            // position during Planning must not reserve a suffix.
+            // A new transaction receives its suffix in
+            // assignDrNumbersByPlanSequence when its plan is confirmed.
             $row['dr_number'] = null;
             return $row;
         })->all();
@@ -3557,7 +4377,7 @@ class DispatchPlanController extends Controller
         $vehicles = array_values($data['vehicle_details'] ?? []);
         $offset = (int) ($data['dr_series_offset'] ?? 0);
         $handover = is_array($data['local_handover_details'] ?? null) ? $data['local_handover_details'] : [];
-        if (filled($handover['released_at'] ?? null) && filled($handover['dr_number'] ?? null)) {
+        if (filled($handover['dr_number'] ?? null)) {
             $data['local_handover_details'] = $handover;
             return $data;
         }
@@ -3566,15 +4386,19 @@ class DispatchPlanController extends Controller
 
         $handover['source_warehouse_id'] = $handover['source_warehouse_id'] ?? ($localWarehouse['id'] ?? null);
         $handover['source_warehouse_name'] = $handover['source_warehouse_name'] ?? ($localWarehouse['name'] ?? null);
-        // Local handover DR identity is likewise assigned on actual release.
+        // A new local transaction receives its suffix when its plan is
+        // confirmed; an already-reserved suffix was retained above.
         $handover['dr_number'] = null;
         $data['local_handover_details'] = $handover;
 
         return $data;
     }
 
-    /** Lock DR suffixes in the order releases are actually confirmed. */
-    private function assignDrNumbersByReleaseSequence(
+    /**
+     * Lock DR suffixes using the order in which transaction modes were planned.
+     * Existing issued DRs remain immutable so inventory references stay valid.
+     */
+    private function assignDrNumbersByPlanSequence(
         array $data,
         array $existingVehicles,
         array $existingHandover,
@@ -3585,40 +4409,77 @@ class DispatchPlanController extends Controller
         $base = trim((string) ($slip?->dr_number ?: data_get($slip?->tracking_data, 'dr_number')));
         if ($base === '') $base = 'DR-'.$slip?->id;
 
+        $handover = is_array($data['local_handover_details'] ?? null) ? $data['local_handover_details'] : [];
+        $hasLocalTransaction = filled($handover['source_warehouse_id'] ?? null)
+            || filled($handover['source_warehouse_name'] ?? null)
+            || filled($handover['plan_confirmed_at'] ?? null)
+            || $this->hasLocalSourceAllocation($data);
         $requiresSuffix = count($data['vehicle_details'] ?? [])
-            + ($this->hasLocalSourceAllocation($data) ? 1 : 0) > 1
+            + ($hasLocalTransaction ? 1 : 0) > 1
             || (int) ($data['dr_series_offset'] ?? 0) > 0;
 
         $used = collect($existingVehicles)
-            ->filter(fn (array $row): bool => filled($row['warehouse_released_at'] ?? null))
             ->pluck('dr_number')
-            ->push(filled($existingHandover['released_at'] ?? null) ? ($existingHandover['dr_number'] ?? null) : null)
+            ->push($existingHandover['dr_number'] ?? null)
             ->filter()
             ->map(fn ($number): int => $this->drSuffixNumber((string) $number))
             ->filter(fn (int $number): bool => $number > 0)
             ->values();
-        $next = max(1, ((int) $used->max()) + 1);
         $vehicles = array_values($data['vehicle_details'] ?? []);
+
+        // Rank every transaction by its immutable plan confirmation time. The
+        // stable ordinal only resolves transactions confirmed in the same
+        // second (for example, several vehicles confirmed together).
+        $sequence = collect($vehicles)->map(fn (array $row, int $index): array => [
+            'key' => "vehicle:$index",
+            'planned_at' => filled($row['plan_confirmed_at'] ?? null)
+                ? strtotime((string) $row['plan_confirmed_at'])
+                : PHP_INT_MAX,
+            'ordinal' => $index,
+        ]);
+        if ($hasLocalTransaction) {
+            $sequence->push([
+                'key' => 'local',
+                'planned_at' => filled($handover['plan_confirmed_at'] ?? null)
+                    ? strtotime((string) $handover['plan_confirmed_at'])
+                    : PHP_INT_MAX,
+                'ordinal' => count($vehicles),
+            ]);
+        }
+        $sequence = $sequence
+            ->sort(fn (array $left, array $right): int =>
+                [$left['planned_at'], $left['ordinal']] <=> [$right['planned_at'], $right['ordinal']]
+            )
+            ->values();
+        $seriesOffset = (int) ($data['dr_series_offset'] ?? 0);
+        $suffixByKey = $sequence->mapWithKeys(
+            fn (array $entry, int $position): array => [$entry['key'] => $seriesOffset + $position + 1],
+        );
+
+        $nextAvailableSuffix = function (string $key) use ($suffixByKey, $used): int {
+            $candidate = max(1, (int) $suffixByKey->get($key, 1));
+            while ($used->contains($candidate)) $candidate++;
+            $used->push($candidate);
+            return $candidate;
+        };
 
         foreach ($releaseVehicleIndexes as $index) {
             if (! isset($vehicles[$index])) continue;
             $existing = $existingVehicles[$index] ?? [];
-            if (filled($existing['warehouse_released_at'] ?? null) && filled($existing['dr_number'] ?? null)) {
+            if (filled($existing['dr_number'] ?? null)) {
                 $vehicles[$index]['dr_number'] = $existing['dr_number'];
                 continue;
             }
             $vehicles[$index]['dr_number'] = $requiresSuffix
-                ? $base.'-'.$this->alphabeticSuffix($next - 1)
+                ? $base.'-'.$this->alphabeticSuffix($nextAvailableSuffix("vehicle:$index") - 1)
                 : $base;
-            $next++;
         }
 
         $data['vehicle_details'] = $vehicles;
         if ($releaseLocal) {
-            $handover = is_array($data['local_handover_details'] ?? null) ? $data['local_handover_details'] : [];
-            $handover['dr_number'] = filled($existingHandover['released_at'] ?? null) && filled($existingHandover['dr_number'] ?? null)
+            $handover['dr_number'] = filled($existingHandover['dr_number'] ?? null)
                 ? $existingHandover['dr_number']
-                : ($requiresSuffix ? $base.'-'.$this->alphabeticSuffix($next - 1) : $base);
+                : ($requiresSuffix ? $base.'-'.$this->alphabeticSuffix($nextAvailableSuffix('local') - 1) : $base);
             $data['local_handover_details'] = $handover;
         }
         return $data;
@@ -4018,6 +4879,19 @@ class DispatchPlanController extends Controller
      */
     private function vehicleSourceRequiresNoTransport(array $vehicle, array $data, Collection $classified): bool
     {
+        $explicitSources = collect($vehicle['source_warehouses'] ?? [])
+            ->filter(fn ($source) => is_array($source) && (filled($source['id'] ?? null) || filled($source['name'] ?? null)))
+            ->values()->all();
+        foreach ($explicitSources as $source) {
+            $candidate = [
+                ...$vehicle,
+                'source_warehouse_id' => $source['id'] ?? null,
+                'source_warehouse_name' => $source['name'] ?? null,
+            ];
+            unset($candidate['source_warehouses']);
+            if ($this->vehicleSourceRequiresNoTransport($candidate, $data, $classified)) return true;
+        }
+        if ($explicitSources !== []) return false;
         $hasWarehouse = filled($vehicle['source_warehouse_id'] ?? null)
             || filled($vehicle['source_warehouse_name'] ?? null);
         if (! $hasWarehouse) {
@@ -4064,13 +4938,15 @@ class DispatchPlanController extends Controller
      */
     private function vehicleMatchesSourceWarehouse(array $vehicle, Collection $warehouses): bool
     {
-        return $warehouses->contains(function (array $warehouse) use ($vehicle): bool {
+        return collect($this->vehicleSourceWarehouses($vehicle))->contains(function (array $source) use ($warehouses): bool {
+            return $warehouses->contains(function (array $warehouse) use ($source): bool {
             return $this->warehouseKeysMatch(
-                $vehicle['source_warehouse_id'] ?? null,
-                $vehicle['source_warehouse_name'] ?? null,
+                $source['id'] ?? null,
+                $source['name'] ?? null,
                 $warehouse['id'] ?? null,
                 $warehouse['name'] ?? null,
             );
+            });
         });
     }
 
@@ -4080,12 +4956,104 @@ class DispatchPlanController extends Controller
      */
     private function itemMatchesVehicleWarehouse(array $item, array $vehicle): bool
     {
-        return $this->warehouseKeysMatch(
-            $item['warehouse_id'] ?? null,
-            $item['warehouse_name'] ?? null,
-            $vehicle['source_warehouse_id'] ?? null,
-            $vehicle['source_warehouse_name'] ?? null,
-        );
+        return collect($this->vehicleSourceWarehouses($vehicle))->contains(fn (array $source): bool =>
+            $this->warehouseKeysMatch(
+                $item['warehouse_id'] ?? null,
+                $item['warehouse_name'] ?? null,
+                $source['id'] ?? null,
+                $source['name'] ?? null,
+            ));
+    }
+
+    private function notifyDeliveryUpdateStakeholders(User $actor, DispatchPlan $dispatch, DispatchDeliveryUpdate $update): void
+    {
+        $dispatch->loadMissing('request.encoder', 'request.lguSubmitter');
+        $request = $dispatch->request;
+        $stage = (string) $update->stage;
+        $stageLabel = Str::headline($stage);
+        $vehicle = $dispatch->resolvedVehicleDetails()[(int) $update->vehicle_index] ?? [];
+        $vehicleLabel = trim((string) ($vehicle['vehicle_plate_number'] ?? $vehicle['vehicle_type'] ?? 'Vehicle '.((int) $update->vehicle_index + 1)));
+        $reference = $dispatch->dispatch_number ?: 'Dispatch #'.$dispatch->id;
+        $message = "{$vehicleLabel} — {$stageLabel}. {$update->message}";
+        $basePayload = [
+            'workflow' => 'Transport delivery monitoring',
+            'action_key' => 'dispatch_delivery_update_'.$stage,
+            'action_required' => in_array($stage, ['delay', 'incident'], true),
+            'title' => "{$reference}: {$stageLabel}",
+            'message' => Str::limit($message, 500),
+            'request_id' => $dispatch->request_id,
+            'reference_number' => $request?->reference_number,
+            'url' => route('delivery-monitoring.index', ['dispatch_id' => $dispatch->id, 'update_id' => $update->id]),
+            'meta' => [
+                'dispatch_id' => $dispatch->id,
+                'delivery_update_id' => $update->id,
+                'vehicle_index' => (int) $update->vehicle_index,
+                'stage' => $stage,
+                'location' => $update->location,
+                'photo_count' => count($update->photo_paths ?? []),
+            ],
+        ];
+
+        // Dispatch/RROS personnel monitor every field update.
+        $operational = User::query()->where('is_active', true)
+            ->where(function ($query): void {
+                $query->permission('manage dispatches')
+                    ->orWhereHas('roles', fn ($roles) => $roles->whereIn('name', ['RROS', 'RROS AA', 'Super Admin']));
+            })->get();
+
+        // DRMD operations receives milestone and exception updates. Executives
+        // receive departure/completion notices plus exception escalations, not
+        // routine checkpoint traffic.
+        $drmdStages = ['departed', 'arrived', 'unloading_completed', 'delay', 'incident'];
+        $drmd = in_array($stage, $drmdStages, true)
+            ? User::query()->where('is_active', true)->whereHas('roles', fn ($roles) => $roles->whereIn('name', ['DRMD AA', 'DRMD Chief', 'DRRS', 'DRRS AA', 'DRIMS', 'QRT', 'Quick Response Team']))->get()
+            : collect();
+        $leadershipStages = ['departed', 'unloading_completed', 'delay', 'incident'];
+        $leadership = in_array($stage, $leadershipStages, true)
+            ? User::query()->where('is_active', true)->whereHas('roles', fn ($roles) => $roles->whereIn('name', ['Regional Director', 'RD', 'Assistant Regional Director', 'ARD', 'Assistant Regional Director for Operations', 'ARDO']))->get()
+            : collect();
+
+        collect($operational)->merge($drmd)->merge($leadership)
+            ->filter(fn (User $user): bool => (int) $user->id !== (int) $actor->id)
+            ->unique('id')
+            ->each(fn (User $user) => $user->notify(new WorkflowNotification($basePayload)));
+
+        // Notify the concerned LGU/recipient accounts that are actually linked
+        // to the originating request. External recipients without a DROMIS
+        // account remain covered by the recorded contact details.
+        if ($request) {
+            $recipientUsers = collect([$request->encoder, $request->lguSubmitter]);
+            if (filled($request->lgu_psgc_code)) {
+                $recipientUsers = $recipientUsers->merge(
+                    User::query()->where('is_active', true)
+                        ->where('lgu_psgc_code', $request->lgu_psgc_code)
+                        ->whereHas('roles', fn ($roles) => $roles->where('name', 'LGU'))
+                        ->get()
+                );
+            }
+            $recipientPayload = [
+                ...$basePayload,
+                'url' => route('lgu.dromic-requests.index'),
+                'action_required' => in_array($stage, ['arrived', 'unloading_completed', 'delay', 'incident'], true),
+            ];
+            $recipientUsers->filter(fn (?User $user): bool => $user && $user->is_active && (int) $user->id !== (int) $actor->id)
+                ->unique('id')
+                ->each(fn (User $user) => $user->notify(new WorkflowNotification($recipientPayload)));
+        }
+    }
+
+    /** @return array<int, array{id: mixed, name: mixed}> */
+    private function vehicleSourceWarehouses(array $vehicle): array
+    {
+        $sources = collect($vehicle['source_warehouses'] ?? [])
+            ->filter(fn ($source) => is_array($source) && (filled($source['id'] ?? null) || filled($source['name'] ?? null)))
+            ->map(fn (array $source): array => ['id' => $source['id'] ?? null, 'name' => $source['name'] ?? null])
+            ->values()->all();
+        if ($sources !== []) return $sources;
+        if (filled($vehicle['source_warehouse_id'] ?? null) || filled($vehicle['source_warehouse_name'] ?? null)) {
+            return [['id' => $vehicle['source_warehouse_id'] ?? null, 'name' => $vehicle['source_warehouse_name'] ?? null]];
+        }
+        return [];
     }
 
     private function warehouseKeysMatch(
@@ -4166,7 +5134,7 @@ class DispatchPlanController extends Controller
 
         $directory = $this->resolveLguDirectoryForRequest($request);
         if ($directory) {
-            $directory->loadMissing(['officials', 'lswdoAlternates']);
+            $directory->loadMissing(['officials', 'lswdoAlternates', 'ldrrmoOfficers', 'staffMembers']);
             $scoped = $this->matchOfficialProfileInDirectory($directory, $key, $recipientFallback);
             if ($scoped !== null) {
                 return $scoped;
@@ -4212,7 +5180,7 @@ class DispatchPlanController extends Controller
                 'contact_number' => in_array($official->role, ['lswd_officer', 'lswd_officer_alternate'], true)
                     ? $primaryContact
                     : null,
-                'id_number' => null,
+                'id_number' => filled($official->id_number) ? trim((string) $official->id_number) : null,
             ];
         }
 
@@ -4230,7 +5198,7 @@ class DispatchPlanController extends Controller
                 'position' => $position !== '' ? $position : null,
                 'office' => $office !== '' ? $office : null,
                 'contact_number' => $contact !== '' ? $contact : $primaryContact,
-                'id_number' => null,
+                'id_number' => filled($alternate->id_number) ? trim((string) $alternate->id_number) : null,
             ];
         }
 
@@ -4245,6 +5213,47 @@ class DispatchPlanController extends Controller
                     ? trim((string) $directory->lswd_alternate_contact_number)
                     : $primaryContact,
                 'id_number' => null,
+            ];
+        }
+
+        $directory->loadMissing(['ldrrmoOfficers', 'staffMembers']);
+
+        foreach ($directory->ldrrmoOfficers as $officer) {
+            $display = trim((string) ($officer->name ?? ''));
+            if ($display === '' || $this->normalizePersonNameKey($display) !== $nameKey) {
+                continue;
+            }
+
+            $position = trim((string) ($officer->designation ?? ''));
+            $contact = collect([
+                $officer->mobile_number,
+                $officer->hotline_number,
+                $officer->landline_number,
+            ])->map(fn ($value) => trim((string) $value))->filter()->implode(' / ');
+
+            return [
+                'position' => $position !== '' ? $position : null,
+                'office' => filled($officer->office) ? trim((string) $officer->office) : ($office !== '' ? $office : null),
+                'contact_number' => $contact !== '' ? $contact : null,
+                'id_number' => filled($officer->id_number) ? trim((string) $officer->id_number) : null,
+            ];
+        }
+
+        foreach ($directory->staffMembers as $member) {
+            $display = trim((string) ($member->name ?? ''));
+            if ($display === '' || $this->normalizePersonNameKey($display) !== $nameKey) {
+                continue;
+            }
+
+            $position = trim((string) ($member->position ?? ''));
+            $contact = trim((string) ($member->contact_number ?? ''));
+            $memberOffice = trim((string) ($member->office ?? ''));
+
+            return [
+                'position' => $position !== '' ? $position : null,
+                'office' => $memberOffice !== '' ? $memberOffice : ($office !== '' ? $office : null),
+                'contact_number' => $contact !== '' ? $contact : null,
+                'id_number' => filled($member->id_number) ? trim((string) $member->id_number) : null,
             ];
         }
 
@@ -4305,7 +5314,7 @@ class DispatchPlanController extends Controller
         $profiles = [];
         $entries = LguDirectoryEntry::query()
             ->where('is_active', true)
-            ->with(['officials', 'lswdoAlternates'])
+            ->with(['officials', 'lswdoAlternates', 'ldrrmoOfficers', 'staffMembers'])
             ->get([
                 'id',
                 'lgu_name',
@@ -4344,7 +5353,7 @@ class DispatchPlanController extends Controller
                     'contact_number' => in_array($official->role, ['lswd_officer', 'lswd_officer_alternate'], true)
                         ? $primaryContact
                         : null,
-                    'id_number' => null,
+                    'id_number' => filled($official->id_number) ? trim((string) $official->id_number) : null,
                 ];
             }
 
@@ -4362,7 +5371,49 @@ class DispatchPlanController extends Controller
                     'position' => $position !== '' ? $position : null,
                     'office' => $office !== '' ? $office : null,
                     'contact_number' => $contact !== '' ? $contact : $primaryContact,
-                    'id_number' => null,
+                    'id_number' => filled($alternate->id_number) ? trim((string) $alternate->id_number) : null,
+                ];
+            }
+
+            foreach ($entry->ldrrmoOfficers as $officer) {
+                $display = trim((string) ($officer->name ?? ''));
+                $key = $this->normalizePersonNameKey($display);
+                if ($key === '' || isset($profiles[$key])) {
+                    continue;
+                }
+
+                $position = trim((string) ($officer->designation ?? ''));
+                $contact = collect([
+                    $officer->mobile_number,
+                    $officer->hotline_number,
+                    $officer->landline_number,
+                ])->map(fn ($value) => trim((string) $value))->filter()->implode(' / ');
+                $officerOffice = trim((string) ($officer->office ?? ''));
+
+                $profiles[$key] = [
+                    'position' => $position !== '' ? $position : null,
+                    'office' => $officerOffice !== '' ? $officerOffice : ($office !== '' ? $office : null),
+                    'contact_number' => $contact !== '' ? $contact : null,
+                    'id_number' => filled($officer->id_number) ? trim((string) $officer->id_number) : null,
+                ];
+            }
+
+            foreach ($entry->staffMembers as $member) {
+                $display = trim((string) ($member->name ?? ''));
+                $key = $this->normalizePersonNameKey($display);
+                if ($key === '' || isset($profiles[$key])) {
+                    continue;
+                }
+
+                $position = trim((string) ($member->position ?? ''));
+                $contact = trim((string) ($member->contact_number ?? ''));
+                $memberOffice = trim((string) ($member->office ?? ''));
+
+                $profiles[$key] = [
+                    'position' => $position !== '' ? $position : null,
+                    'office' => $memberOffice !== '' ? $memberOffice : ($office !== '' ? $office : null),
+                    'contact_number' => $contact !== '' ? $contact : null,
+                    'id_number' => filled($member->id_number) ? trim((string) $member->id_number) : null,
                 ];
             }
 
@@ -4384,6 +5435,25 @@ class DispatchPlanController extends Controller
         $this->lguOfficialProfileCache = $profiles;
 
         return $this->lguOfficialProfileCache;
+    }
+
+    /**
+     * @return list<array{id:int,value:string,label:string,metadata:array<string,mixed>,position?:string|null,office?:string|null,contact_number?:string|null,id_number?:string|null}>
+     */
+    private function driverCatalogWithMetadata(): array
+    {
+        return array_map(function (array $entry): array {
+            $metadata = is_array($entry['metadata'] ?? null) ? $entry['metadata'] : [];
+            $entry['metadata'] = $metadata;
+            $entry['position'] = filled($metadata['position'] ?? null) ? (string) $metadata['position'] : null;
+            $entry['office'] = filled($metadata['office'] ?? null) ? (string) $metadata['office'] : null;
+            $entry['contact_number'] = filled($metadata['contact_number'] ?? null)
+                ? (string) $metadata['contact_number']
+                : null;
+            $entry['id_number'] = filled($metadata['id_number'] ?? null) ? (string) $metadata['id_number'] : null;
+
+            return $entry;
+        }, OperationalLibraryValue::catalogEntries('dispatch_driver'));
     }
 
     private function formatDirectoryOfficeLabel(

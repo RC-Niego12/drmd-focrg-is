@@ -1,5 +1,5 @@
 import { Head, router } from '@inertiajs/react';
-import { AlertTriangle, Archive, CheckCircle2, Crown, KeyRound, RotateCcw, Search, ShieldCheck, Trash2, UserCheck, UsersRound, X } from 'lucide-react';
+import { AlertTriangle, Archive, CheckCircle2, Crown, Eye, EyeOff, KeyRound, RotateCcw, Search, ShieldCheck, Trash2, UserCheck, UsersRound, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import SearchableSelect from '@/Components/SearchableSelect';
@@ -15,7 +15,7 @@ const statusOptions = [
 
 function EmployeeAvatar({ user, size = 'table' }) {
     const [imageFailed, setImageFailed] = useState(false);
-    const initials = String(user?.name || 'Employee')
+    const initials = String(user?.name || user?.lgu_name || 'Employee')
         .split(/\s+/)
         .filter(Boolean)
         .slice(0, 2)
@@ -29,19 +29,22 @@ function EmployeeAvatar({ user, size = 'table' }) {
             <span className="absolute inset-0 rounded-full bg-gradient-to-br from-emerald-300 via-brand-400 to-sky-500 opacity-60 blur-sm transition duration-300 group-hover/avatar:scale-[1.7] group-hover/avatar:opacity-90" />
             <span className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-full border-2 border-white bg-brand-700 font-black text-white shadow-md ring-1 ring-brand-200 transition duration-300 ease-out group-hover/avatar:z-[260] group-hover/avatar:scale-[1.75] group-hover/avatar:shadow-2xl dark:border-zinc-900 dark:ring-brand-800">
                 {user?.avatar && !imageFailed
-                    ? <img src={user.avatar} alt={`${user.name} employee photo`} className="h-full w-full object-cover" onError={() => setImageFailed(true)} />
-                    : <span>{initials}</span>}
+                    ? <img src={user.avatar} alt={`${user.name || user.lgu_name} photo`} className="h-full w-full object-cover" onError={() => setImageFailed(true)} />
+                    : user?.logo_url && !imageFailed
+                        ? <img src={user.logo_url} alt={`${user.lgu_name} logo`} className="h-full w-full object-cover" onError={() => setImageFailed(true)} />
+                        : <span>{initials}</span>}
             </span>
         </span>
     );
 }
 
-export default function Index({ users, deletedUsers = [], roleOptions, requestableRoleOptions = [], metrics, ssoEmployees = [] }) {
+export default function Index({ users, lguDirectories = [], deletedUsers = [], roleOptions, requestableRoleOptions = [], metrics, ssoEmployees = [] }) {
     const [query, setQuery] = useState('');
     const [status, setStatus] = useState('');
     const [role, setRole] = useState('');
     const [activeSection, setActiveSection] = useState('drmd');
     const [editing, setEditing] = useState(null);
+    const [lguCredentials, setLguCredentials] = useState(null);
     const [deleteTarget, setDeleteTarget] = useState(null);
     const [superAdminId, setSuperAdminId] = useState('');
     const [assigningSuperAdmin, setAssigningSuperAdmin] = useState(false);
@@ -51,9 +54,9 @@ export default function Index({ users, deletedUsers = [], roleOptions, requestab
     const requestRoleOptions = useMemo(() => requestableRoleOptions.length ? requestableRoleOptions : roleOptions.filter((option) => option.value !== 'Super Admin' && option.value !== 'LGU' && option.value !== 'DRMD Chief'), [requestableRoleOptions, roleOptions]);
     const sections = useMemo(() => [
         { id: 'drmd', label: 'DRMD Users', description: 'Internal DROMIS users from DRMD / DSWD response sections.', count: metrics.drmd || users.filter((user) => user.category === 'drmd').length },
-        { id: 'lgu', label: 'LGUs', description: 'Province, city, and municipal LGU accounts for DROMIC submissions.', count: metrics.lgu || users.filter((user) => user.category === 'lgu').length },
+        { id: 'lgu', label: 'LGUs', description: 'Province, city, and municipal LGU profiles with portal personnel credentials.', count: metrics.lgu ?? lguDirectories.length },
         { id: 'outside', label: 'Outside DRMD / Future Users', description: 'External partner accounts and future non-DRMD access levels.', count: metrics.outside || users.filter((user) => user.category === 'outside').length },
-    ], [metrics, users]);
+    ], [metrics, users, lguDirectories.length]);
     const activeSectionMeta = sections.find((section) => section.id === activeSection) || sections[0];
 
     const assignSuperAdmin = () => {
@@ -75,12 +78,14 @@ export default function Index({ users, deletedUsers = [], roleOptions, requestab
             const haystack = [
                 user.name,
                 user.email,
+                user.username,
                 user.office,
                 user.position,
                 user.designation,
                 user.lgu_name,
                 user.lgu_level,
                 user.lgu_psgc_code,
+                user.lgu_directory_role,
                 user.requested_role,
                 user.access_status,
                 ...user.roles,
@@ -89,6 +94,28 @@ export default function Index({ users, deletedUsers = [], roleOptions, requestab
             return matchesSection && matchesStatus && matchesRole && (!needle || haystack.includes(needle));
         });
     }, [users, query, status, role, activeSection]);
+
+    const visibleLguDirectories = useMemo(() => {
+        const needle = query.trim().toLowerCase();
+
+        return lguDirectories.filter((entry) => {
+            const haystack = [
+                entry.lgu_name,
+                entry.lgu_level,
+                entry.psgc_code,
+                entry.source_sheet,
+                ...(entry.portal_logins || []).flatMap((login) => [
+                    login.label,
+                    login.person_name,
+                    login.username,
+                    login.email,
+                    login.role,
+                ]),
+            ].filter(Boolean).join(' ').toLowerCase();
+
+            return !needle || haystack.includes(needle);
+        });
+    }, [lguDirectories, query]);
 
     return (
         <AppLayout title="User Access">
@@ -147,7 +174,7 @@ export default function Index({ users, deletedUsers = [], roleOptions, requestab
                         <h2 className="text-lg font-black">{activeSectionMeta.label}</h2>
                         <p className="text-sm text-slate-500 dark:text-zinc-400">{activeSectionMeta.description}</p>
                     </div>
-                    <div className="grid gap-3 sm:grid-cols-3 lg:w-[46rem]">
+                    <div className={`grid gap-3 ${activeSection === 'lgu' ? 'sm:grid-cols-1 lg:w-[22rem]' : 'sm:grid-cols-3 lg:w-[46rem]'}`}>
                         <label className="block text-sm font-medium">
                             Search
                             <div className="relative mt-1">
@@ -156,58 +183,81 @@ export default function Index({ users, deletedUsers = [], roleOptions, requestab
                                     className="w-full pl-9"
                                     value={query}
                                     onChange={(event) => setQuery(event.target.value)}
-                                    placeholder="Search users..."
+                                    placeholder={activeSection === 'lgu' ? 'Search LGU, PSGC, or personnel...' : 'Search users...'}
                                 />
                             </div>
                         </label>
-                        <SearchableSelect label="Status" options={filteredStatusOptions} value={status} onChange={setStatus} />
-                        <SearchableSelect label="Role" options={filteredRoleOptions} value={role} onChange={setRole} />
+                        {activeSection !== 'lgu' && (
+                            <>
+                                <SearchableSelect label="Status" options={filteredStatusOptions} value={status} onChange={setStatus} />
+                                <SearchableSelect label="Role" options={filteredRoleOptions} value={role} onChange={setRole} />
+                            </>
+                        )}
                     </div>
                 </div>
 
                 <div className="mt-5 max-h-[62vh] overflow-auto rounded-md border border-slate-200 dark:border-zinc-800">
-                    <DataTable
-                        columns={activeSection === 'lgu'
-                            ? ['LGU Account', 'Email / Username', 'LGU Level', 'PSGC', 'Current Role', 'Status', 'Created', { label: 'Actions', align: 'right', actionColumn: true }]
-                            : ['Employee', 'Email', 'Position', 'Designation', 'Requested', 'Current Role', 'Status', 'Created', { label: 'Actions', align: 'right', actionColumn: true }]}
-                        rows={visibleUsers.map((user) => (
-                            <tr key={user.id} className={user.access_status === 'pending' ? 'bg-amber-50/60 dark:bg-amber-950/20' : undefined}>
-                                <td className="whitespace-nowrap px-4 py-3 font-bold">
-                                    <div className="flex items-center gap-3">
-                                        <EmployeeAvatar user={user} />
-                                        <div><p>{activeSection === 'lgu' ? (user.lgu_name || user.name) : user.name}</p>{activeSection !== 'lgu' && <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Employee</p>}</div>
-                                    </div>
-                                </td>
-                                <td className="whitespace-nowrap px-4 py-3">
-                                    <p>{user.email}</p>
-                                    {activeSection === 'lgu' && <p className="text-xs font-bold text-slate-400">{user.email?.split('@')[0]}</p>}
-                                </td>
-                                {activeSection === 'lgu' ? (
-                                    <>
-                                        <td className="whitespace-nowrap px-4 py-3 capitalize">{String(user.lgu_level || '-').replaceAll('_', ' ')}</td>
-                                        <td className="whitespace-nowrap px-4 py-3">{user.lgu_psgc_code || '-'}</td>
-                                    </>
-                                ) : (
-                                    <>
-                                        <td className="whitespace-nowrap px-4 py-3">{user.position || '-'}</td>
-                                        <td className="whitespace-nowrap px-4 py-3">{user.designation || '-'}</td>
-                                        <td className="whitespace-nowrap px-4 py-3">{user.requested_role || '-'}</td>
-                                    </>
-                                )}
-                                <td className="whitespace-nowrap px-4 py-3">{user.roles.join(', ') || '-'}</td>
-                                <td className="whitespace-nowrap px-4 py-3">
-                                    <StatusPill status={user.access_status} />
-                                </td>
-                                <td className="whitespace-nowrap px-4 py-3">{formatDateTime(user.created_at)}</td>
-                                <td className="whitespace-nowrap px-4 py-3 text-right">
-                                    <div className="inline-flex items-center gap-2">
-                                        <TableActionButton icon={ShieldCheck} label="Manage" onClick={() => setEditing(user)} tone="brand" />
-                                        <TableActionButton icon={Archive} label="Archive user" onClick={() => setDeleteTarget({ user, mode: 'soft' })} tone="amber" />
-                                    </div>
-                                </td>
-                            </tr>
-                        ))}
-                    />
+                    {activeSection === 'lgu' ? (
+                        <DataTable
+                            columns={['LGU', 'LGU Level', 'PSGC', 'Personnel', 'Provisioned Logins', { label: 'Actions', align: 'right', actionColumn: true }]}
+                            rows={visibleLguDirectories.map((entry) => (
+                                <tr key={entry.id}>
+                                    <td className="whitespace-nowrap px-4 py-3 font-bold">
+                                        <div className="flex items-center gap-3">
+                                            <EmployeeAvatar user={{ name: entry.lgu_name, logo_url: entry.logo_url, lgu_name: entry.lgu_name }} />
+                                            <div>
+                                                <p>{entry.lgu_name}</p>
+                                                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{entry.source_sheet || 'LGU Directory'}</p>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td className="whitespace-nowrap px-4 py-3 capitalize">{String(entry.lgu_level || '-').replaceAll('_', ' ')}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">{entry.psgc_code || '-'}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">{Number(entry.personnel_count || 0).toLocaleString()}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">
+                                        <span className="rounded-full bg-brand-50 px-2.5 py-1 text-xs font-black text-brand-700 ring-1 ring-brand-100 dark:bg-brand-950 dark:text-brand-100 dark:ring-brand-900">
+                                            {Number(entry.provisioned_count || 0).toLocaleString()} / {Number(entry.personnel_count || 0).toLocaleString()}
+                                        </span>
+                                    </td>
+                                    <td className="whitespace-nowrap px-4 py-3 text-right">
+                                        <TableActionButton icon={KeyRound} label="View portal credentials" onClick={() => setLguCredentials(entry)} tone="brand" />
+                                    </td>
+                                </tr>
+                            ))}
+                        />
+                    ) : (
+                        <DataTable
+                            columns={['Employee', 'Email', 'Position', 'Designation', 'Requested', 'Current Role', 'Status', 'Created', { label: 'Actions', align: 'right', actionColumn: true }]}
+                            rows={visibleUsers.map((user) => (
+                                <tr key={user.id} className={user.access_status === 'pending' ? 'bg-amber-50/60 dark:bg-amber-950/20' : undefined}>
+                                    <td className="whitespace-nowrap px-4 py-3 font-bold">
+                                        <div className="flex items-center gap-3">
+                                            <EmployeeAvatar user={user} />
+                                            <div>
+                                                <p>{user.name}</p>
+                                                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Employee</p>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td className="whitespace-nowrap px-4 py-3">{user.email}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">{user.position || '-'}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">{user.designation || '-'}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">{user.requested_role || '-'}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">{user.roles.join(', ') || '-'}</td>
+                                    <td className="whitespace-nowrap px-4 py-3">
+                                        <StatusPill status={user.access_status} />
+                                    </td>
+                                    <td className="whitespace-nowrap px-4 py-3">{formatDateTime(user.created_at)}</td>
+                                    <td className="whitespace-nowrap px-4 py-3 text-right">
+                                        <div className="inline-flex items-center gap-2">
+                                            <TableActionButton icon={ShieldCheck} label="Manage" onClick={() => setEditing(user)} tone="brand" />
+                                            <TableActionButton icon={Archive} label="Archive user" onClick={() => setDeleteTarget({ user, mode: 'soft' })} tone="amber" />
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                        />
+                    )}
                 </div>
             </ExportableCard>
 
@@ -252,12 +302,102 @@ export default function Index({ users, deletedUsers = [], roleOptions, requestab
             {editing && editing.access_status === 'pending' ? (
                 <AccessDecisionModal user={editing} roleOptions={requestRoleOptions} onClose={() => setEditing(null)} />
             ) : editing ? (
-                <AccessModal user={editing} roleOptions={editing.roles.includes('Super Admin') ? roleOptions : requestRoleOptions} onClose={() => setEditing(null)} />
+                <AccessModal user={editing} roleOptions={roleOptions} onClose={() => setEditing(null)} />
+            ) : null}
+            {lguCredentials ? (
+                <LguCredentialsModal entry={lguCredentials} onClose={() => setLguCredentials(null)} />
             ) : null}
             {deleteTarget ? (
                 <DeleteUserModal target={deleteTarget} onClose={() => setDeleteTarget(null)} />
             ) : null}
         </AppLayout>
+    );
+}
+
+function LguCredentialsModal({ entry, onClose }) {
+    const [revealedPasswords, setRevealedPasswords] = useState({});
+    const logins = Array.isArray(entry?.portal_logins) ? entry.portal_logins : [];
+
+    const statusLabel = (status) => {
+        if (status === 'default_pending_review') return 'Default credentials · awaiting first-login review';
+        if (status === 'default_retained') return 'Default password retained by user';
+        if (status === 'changed_by_user') return 'User set a custom password';
+        return 'Account not created yet';
+    };
+
+    return createPortal(
+        <div className="fixed inset-0 z-[80] flex items-start justify-center overflow-y-auto bg-slate-950/55 p-4 py-8 backdrop-blur-sm sm:items-center" role="dialog" aria-modal="true">
+            <div className="flex max-h-[calc(100vh-3rem)] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
+                <div className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-200 bg-amber-50/80 p-5 dark:border-zinc-800 dark:bg-amber-950/30">
+                    <div className="flex min-w-0 items-start gap-3">
+                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-amber-600 text-white">
+                            <KeyRound className="h-5 w-5" />
+                        </div>
+                        <div className="min-w-0">
+                            <p className="text-xs font-black uppercase tracking-wide text-amber-800 dark:text-amber-200">Protected portal credentials</p>
+                            <h2 className="mt-1 text-xl font-black text-slate-950 dark:text-white">{entry.lgu_name}</h2>
+                            <p className="mt-1 text-sm font-semibold text-slate-600 dark:text-zinc-300">
+                                {String(entry.lgu_level || '').toUpperCase()} · PSGC {entry.psgc_code || '—'} · {entry.provisioned_count || 0} provisioned of {entry.personnel_count || 0}
+                            </p>
+                        </div>
+                    </div>
+                    <button type="button" onClick={onClose} className="rounded-md p-2 text-slate-500 hover:bg-white hover:text-slate-800 dark:hover:bg-zinc-900" aria-label="Close">
+                        <X className="h-5 w-5" />
+                    </button>
+                </div>
+
+                <div className="overflow-y-auto p-5">
+                    <p className="mb-4 text-sm font-semibold text-slate-500 dark:text-zinc-400">
+                        Super Admin only. Passwords stay masked unless still on the system default.
+                    </p>
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        {logins.map((login, index) => {
+                            const key = `${login.role}-${login.username || login.person_name || index}`;
+                            const revealed = Boolean(revealedPasswords[key]);
+                            const canReveal = Boolean(login.password_is_default && login.default_password);
+
+                            return (
+                                <div key={key} className="rounded-lg border border-amber-200 bg-white p-4 dark:border-amber-900 dark:bg-zinc-950">
+                                    <p className="text-[10px] font-black uppercase tracking-wide text-amber-700 dark:text-amber-200">{login.label}</p>
+                                    <p className="mt-1 text-sm font-black text-slate-900 dark:text-white">{login.person_name || 'Not encoded'}</p>
+                                    <p className="mt-3 text-[10px] font-black uppercase text-slate-400">Username</p>
+                                    <p className="mt-1 break-all font-mono text-sm font-bold">{login.username || '—'}</p>
+                                    <p className="mt-3 text-[10px] font-black uppercase text-slate-400">Email</p>
+                                    <p className="mt-1 break-all text-sm font-semibold text-slate-700 dark:text-zinc-200">{login.email || '—'}</p>
+                                    <p className="mt-3 text-[10px] font-black uppercase text-slate-400">Password</p>
+                                    <div className="mt-1 flex items-center gap-2">
+                                        <p className="font-mono text-sm font-bold">
+                                            {canReveal
+                                                ? (revealed ? login.default_password : '••••••••')
+                                                : login.status === 'changed_by_user'
+                                                    ? 'Changed by user'
+                                                    : 'Not provisioned'}
+                                        </p>
+                                        {canReveal && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setRevealedPasswords((current) => ({ ...current, [key]: !revealed }))}
+                                                className="rounded-md p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 dark:hover:bg-zinc-800"
+                                                aria-label={revealed ? 'Hide password' : 'Reveal password'}
+                                            >
+                                                {revealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                            </button>
+                                        )}
+                                    </div>
+                                    <p className="mt-2 text-[11px] font-semibold text-slate-500">{statusLabel(login.status)}</p>
+                                </div>
+                            );
+                        })}
+                    </div>
+                    {!logins.length && (
+                        <p className="rounded-md bg-slate-50 p-4 text-sm font-semibold text-slate-500 dark:bg-zinc-900 dark:text-zinc-400">
+                            No LGU personnel roles are encoded for this profile yet.
+                        </p>
+                    )}
+                </div>
+            </div>
+        </div>,
+        document.body,
     );
 }
 

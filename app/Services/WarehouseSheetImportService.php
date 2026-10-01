@@ -93,7 +93,10 @@ class WarehouseSheetImportService
             'errors' => 0,
             'library_options_synced' => array_sum($libraryCounts),
             'library_option_counts' => $libraryCounts,
+            'rows_removed' => 0,
         ];
+
+        $seenVersions = [];
 
         while (($columns = fgetcsv($handle)) !== false) {
             $summary['rows_seen']++;
@@ -104,6 +107,8 @@ class WarehouseSheetImportService
 
                 continue;
             }
+
+            $seenVersions[$summary['rows_seen'] + 1] = hash('sha256', json_encode($payload));
 
             try {
                 $result = $this->importRow($sheetId, $gid, $summary['rows_seen'] + 1, $payload);
@@ -131,6 +136,20 @@ class WarehouseSheetImportService
         }
 
         fclose($handle);
+
+        if ($summary['errors'] === 0) {
+            $obsolete = WarehouseSheetImport::query()
+                ->where('sheet_id', $sheetId)
+                ->where('gid', $gid)
+                ->where('import_status', 'imported')
+                ->get()
+                ->filter(fn (WarehouseSheetImport $import): bool =>
+                    ($seenVersions[$import->sheet_row_number] ?? null) !== $import->row_hash
+                );
+
+            $summary['rows_removed'] = $obsolete->count();
+            WarehouseSheetImport::whereKey($obsolete->pluck('id'))->update(['import_status' => 'superseded']);
+        }
 
         return $summary;
     }

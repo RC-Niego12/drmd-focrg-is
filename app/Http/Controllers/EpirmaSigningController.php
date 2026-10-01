@@ -881,10 +881,16 @@ class EpirmaSigningController extends Controller
             ])->save();
         }
 
+        $assistanceRequest = $assistanceRequest->fresh() ?? $assistanceRequest;
+        if (! $this->statusService->revertForwardIfRoutingInactive($assistanceRequest, allowEmptyRoutes: true)) {
+            $this->statusService->refreshAaStatus($assistanceRequest);
+        }
+
         return response()->json([
             'success' => true,
             'message' => 'e-PIRMA document tracking entry deleted.',
-            'data' => $this->statusService->listForRequest($assistanceRequest)->values()->all(),
+            'data' => $this->statusService->listForRequest($assistanceRequest->fresh() ?? $assistanceRequest)->values()->all(),
+            'epirma' => app(EpirmaWorkflowService::class)->capabilitiesFor($assistanceRequest->fresh() ?? $assistanceRequest),
         ]);
     }
 
@@ -1084,31 +1090,42 @@ class EpirmaSigningController extends Controller
             $message = 'Response letter signing completed in e-PIRMA. RROS, DRRS PDRC, and the concerned LGU have been notified.';
         } else {
             // Routing-only return: keep draft and track on the document row.
-            // Cancelled/failed must recompute AA status (pending when nothing else is open).
-            $aaStatus = in_array($normalizedStatus, [
+            // Cancelled/failed may return the handoff to DRRS PDRC when nothing else is open.
+            $fresh = $assistanceRequest->fresh() ?? $assistanceRequest;
+            if (in_array($normalizedStatus, [
                 EpirmaSignedDocument::STATUS_CANCELLED,
                 EpirmaSignedDocument::STATUS_FAILED,
-            ], true)
-                ? $this->statusService->refreshAaStatus($assistanceRequest->fresh() ?? $assistanceRequest)
-                : (
-                    $assistanceRequest->epirma_aa_status === 'pending'
-                        ? 'in_progress'
-                        : (string) $assistanceRequest->epirma_aa_status
-                );
+            ], true)) {
+                $this->statusService->refreshAaStatus($fresh);
+                $fresh = $fresh->fresh() ?? $fresh;
+                $assistanceRequest->update([
+                    'epirma_status' => 'pending',
+                    'epirma_signature_reference' => $data['signature_reference']
+                        ?? $document?->signature_reference
+                        ?? $fresh->epirma_signature_reference,
+                ]);
+            } else {
+                $aaStatus = $fresh->epirma_aa_status === 'pending'
+                    ? 'in_progress'
+                    : (string) $fresh->epirma_aa_status;
+                $assistanceRequest->update([
+                    'epirma_status' => 'pending',
+                    'epirma_aa_status' => $aaStatus,
+                    'epirma_signature_reference' => $data['signature_reference']
+                        ?? $document?->signature_reference
+                        ?? $fresh->epirma_signature_reference,
+                ]);
+            }
 
-            $assistanceRequest->update([
-                'epirma_status' => 'pending',
-                'epirma_aa_status' => $aaStatus,
-                'epirma_signature_reference' => $data['signature_reference']
-                    ?? $document?->signature_reference
-                    ?? $assistanceRequest->epirma_signature_reference,
-            ]);
+            $assistanceRequest = $assistanceRequest->fresh() ?? $assistanceRequest;
+            $returnedToPdrc = blank($assistanceRequest->epirma_forwarded_to_drrs_aa_at);
 
             $audit->log('request.epirma_routing_returned', $assistanceRequest, [], [
                 'epirma_status' => 'pending',
                 'routing_status' => $normalizedStatus,
                 'signature_reference' => $data['signature_reference'] ?? null,
                 'document_id' => $document?->id,
+                'forward_reverted' => $returnedToPdrc,
             ]);
 
             if ($normalizedStatus === EpirmaSignedDocument::STATUS_CANCELLED) {
@@ -1117,12 +1134,17 @@ class EpirmaSigningController extends Controller
                     'document_id' => $document?->id,
                     'document_uuid' => $document?->document_uuid,
                     'raw_status' => $rawStatus,
+                    'forward_reverted' => $returnedToPdrc,
                 ]);
             }
 
             $message = match ($normalizedStatus) {
-                EpirmaSignedDocument::STATUS_CANCELLED => 'e-PIRMA routing was cancelled. You can route this document again from DROMIS.',
-                EpirmaSignedDocument::STATUS_FAILED => 'e-PIRMA reported a failure. You can route this document again from DROMIS.',
+                EpirmaSignedDocument::STATUS_CANCELLED => $returnedToPdrc
+                    ? 'e-PIRMA routing was cancelled. The assessment was returned to DRRS PDRC for revisions before re-forwarding.'
+                    : 'e-PIRMA routing was cancelled for this document. You can route it again from DROMIS.',
+                EpirmaSignedDocument::STATUS_FAILED => $returnedToPdrc
+                    ? 'e-PIRMA reported a failure. The assessment was returned to DRRS PDRC for revisions before re-forwarding.'
+                    : 'e-PIRMA reported a failure. You can route this document again from DROMIS.',
                 EpirmaSignedDocument::STATUS_PARTIALLY_SIGNED => 'Document is partially signed in e-PIRMA. DROMIS will keep tracking signer progress.',
                 default => 'Returned from e-PIRMA routing. DROMIS continues tracking signing progress.',
             };

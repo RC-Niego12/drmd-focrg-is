@@ -17,6 +17,7 @@ export default function PdfPreviewModal({
     tabs = null,
     initialTab = null,
     wide = false,
+    zIndexClass = 'z-[100]',
     onClose,
 }) {
     const hasTabs = Array.isArray(tabs) && tabs.length > 0;
@@ -74,7 +75,7 @@ export default function PdfPreviewModal({
 
     return (
         <div
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm"
+            className={`fixed inset-0 ${zIndexClass} flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm`}
             role="dialog"
             aria-modal="true"
             aria-label={title}

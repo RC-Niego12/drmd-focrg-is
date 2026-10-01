@@ -440,6 +440,30 @@ class WorkflowNotificationService
             'dispatch_id' => $dispatch->id,
             'bucket' => $dispatch->bucket(),
         ]);
+        $monitoringUrl = route('delivery-monitoring.index', ['dispatch_id' => $dispatch->id]);
+
+        if ($previousStatus !== $status && in_array($status, [DispatchPlan::STATUS_RELEASED, DispatchPlan::STATUS_IN_TRANSIT, DispatchPlan::STATUS_RECEIVED], true)) {
+            $pickup = $dispatch->isWarehousePickup();
+            $title = match ($status) {
+                DispatchPlan::STATUS_RELEASED => $pickup ? 'Relief items released for pickup' : 'Relief items released for transport',
+                DispatchPlan::STATUS_IN_TRANSIT => 'Relief delivery is in transit',
+                DispatchPlan::STATUS_RECEIVED => 'Relief delivery receipt confirmed',
+            };
+            $this->notifyRoles([
+                'DRMD AA', 'DRMD Chief', 'DRRS', 'DRRS AA', 'DRIMS', 'QRT', 'Quick Response Team',
+                'Regional Director', 'RD', 'Assistant Regional Director', 'ARD', 'Assistant Regional Director for Operations', 'ARDO',
+            ], [
+                'workflow' => 'Delivery situation monitoring',
+                'action_key' => 'dispatch_monitoring_'.$status,
+                'action_required' => false,
+                'title' => $title,
+                'message' => "{$dispatch->dispatch_number} for {$request->reference_number} is now {$this->dispatchStatusLabel($status)}. Open the monitoring view for vehicle, item, location, and evidence details.",
+                'request_id' => $request->id,
+                'reference_number' => $request->reference_number,
+                'url' => $monitoringUrl,
+                'meta' => ['dispatch_id' => $dispatch->id, 'status' => $status],
+            ]);
+        }
 
         if ($previousStatus === null || $previousStatus === $status) {
             $staff = User::query()->permission('manage dispatches')->where('is_active', true)->get();
@@ -560,6 +584,108 @@ class WorkflowNotificationService
         }
     }
 
+    public function notifyLocalHandoverMilestone(
+        AssistanceRequest $request,
+        DispatchPlan $dispatch,
+        string $milestone,
+        ?int $actorId = null,
+    ): void {
+        $handover = is_array($dispatch->local_handover_details) ? $dispatch->local_handover_details : [];
+        $isReceipt = $milestone === 'received';
+        $warehouse = trim((string) ($handover['source_warehouse_name'] ?? 'Local warehouse'));
+        $title = $isReceipt ? 'Local recipient receipt confirmed' : 'Local relief items released';
+        $message = $isReceipt
+            ? "{$dispatch->dispatch_number} for {$request->reference_number}: the recipient confirmed receipt of the no-transport items released by {$warehouse}."
+            : "{$dispatch->dispatch_number} for {$request->reference_number}: no-transport items were released by {$warehouse}. No vehicle or escort is required.";
+
+        $this->notifyRoles([
+            'Super Admin', 'RROS', 'RROS AA', 'DRMD AA', 'DRMD Chief', 'DRRS', 'DRRS AA',
+            'DRIMS', 'QRT', 'Quick Response Team', 'Regional Director', 'RD',
+            'Assistant Regional Director', 'ARD', 'Assistant Regional Director for Operations', 'ARDO',
+        ], [
+            'workflow' => 'Local release and receipt monitoring',
+            'action_key' => 'dispatch_local_handover_'.$milestone,
+            'action_required' => false,
+            'title' => $title,
+            'message' => $message,
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => route('delivery-monitoring.index', ['dispatch_id' => $dispatch->id, 'operation' => 'local']),
+            'meta' => [
+                'dispatch_id' => $dispatch->id,
+                'operation' => 'local',
+                'stage' => $milestone,
+                'source_warehouse_name' => $warehouse,
+            ],
+        ], $actorId);
+    }
+
+    /**
+     * Informational notice when every dispatch transaction has a confirmed plan
+     * and items are ready to proceed to warehouse release / delivery.
+     */
+    public function notifyDispatchPlanReadyForRelease(
+        AssistanceRequest $request,
+        DispatchPlan $dispatch,
+        ?int $actorId = null,
+    ): void {
+        $monitoringUrl = '/delivery-monitoring?'.http_build_query([
+            'dispatch_id' => $dispatch->id,
+        ]);
+        $lguUrl = '/lgu/dispatch-plans/'.$dispatch->id;
+        $title = 'Items planned for release / delivery';
+        $message = "{$dispatch->dispatch_number} for {$request->reference_number} now has a complete dispatch plan. Relief items are queued for warehouse release and delivery.";
+        $meta = [
+            'dispatch_id' => $dispatch->id,
+            'dispatch_number' => $dispatch->dispatch_number,
+            'status' => $dispatch->status,
+        ];
+
+        $this->notifyUsers($this->drmdRecipients($actorId), [
+            'workflow' => 'Dispatch plan ready for release',
+            'action_key' => 'dispatch_plan_ready_for_release',
+            'action_required' => false,
+            'title' => $title,
+            'message' => $message.' Open monitoring to review the planned vehicles, schedule, and item loads.',
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => $monitoringUrl,
+            'meta' => $meta,
+        ]);
+
+        $lguRecipients = $this->lguRecipients($request)
+            ->when($actorId, fn (Collection $users) => $users->reject(
+                fn (User $user): bool => (int) $user->id === (int) $actorId
+            )->values());
+
+        $this->notifyUsers($lguRecipients, [
+            'workflow' => 'Dispatch plan ready for release',
+            'action_key' => 'dispatch_plan_ready_for_release',
+            'action_required' => false,
+            'title' => $title,
+            'message' => $message.' Open the plan to review what will be released, when it is scheduled, where it moves from/to, and how delivery or pickup is arranged.',
+            'request_id' => $request->id,
+            'reference_number' => $request->reference_number,
+            'url' => $lguUrl,
+            'meta' => $meta,
+        ]);
+    }
+
+    /**
+     * Active FO users under DRMD (roles/offices named DRMD*), e.g. AA, Chief, Financial Analyst.
+     */
+    private function drmdRecipients(?int $exceptUserId = null): Collection
+    {
+        return User::query()
+            ->where('is_active', true)
+            ->where(function ($query): void {
+                $query->where('office', 'like', 'DRMD%')
+                    ->orWhereHas('roles', fn ($roles) => $roles->where('name', 'like', 'DRMD%'));
+            })
+            ->when($exceptUserId, fn ($query) => $query->whereKeyNot($exceptUserId))
+            ->get();
+    }
+
     private function assignedDispatchEscorts(DispatchPlan $dispatch): Collection
     {
         $vehicles = collect($dispatch->resolvedVehicleDetails())
@@ -634,30 +760,38 @@ class WorkflowNotificationService
 
     public function notifyLguReportSubmitted(AssistanceRequest $request, bool $signedComplete): void
     {
+        $standaloneReliefRequest = (bool) data_get($request->lgu_dromic_payload, 'standalone_relief_request');
         $hasReliefRequest = (bool) data_get($request->lgu_dromic_payload, 'has_relief_request')
+            || $standaloneReliefRequest
             || filled($request->lgu_relief_request_reference);
         $copyLabel = $signedComplete ? 'with complete signed copies' : 'as an advance copy';
         $aor = app(AorCoverageService::class);
+        $reference = $standaloneReliefRequest
+            ? ($request->lgu_relief_request_reference ?: $request->reference_number)
+            : $request->reference_number;
 
-        $drimsRecipients = $aor->ownersForRequest($request, 'DRIMS');
-        if ($drimsRecipients->isEmpty()) {
-            $drimsRecipients = User::query()->role(['DRIMS', 'Super Admin'])->where('is_active', true)->get();
+        // Consolidated lump requests have no DROMIC report — skip DRIMS and notify DRRS only.
+        if (! $standaloneReliefRequest) {
+            $drimsRecipients = $aor->ownersForRequest($request, 'DRIMS');
+            if ($drimsRecipients->isEmpty()) {
+                $drimsRecipients = User::query()->role(['DRIMS', 'Super Admin'])->where('is_active', true)->get();
+            }
+            $this->notifyUsers($drimsRecipients, [
+                'workflow' => 'LGU DROMIC reporting',
+                'action_key' => 'drims_dromic_ack_required',
+                'action_required' => blank($request->lgu_dromic_acked_at),
+                'title' => $signedComplete ? 'Acknowledge signed LGU DROMIC report' : 'Acknowledge LGU DROMIC advance copy',
+                'message' => "{$request->requesting_agency} sent {$reference} {$copyLabel}. Please open and acknowledge receipt (AOR).",
+                'request_id' => $request->id,
+                'reference_number' => $reference,
+                'url' => route('dromic.lgu-reports', ['tab' => 'reports', 'search' => $request->reference_number]),
+                'meta' => [
+                    'has_relief_request' => $hasReliefRequest,
+                    'signed_copy_complete' => $signedComplete,
+                    'document' => 'dromic_report',
+                ],
+            ]);
         }
-        $this->notifyUsers($drimsRecipients, [
-            'workflow' => 'LGU DROMIC reporting',
-            'action_key' => 'drims_dromic_ack_required',
-            'action_required' => blank($request->lgu_dromic_acked_at),
-            'title' => $signedComplete ? 'Acknowledge signed LGU DROMIC report' : 'Acknowledge LGU DROMIC advance copy',
-            'message' => "{$request->requesting_agency} sent {$request->reference_number} {$copyLabel}. Please open and acknowledge receipt (AOR).",
-            'request_id' => $request->id,
-            'reference_number' => $request->reference_number,
-            'url' => route('dromic.lgu-reports', ['tab' => 'reports', 'search' => $request->reference_number]),
-            'meta' => [
-                'has_relief_request' => $hasReliefRequest,
-                'signed_copy_complete' => $signedComplete,
-                'document' => 'dromic_report',
-            ],
-        ]);
 
         if ($hasReliefRequest) {
             $drrsRecipients = $aor->ownersForRequest($request, 'DRRS');
@@ -669,30 +803,34 @@ class WorkflowNotificationService
                 'action_key' => 'drrs_relief_request_ack_required',
                 'action_required' => blank($request->lgu_relief_acked_at),
                 'title' => $signedComplete ? 'Acknowledge signed LGU request letter' : 'Acknowledge LGU request letter (advance)',
-                'message' => "{$request->requesting_agency} submitted a relief augmentation request letter with {$request->reference_number}. Please open and acknowledge receipt (AOR).",
+                'message' => "{$request->requesting_agency} submitted a relief augmentation request letter with {$reference}. Please open and acknowledge receipt (AOR).",
                 'request_id' => $request->id,
-                'reference_number' => $request->reference_number,
+                'reference_number' => $reference,
                 'url' => route('dromic.lgu-reports', ['tab' => 'requests', 'search' => $request->lgu_relief_request_reference ?: $request->reference_number]),
                 'meta' => [
                     'has_relief_request' => true,
                     'signed_copy_complete' => $signedComplete,
                     'document' => 'request_letter',
+                    'standalone_relief_request' => $standaloneReliefRequest,
                 ],
             ]);
         }
 
         $this->notifyRoles(['OCD Caraga', 'Super Admin'], [
-            'workflow' => 'LGU DROMIC reporting',
+            'workflow' => $standaloneReliefRequest ? 'LGU relief request letter' : 'LGU DROMIC reporting',
             'action_key' => $signedComplete ? 'lgu_dromic_submitted_complete' : 'lgu_dromic_signed_copy_pending',
             'action_required' => ! $signedComplete,
-            'title' => $signedComplete ? 'LGU DROMIC report submitted with signed copies' : 'LGU DROMIC advance copy received',
-            'message' => "{$request->requesting_agency} sent {$request->reference_number} {$copyLabel} to DSWD and OCD Caraga.",
+            'title' => $standaloneReliefRequest
+                ? ($signedComplete ? 'LGU relief request submitted with signed letter' : 'LGU relief request advance copy received')
+                : ($signedComplete ? 'LGU DROMIC report submitted with signed copies' : 'LGU DROMIC advance copy received'),
+            'message' => "{$request->requesting_agency} sent {$reference} {$copyLabel} to DSWD and OCD Caraga.",
             'request_id' => $request->id,
-            'reference_number' => $request->reference_number,
-            'url' => route('dromic.lgu-reports'),
+            'reference_number' => $reference,
+            'url' => route('dromic.lgu-reports', ['tab' => $standaloneReliefRequest ? 'requests' : 'reports']),
             'meta' => [
                 'has_relief_request' => $hasReliefRequest,
                 'signed_copy_complete' => $signedComplete,
+                'standalone_relief_request' => $standaloneReliefRequest,
             ],
         ], $request->lgu_submitted_by);
     }
@@ -752,6 +890,80 @@ class WorkflowNotificationService
             'reference_number' => $request->reference_number,
             'url' => route('lgu.dromic-requests.index'),
             'meta' => ['validation_status' => $status],
+        ]);
+    }
+
+    public function notifyLguAmendmentRequested(AssistanceRequest $request): void
+    {
+        $target = $request->lgu_amendment_request_target ?: 'report';
+        $aor = app(AorCoverageService::class);
+        $roleScope = $target === 'request' ? 'DRRS' : 'DRIMS';
+        $recipients = $aor->ownersForRequest($request, $roleScope);
+        if ($recipients->isEmpty()) {
+            $recipients = User::query()->role([$roleScope, 'Super Admin'])->where('is_active', true)->get();
+        }
+
+        $reference = $target === 'request'
+            ? ($request->lgu_relief_request_reference ?: $request->reference_number)
+            : $request->reference_number;
+
+        $this->notifyUsers($recipients, [
+            'workflow' => $target === 'request' ? 'LGU relief amendment request' : 'LGU DROMIC amendment request',
+            'action_key' => $target === 'request' ? 'lgu_relief_amendment_requested' : 'lgu_dromic_amendment_requested',
+            'action_required' => true,
+            'title' => $target === 'request'
+                ? 'LGU requests permission to amend a relief request'
+                : 'LGU requests permission to amend a finalized report',
+            'message' => $target === 'request'
+                ? "{$request->requesting_agency} asked to amend relief request {$reference}. Review and approve or deny the request."
+                : "{$request->requesting_agency} asked to amend {$reference} without creating the next SitRep. Review and approve or deny the request.",
+            'request_id' => $request->id,
+            'reference_number' => $reference,
+            'url' => route('dromic.lgu-reports', [
+                'tab' => $target === 'request' ? 'requests' : 'reports',
+                'search' => $reference,
+                'amendment' => 'requested',
+            ]),
+            'meta' => [
+                'amendment_status' => 'requested',
+                'amendment_target' => $target,
+                'reason' => Str::limit((string) $request->lgu_amendment_request_reason, 240),
+            ],
+        ]);
+    }
+
+    public function notifyLguAmendmentDecision(AssistanceRequest $request): void
+    {
+        $approved = $request->lgu_amendment_request_status === 'approved';
+        $target = $request->lgu_amendment_request_target ?: 'report';
+        $reviewer = $request->lguAmendmentReviewer?->name ?: ($target === 'request' ? 'DRRS' : 'DRIMS');
+        $reference = $target === 'request'
+            ? ($request->lgu_relief_request_reference ?: $request->reference_number)
+            : $request->reference_number;
+
+        $this->notifyUsers($this->originators($request), [
+            'workflow' => $target === 'request' ? 'LGU relief amendment request' : 'LGU DROMIC amendment request',
+            'action_key' => $target === 'request' ? 'lgu_relief_amendment_decision' : 'lgu_dromic_amendment_decision',
+            'action_required' => $approved,
+            'title' => $approved
+                ? 'Amendment request approved — correction draft ready'
+                : 'Amendment request denied',
+            'message' => $approved
+                ? ($target === 'request'
+                    ? "{$reviewer} approved amending {$reference}. Open the correction draft, update the request/FNI entries, then finalize and resubmit."
+                    : "{$reviewer} approved amending {$reference}. Open the correction draft, encode the missing data, then finalize and resubmit.")
+                : "{$reviewer} denied the amendment request for {$reference}."
+                    .(filled($request->lgu_amendment_review_note) ? ' '.$request->lgu_amendment_review_note : ''),
+            'request_id' => $request->id,
+            'reference_number' => $reference,
+            'url' => route('lgu.dromic-requests.index', [
+                'tab' => $target === 'request' ? 'requests' : 'reports',
+                'search' => $reference,
+            ]),
+            'meta' => [
+                'amendment_status' => $request->lgu_amendment_request_status,
+                'amendment_target' => $target,
+            ],
         ]);
     }
 
@@ -984,7 +1196,10 @@ class WorkflowNotificationService
     private function notifyRoles(array $roles, array $payload, ?int $exceptUserId = null): void
     {
         User::query()
-            ->role($roles)
+            // Query the relation directly so optional roles (for example QRT or
+            // executive roles) may be absent in older/partial installations
+            // without making the operational workflow fail with a 500.
+            ->whereHas('roles', fn ($query) => $query->whereIn('name', $roles))
             ->where('is_active', true)
             ->when($exceptUserId, fn ($query) => $query->whereKeyNot($exceptUserId))
             ->get()

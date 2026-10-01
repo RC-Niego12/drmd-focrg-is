@@ -21,6 +21,12 @@ class EpirmaWorkflowService
      */
     public function capabilitiesFor(AssistanceRequest $request, ?User $actor = null): array
     {
+        // Heal stale handoffs: cancelled/failed-only routing returns the request to DRRS PDRC.
+        if (filled($request->epirma_forwarded_to_drrs_aa_at)) {
+            app(EpirmaDocumentStatusService::class)->refreshAaStatus($request);
+            $request = $request->fresh() ?? $request;
+        }
+
         // Full history (including cancelled/failed) for can_route / resume logic.
         $allDocuments = EpirmaSignedDocument::query()
             ->where('assistance_request_id', $request->id)

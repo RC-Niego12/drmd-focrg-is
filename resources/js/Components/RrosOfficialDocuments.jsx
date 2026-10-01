@@ -538,6 +538,7 @@ body { margin: 0; color: #111; font-family: Arial, Helvetica, sans-serif; backgr
 }
 .rros-official .dr-lower td.dr-sig-transport .dr-sig-transport-label,
 .rros-official.dr-sheet .dr-lower td.dr-sig-transport .dr-sig-transport-label {
+  display: block;
   text-align: left !important;
   font-style: italic;
   font-weight: 400;
@@ -545,11 +546,12 @@ body { margin: 0; color: #111; font-family: Arial, Helvetica, sans-serif; backgr
 }
 .rros-official .dr-lower td.dr-sig-transport .dr-sig-transport-value,
 .rros-official.dr-sheet .dr-lower td.dr-sig-transport .dr-sig-transport-value {
+  display: block;
   text-align: left !important;
   font-style: normal;
   font-weight: 700;
   text-transform: uppercase;
-  margin-left: 3px;
+  margin: 1px 0 0;
   font-size: 6.5px;
   white-space: pre-line;
 }

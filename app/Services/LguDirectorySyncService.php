@@ -53,9 +53,26 @@ class LguDirectorySyncService
             });
             $summary['ldrrmo']=$ldrrmoSummary;
             $summary['unmatched']=$ldrrmoSummary['unmatched'] ?? [];
+            $summary['role_accounts']=$this->provisionDefaultRoleAccounts();
             $run->update(['status'=>'completed','summary'=>$summary,'finished_at'=>now()]);
             return $summary;
         }catch(\Throwable $e){$run->update(['status'=>'failed','error_message'=>$e->getMessage(),'finished_at'=>now()]);throw $e;}
+    }
+
+    private function provisionDefaultRoleAccounts(): array
+    {
+        $accounts=app(LguPersonnelAccountService::class);
+        $created=0;
+        $linked=0;
+        LguDirectoryEntry::query()->where('is_active',true)->orderBy('id')->chunkById(50,function($entries)use($accounts,&$created,&$linked):void{
+            foreach($entries as $entry){
+                foreach($accounts->ensureDefaultManagerAccounts($entry) as $result){
+                    $result['created']?$created++:$linked++;
+                }
+            }
+        });
+
+        return ['created'=>$created,'linked'=>$linked];
     }
 
     private function applyRecord(array $record): LguDirectoryEntry

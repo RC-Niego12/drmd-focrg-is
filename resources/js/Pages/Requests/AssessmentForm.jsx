@@ -1,23 +1,21 @@
 import { Head, Link, router, usePage } from '@inertiajs/react';
 import { useEffect, useRef, useState } from 'react';
-import { ArrowRight, Building2, CheckCircle2, Eye, FileText, Pencil, PenLine, Share2, X } from 'lucide-react';
+import { ArrowRight, Building2, CheckCircle2, Eye, FileText, Pencil, PenLine, RotateCcw, Share2, X } from 'lucide-react';
 import AppLayout, { Card } from '@/Layouts/AppLayout';
-import DocumentPreviewCanvas, {
-    DEFAULT_DOCUMENT_PREVIEW_ZOOM,
-    DOCUMENT_PREVIEW_ZOOM_OPTIONS,
-} from '@/Components/DocumentPreviewCanvas';
 import EpirmaSignedDocumentsModal from '@/Components/EpirmaSignedDocumentsModal';
 import PdfPreviewModal from '@/Components/PdfPreviewModal';
-import {
-    PrintableAssessmentDocument,
-    PrintableResponseLetterDocument,
-} from '@/Components/PrintableAssessmentDocuments';
 import SectionTabs from '@/Components/SectionTabs';
 import { formatDateTime } from '@/Utils/dateFormat';
 import { closeEpirmaTab, navigateEpirmaTab, openEpirmaTabPlaceholder } from '@/Utils/epirmaTab';
 import { listenRealtime } from '@/realtime';
 
-export default function AssessmentForm({ request, drnPrefixes = [], epirma: initialEpirma = null }) {
+export default function AssessmentForm({
+    request,
+    drnPrefixes = [],
+    epirma: initialEpirma = null,
+    responseLetterBody = null,
+    canEditResponseLetterBody = false,
+}) {
     const page = usePage();
     const flash = page.props.flash ?? {};
     const roles = page.props.auth?.user?.roles || [];
@@ -26,18 +24,14 @@ export default function AssessmentForm({ request, drnPrefixes = [], epirma: init
     const confirmedResponse = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('document') === 'response' && new URLSearchParams(window.location.search).get('confirmed') === '1';
     const [margin, setMargin] = useState('18');
     const [preview, setPreview] = useState(confirmedResponse ? 'response' : 'assessment');
-    const [previewMode, setPreviewMode] = useState('html'); // html = in-progress markup, pdf = generated PDF
-    const [previewZoom, setPreviewZoom] = useState(DEFAULT_DOCUMENT_PREVIEW_ZOOM);
-    const [responseDrn, setResponseDrn] = useState(request.response_drn || '');
+    const [previewKey, setPreviewKey] = useState(0);
+    const [editingResponseLetter, setEditingResponseLetter] = useState(false);
     const [epirmaError, setEpirmaError] = useState(null);
     const [epirmaBusy, setEpirmaBusy] = useState(false);
     const [epirma, setEpirma] = useState(initialEpirma || { assessment: {}, response_letter: {}, forward: {}, documents: [] });
     const [trackerOpen, setTrackerOpen] = useState(false);
     const [forwardConfirmOpen, setForwardConfirmOpen] = useState(false);
     const [pdfPreview, setPdfPreview] = useState({ open: false, title: '', subtitle: null, src: null, kind: null, message: null });
-    const [responseVersion, setResponseVersion] = useState(
-        () => `${request.updated_at || request.id}-${Date.now()}`,
-    );
     const realtimeReloadTimer = useRef(null);
 
     useEffect(() => {
@@ -66,9 +60,9 @@ export default function AssessmentForm({ request, drnPrefixes = [], epirma: init
     }, [request.id]);
 
     const assessmentPdf = `/requests/${request.id}/assessment-pdf?margin=${margin}`;
-    const responsePdf = `/requests/${request.id}/response-letter-pdf?v=${encodeURIComponent(responseVersion)}`;
-    const previewUrl = preview === 'assessment' ? `${assessmentPdf}&inline=1` : `${responsePdf}&inline=1`;
-    const hasCompleteResponseDrn = /^.+-\d{2}-\d{2}-.+$/.test(responseDrn.trim());
+    const assessmentPreviewUrl = `${assessmentPdf}&inline=1`;
+    const responsePreviewUrl = `/requests/${request.id}/response-letter-pdf?inline=1&v=${previewKey}`;
+    const previewUrl = preview === 'response' ? responsePreviewUrl : assessmentPreviewUrl;
     const status = request.assessment_status || 'draft';
     const isDraft = status === 'draft';
     const isFinal = status === 'final';
@@ -80,28 +74,7 @@ export default function AssessmentForm({ request, drnPrefixes = [], epirma: init
     const assessmentsHref = '/requests?tab=assessments';
     const forwarded = Boolean(epirma.forwarded || request.epirma_forwarded_to_drrs_aa_at);
     const readOnly = Boolean(epirma.read_only || forwarded);
-
-    const performResponseAction = (action) => {
-        const version = Date.now();
-        if (action === 'preview') {
-            setResponseVersion(version);
-            setPreview('response');
-        } else if (action === 'print') {
-            setPdfPreview({
-                open: true,
-                title: 'Response Letter',
-                subtitle: request.reference_number,
-                src: `/requests/${request.id}/response-letter-pdf?inline=1&v=${version}`,
-            });
-        } else {
-            window.location.assign(`/requests/${request.id}/response-letter-pdf?v=${version}`);
-        }
-    };
-
-    const openResponseAction = (action) => {
-        if (action === 'preview' || hasCompleteResponseDrn) performResponseAction(action);
-        else setEpirmaError('DRRS AA must assign both document DRNs before the response letter can be downloaded or printed.');
-    };
+    const canEditLetterBody = Boolean(canEditResponseLetterBody && !readOnly);
 
     const csrfToken = () => document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
 
@@ -123,7 +96,12 @@ export default function AssessmentForm({ request, drnPrefixes = [], epirma: init
     };
 
     const forwardToDrrsAa = () => {
-        if (epirmaBusy || !forwardCaps.can_forward) return;
+        if (epirmaBusy) return;
+        if (!forwardCaps.can_forward) {
+            setEpirmaError(forwardCaps.blocked_reason || 'Unable to forward to DRRS AA.');
+            return;
+        }
+        setEpirmaError(null);
         setForwardConfirmOpen(true);
     };
 
@@ -413,8 +391,25 @@ export default function AssessmentForm({ request, drnPrefixes = [], epirma: init
                     {isDraft && !isRros && !readOnly && (
                         <Link href={editDraftHref} className="inline-flex items-center justify-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-black text-amber-900 shadow-sm hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100">
                             <Pencil className="h-4 w-4" />
-                            Edit Draft
+                            Edit Draft Assessment
                         </Link>
+                    )}
+                    {canEditLetterBody && (
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setPreview('response');
+                                setEditingResponseLetter((current) => !current);
+                            }}
+                            className={`inline-flex items-center justify-center gap-2 rounded-md border px-4 py-3 text-sm font-black shadow-sm ${
+                                editingResponseLetter
+                                    ? 'border-blue-600 bg-blue-600 text-white hover:bg-blue-700'
+                                    : 'border-blue-300 bg-blue-50 text-blue-900 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-100'
+                            }`}
+                        >
+                            <PenLine className="h-4 w-4" />
+                            {editingResponseLetter ? 'Done Editing Letter' : 'Edit Response Letter'}
+                        </button>
                     )}
                     {/* Submit is intentionally omitted: RROS is notified when e-PIRMA signing completes.
                         Legacy final→submitted remains on the assessment-status API for rare non-e-PIRMA recovery only. */}
@@ -433,9 +428,9 @@ export default function AssessmentForm({ request, drnPrefixes = [], epirma: init
 
                 {isDraft && !forwarded && !isDrrsAa && (
                     <ol className="mt-3 grid gap-2 border-t border-emerald-100 pt-3 text-[11px] font-semibold text-slate-600 dark:border-emerald-900/40 dark:text-zinc-400 sm:grid-cols-3">
-                        <li><span className="mr-1 font-black text-emerald-700">1.</span> Complete assessment + Response Letter DRN</li>
+                        <li><span className="mr-1 font-black text-emerald-700">1.</span> Review Assessment + Response Letter previews</li>
                         <li><span className="mr-1 font-black text-emerald-700">2.</span> Forward to DRRS AA (also releases an advance Response Letter to the LGU)</li>
-                        <li><span className="mr-1 font-black text-emerald-700">3.</span> DRRS AA routes via e-PIRMA; signed copy follows for LGU acknowledgement</li>
+                        <li><span className="mr-1 font-black text-emerald-700">3.</span> DRRS AA assigns DRNs and routes via e-PIRMA; signed copy follows for LGU acknowledgement</li>
                     </ol>
                 )}
                 {!isDrrsAa && !isRros && forwardCaps.can_forward && (
@@ -461,10 +456,7 @@ export default function AssessmentForm({ request, drnPrefixes = [], epirma: init
                     <SectionTabs
                         appearance="plain"
                         value={preview}
-                        onChange={(next) => {
-                            if (next === 'response') openResponseAction('preview');
-                            else setPreview('assessment');
-                        }}
+                        onChange={setPreview}
                         ariaLabel="Document preview"
                         tabs={[
                             { id: 'assessment', label: 'Assessment Preview', icon: FileText },
@@ -472,45 +464,7 @@ export default function AssessmentForm({ request, drnPrefixes = [], epirma: init
                         ]}
                     />
                     <div className="flex flex-wrap items-center gap-2">
-                        <div className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white p-1 dark:border-zinc-700 dark:bg-zinc-950">
-                            {[
-                                { id: 'html', label: 'Paper preview' },
-                                { id: 'pdf', label: 'PDF' },
-                            ].map((option) => (
-                                <button
-                                    key={option.id}
-                                    type="button"
-                                    onClick={() => setPreviewMode(option.id)}
-                                    className={`rounded-md px-2.5 py-1 text-[11px] font-black ${
-                                        previewMode === option.id
-                                            ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900'
-                                            : 'text-slate-600 hover:bg-slate-50 dark:text-zinc-300'
-                                    }`}
-                                >
-                                    {option.label}
-                                </button>
-                            ))}
-                        </div>
-                        {previewMode === 'html' && (
-                            <div className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white p-1 dark:border-zinc-700 dark:bg-zinc-950">
-                                {DOCUMENT_PREVIEW_ZOOM_OPTIONS.map((option) => (
-                                    <button
-                                        key={option.value}
-                                        type="button"
-                                        onClick={() => setPreviewZoom(option.value)}
-                                        className={`rounded-md px-2.5 py-1 text-[11px] font-black ${
-                                            previewZoom === option.value
-                                                ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900'
-                                                : 'text-slate-600 hover:bg-slate-50 dark:text-zinc-300'
-                                        }`}
-                                        title={`Zoom ${option.label}`}
-                                    >
-                                        {option.label}
-                                    </button>
-                                ))}
-                            </div>
-                        )}
-                        {preview === 'assessment' && !readOnly && previewMode === 'pdf' && (
+                        {!readOnly && preview === 'assessment' && (
                             <label className="flex flex-col gap-1 text-xs font-bold text-slate-600 sm:flex-row sm:items-center dark:text-zinc-300">
                                 Page margin
                                 <select value={margin} onChange={(event) => setMargin(event.target.value)} className="rounded-md border-slate-300 bg-white py-2 text-sm font-bold dark:border-zinc-700 dark:bg-zinc-950">
@@ -536,29 +490,29 @@ export default function AssessmentForm({ request, drnPrefixes = [], epirma: init
                             ? 'Route the active document tab through e-PIRMA. Transactions open in a new tab. Document content is read-only.'
                             : forwarded
                                 ? 'Documents were forwarded to DRRS AA. Previews below are read-only reference copies of what was handed off.'
-                                : previewMode === 'html'
-                                    ? 'A4 paper preview from saved assessment data. Switch to PDF for the generated downloadable layout.'
-                                    : 'DRRS PDRC prepares documents, then forwards them to DRRS AA for e-PIRMA routing.'}
+                                : preview === 'response'
+                                    ? (editingResponseLetter
+                                        ? 'Edit the letter body below (pencil → Save), then review the official PDF before forwarding to DRRS AA.'
+                                        : 'Official response letter preview. Use Edit Response Letter to change the body text before forwarding.')
+                                    : 'Official assessment PDF layout (same as download/print). Review both tabs before forwarding to DRRS AA.'}
                 </p>
             </div>
-            {previewMode === 'html' ? (
-                <div className="h-[calc(100vh-22rem)] min-h-[640px] overflow-hidden">
-                    <DocumentPreviewCanvas zoom={previewZoom} className="h-full" paperWidth="210mm">
-                        {preview === 'response' ? (
-                            <PrintableResponseLetterDocument request={request} formData={request} />
-                        ) : (
-                            <PrintableAssessmentDocument request={request} formData={request} />
-                        )}
-                    </DocumentPreviewCanvas>
-                </div>
-            ) : (
-                <iframe
-                    key={previewUrl}
-                    title={`${preview === 'assessment' ? 'Assessment' : 'Response letter'} PDF preview`}
-                    src={previewUrl}
-                    className="h-[calc(100vh-22rem)] min-h-[640px] w-full bg-white"
+            {preview === 'response' && editingResponseLetter && responseLetterBody?.paragraphs && (
+                <ResponseLetterBodyEditor
+                    body={responseLetterBody}
+                    enabled={canEditLetterBody}
+                    requestId={request.id}
+                    onSaved={() => {
+                        setPreviewKey((current) => current + 1);
+                    }}
                 />
             )}
+            <iframe
+                key={previewUrl}
+                title={preview === 'response' ? 'Response letter PDF preview' : 'Assessment PDF preview'}
+                src={previewUrl}
+                className="h-[calc(100vh-22rem)] min-h-[640px] w-full bg-white"
+            />
         </Card>
 
         <EpirmaSignedDocumentsModal
@@ -609,6 +563,194 @@ export default function AssessmentForm({ request, drnPrefixes = [], epirma: init
         )}
 
     </AppLayout>;
+}
+
+function useResponseLetterBodyEditor(body, enabled, requestId, onSaved) {
+    const [activeField, setActiveField] = useState(null);
+    const [draft, setDraft] = useState(() => ({ ...(body?.paragraphs ?? {}) }));
+    const [saving, setSaving] = useState(false);
+
+    useEffect(() => {
+        if (!activeField) {
+            setDraft({ ...(body?.paragraphs ?? {}) });
+        }
+    }, [body, activeField]);
+
+    const update = (field, value) => setDraft((current) => ({ ...current, [field]: value }));
+    const start = (field) => {
+        setDraft({ ...(body?.paragraphs ?? {}) });
+        setActiveField(field);
+    };
+    const cancel = () => {
+        setDraft({ ...(body?.paragraphs ?? {}) });
+        setActiveField(null);
+    };
+    const save = (field) => {
+        setSaving(true);
+        router.patch(
+            `/requests/${requestId}/response-letter-body`,
+            { [field]: draft[field] ?? '' },
+            {
+                preserveScroll: true,
+                onSuccess: () => {
+                    setActiveField(null);
+                    onSaved?.();
+                    router.reload({ only: ['responseLetterBody', 'request'], preserveScroll: true });
+                },
+                onFinish: () => setSaving(false),
+            },
+        );
+    };
+    const resetField = (field) => {
+        setSaving(true);
+        router.patch(
+            `/requests/${requestId}/response-letter-body`,
+            { reset_fields: [field] },
+            {
+                preserveScroll: true,
+                onSuccess: () => {
+                    setActiveField(null);
+                    onSaved?.();
+                    router.reload({ only: ['responseLetterBody', 'request'], preserveScroll: true });
+                },
+                onFinish: () => setSaving(false),
+            },
+        );
+    };
+    const resetAll = () => {
+        setSaving(true);
+        router.patch(
+            `/requests/${requestId}/response-letter-body`,
+            { reset: true },
+            {
+                preserveScroll: true,
+                onSuccess: () => {
+                    setActiveField(null);
+                    onSaved?.();
+                    router.reload({ only: ['responseLetterBody', 'request'], preserveScroll: true });
+                },
+                onFinish: () => setSaving(false),
+            },
+        );
+    };
+
+    return {
+        enabled,
+        activeField,
+        editing: Boolean(enabled && activeField),
+        isEditing: (field) => enabled && activeField === field,
+        draft,
+        update,
+        saving,
+        start,
+        cancel,
+        save,
+        resetField,
+        resetAll,
+        custom: body?.custom ?? {},
+        isCustom: Boolean(body?.is_custom),
+    };
+}
+
+function LetterBodyField({ editor, field, label }) {
+    const value = editor.draft[field] ?? '';
+    const isCustom = Boolean(editor.custom?.[field]);
+
+    if (!editor.isEditing(field)) {
+        return (
+            <div className={`group relative rounded-lg p-3 ${editor.enabled ? 'bg-blue-50/55 outline outline-1 outline-offset-2 outline-blue-300' : 'bg-slate-50 dark:bg-zinc-900'}`}>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-black uppercase tracking-wide text-blue-800 dark:text-blue-200">{label}</span>
+                    <div className="flex items-center gap-1">
+                        {isCustom && (
+                            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-black uppercase text-amber-900 dark:bg-amber-950 dark:text-amber-100">Edited</span>
+                        )}
+                        {editor.enabled && isCustom && !editor.editing && (
+                            <button
+                                type="button"
+                                onClick={() => editor.resetField(field)}
+                                disabled={editor.saving}
+                                className="rounded border border-slate-200 bg-white p-1.5 text-slate-600 shadow-sm hover:bg-slate-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950"
+                                aria-label={`Reset ${label}`}
+                                title="Reset to generated"
+                            >
+                                <RotateCcw className="h-3.5 w-3.5" />
+                            </button>
+                        )}
+                        {editor.enabled && !editor.editing && (
+                            <button
+                                type="button"
+                                onClick={() => editor.start(field)}
+                                className="rounded-lg border border-blue-200 bg-white p-1.5 text-blue-900 shadow-md transition hover:bg-blue-50"
+                                aria-label={`Edit ${label}`}
+                            >
+                                <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                        )}
+                    </div>
+                </div>
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-800 dark:text-zinc-100">{value}</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="relative rounded-lg outline outline-2 outline-offset-2 outline-blue-400 p-3">
+            <span className="mb-1 block text-[10px] font-black uppercase tracking-wide text-blue-700">{label}</span>
+            <textarea
+                rows={5}
+                value={value}
+                onChange={(event) => editor.update(field, event.target.value)}
+                className="block w-full resize-y rounded-md border border-blue-200 bg-white p-2 text-sm leading-relaxed text-slate-900 outline-none focus:border-blue-400 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-50"
+            />
+            <div className="mt-2 flex justify-end gap-1">
+                <button type="button" onClick={editor.cancel} className="rounded border px-2 py-1 text-[10px] font-black uppercase text-slate-600">Cancel</button>
+                <button
+                    type="button"
+                    onClick={() => editor.save(field)}
+                    disabled={editor.saving}
+                    className="rounded bg-blue-900 px-2 py-1 text-[10px] font-black uppercase text-white disabled:opacity-50"
+                >
+                    {editor.saving ? '…' : 'Save'}
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function ResponseLetterBodyEditor({ body, enabled, requestId, onSaved }) {
+    const editor = useResponseLetterBodyEditor(body, enabled, requestId, onSaved);
+
+    return (
+        <div className="border-b border-slate-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                    <h3 className="text-sm font-black text-slate-900 dark:text-zinc-50">Letter body</h3>
+                    <p className="text-xs font-semibold text-slate-500">
+                        {enabled
+                            ? 'Click the pencil to edit a paragraph. Saved text appears in the PDF preview below.'
+                            : 'Letter body is read-only for this view.'}
+                    </p>
+                </div>
+                {enabled && editor.isCustom && (
+                    <button
+                        type="button"
+                        onClick={editor.resetAll}
+                        disabled={editor.saving || editor.editing}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-[10px] font-black uppercase text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                    >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Reset all to generated
+                    </button>
+                )}
+            </div>
+            <div className="space-y-3">
+                <LetterBodyField editor={editor} field="opening" label="Opening" />
+                <LetterBodyField editor={editor} field="assessment" label="Assessment result" />
+                <LetterBodyField editor={editor} field="closing" label="Closing" />
+            </div>
+        </div>
+    );
 }
 
 function ForwardToDrrsAaModal({ referenceNumber, requestingAgency, onCancel, onConfirm }) {

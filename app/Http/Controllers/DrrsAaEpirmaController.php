@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\AssistanceRequest;
 use App\Models\EpirmaSignedDocument;
+use App\Models\OperationalLibraryValue;
 use App\Services\EpirmaDocumentStatusService;
 use App\Services\EpirmaWorkflowService;
 use Illuminate\Http\JsonResponse;
@@ -86,6 +87,7 @@ class DrrsAaEpirmaController extends Controller
                     'assessment_form_data' => $record->assessment_form_data,
                     'incident' => $record->incident?->only(['id', 'name']),
                     'assessment_status' => $record->assessment_status,
+                    'assessment_drn' => $record->assessment_drn,
                     'response_drn' => $record->response_drn,
                     'epirma_aa_status' => $record->epirma_aa_status,
                     'is_completed' => (string) $record->epirma_aa_status === 'completed',
@@ -116,6 +118,12 @@ class DrrsAaEpirmaController extends Controller
                 'status' => $status,
             ],
             'queue' => $items,
+            'drnPrefixes' => OperationalLibraryValue::query()
+                ->where('library_type', 'drn_prefix')
+                ->where('is_active', true)
+                ->orderBy('context')
+                ->orderBy('value')
+                ->get(['id', 'value', 'context']),
             'summary' => [
                 'pending' => (clone $forwardedBase)->where('epirma_aa_status', 'pending')->count(),
                 'in_progress' => (clone $forwardedBase)->where('epirma_aa_status', 'in_progress')->count(),

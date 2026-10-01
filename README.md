@@ -22,11 +22,13 @@ php artisan migrate --seed
 composer run dev
 ```
 
-`composer run dev` starts the Laravel LAN server, queue worker, Vite, and the
-secured Socket.IO gateway together. If Laravel is already served by Herd,
-`npm run dev` starts both Vite and Socket.IO; `npm run dev:vite` is available
-only for exceptional cases where the gateway is intentionally managed as a
-separate service.
+`composer run dev` starts the Laravel LAN server, queue worker, production-style
+asset watcher, and secured Socket.IO gateway together. The watcher continuously
+rebuilds same-origin assets without creating `public/hot`, so phones and tablets
+do not become dependent on a development-only hostname or port. If Laravel is
+already served by Herd, `npm run dev` starts the asset watcher and background
+services. Use `npm run dev:hot` only for an intentional desktop-only HMR session;
+stop it and run `npm run build` before testing PWA or LAN/mobile access.
 
 Seeded users all use the password `password`:
 

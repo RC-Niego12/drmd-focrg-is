@@ -101,9 +101,19 @@ class WitSyncService
     {
         $rows = collect($this->balances->balanceRows());
         $fund = StandbyFund::current();
+        $warehouseState = Warehouse::query()
+            ->orderBy('external_warehouse_id')
+            ->get([
+                'external_warehouse_id', 'name', 'province', 'municipality', 'district',
+                'distribution_network', 'warehouse_type', 'ownership', 'partnership',
+                'ffp_capacity', 'rtef_capacity', 'sheet_ffp_current', 'sheet_ffp_cost',
+                'sheet_total_items', 'sheet_total_cost', 'longitude', 'latitude', 'status',
+            ])
+            ->toJson();
 
         return [
             'warehouses' => Warehouse::count(),
+            'warehouse_master_checksum' => hash('sha256', $warehouseState),
             'inventory_rows' => WarehouseSheetImport::where('import_status', 'imported')->count(),
             'stockpile_quantity' => round($rows->sum(fn (array $row): float => (float) ($row['current_balance'] ?? 0)), 2),
             'stockpile_cost' => round($rows->sum(fn (array $row): float => (float) ($row['cost'] ?? 0)), 2),

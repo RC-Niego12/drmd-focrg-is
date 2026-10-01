@@ -1,19 +1,15 @@
 import SearchableSelect from "@/Components/SearchableSelect";
 import { composeDocumentDrn, currentDrnParts, DocumentDrnFields } from "@/Components/DocumentDrnFields";
-import { DEFAULT_DOCUMENT_PREVIEW_ZOOM } from "@/Components/DocumentPreviewCanvas";
 import DocumentPreviewModal from "@/Components/DocumentPreviewModal";
-import {
-  PrintableAssessmentDocument,
-  PrintableResponseLetterDocument,
-} from "@/Components/PrintableAssessmentDocuments";
 import axios from "axios";
 import { Eye, Sparkles, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   coerceWholeQuantity,
   formatWholeQuantity,
   wholeQuantityInputValue,
 } from "@/Utils/wholeQuantity";
+import { formatIncidentDateDisplay, incidentOccurrenceBounds } from "@/Utils/incidentDisplay";
 
 const stripNarrativeSignoff = (value = "") => String(value)
   .split(/\r?\n/)
@@ -75,23 +71,11 @@ export default function AssessmentExcelForm({
   const [reliefSuggestionsActive, setReliefSuggestionsActive] = useState(false);
   const [previousAugmentationHint, setPreviousAugmentationHint] = useState("");
   const [draftPreviewOpen, setDraftPreviewOpen] = useState(false);
-  const [previewDocument, setPreviewDocument] = useState("assessment");
-  const [previewZoom, setPreviewZoom] = useState(DEFAULT_DOCUMENT_PREVIEW_ZOOM);
+  const [draftPreviewUrl, setDraftPreviewUrl] = useState(null);
+  const [draftPreviewBusy, setDraftPreviewBusy] = useState(false);
+  const [draftPreviewError, setDraftPreviewError] = useState("");
+  const draftPreviewUrlRef = useRef(null);
   const meta = form.data.assessment_form_data ?? {};
-  const responseApproverOption = (drrsSignatories || []).find(
-    (row) => row.context === "approved_by" && (row.metadata?.document_type === "response_letter" || row.document_type === "response_letter"),
-  ) || (drrsSignatories || []).find((row) => row.context === "approved_by");
-  const responseApprover = responseApproverOption
-    ? {
-        name: String(responseApproverOption.value || "").split("|")[0]?.trim()
-          || responseApproverOption.metadata?.employee_name
-          || responseApproverOption.label,
-        designation: String(responseApproverOption.value || "").split("|")[1]?.trim()
-          || responseApproverOption.metadata?.designation
-          || responseApproverOption.metadata?.position
-          || "",
-      }
-    : null;
   const hasFieldError = (...fields) => {
     const errorKeys = Object.keys(form.errors);
     return fields.some((field) =>
@@ -104,45 +88,88 @@ export default function AssessmentExcelForm({
   const setMeta = (key, value) =>
     form.setData("assessment_form_data", { ...meta, [key]: value });
   const incidents = Array.isArray(meta.incidents) ? meta.incidents : [];
-  const incidentFamilySubtotal = incidents.reduce((sum, row) => sum + (Number(row?.affected_families) || 0), 0);
-  const incidentPersonSubtotal = incidents.reduce((sum, row) => sum + (Number(row?.affected_persons) || 0), 0);
+  const incidentFniAllocations = Array.isArray(meta.incident_fni_allocations) ? meta.incident_fni_allocations : [];
+  const incidentAllocationKey = (incident, index) => String(incident?.series_key || incident?.source_reference || `incident-${index}`);
+  const itemAllocationKey = (item, index) => String(item?.fni_library_item_id || item?.item_name || `item-${index}`).trim().toLowerCase();
+  const incidentAllocationQuantity = (incident, incidentIndex, item, itemIndex) => {
+    const incidentKey = incidentAllocationKey(incident, incidentIndex);
+    const itemKey = itemAllocationKey(item, itemIndex);
+    const row = incidentFniAllocations.find((allocation) => String(allocation.incident_key) === incidentKey);
+    const allocation = (row?.items || []).find((entry) => String(entry.item_key) === itemKey);
+    return allocation?.quantity ?? "";
+  };
+  const setIncidentAllocationQuantity = (incident, incidentIndex, item, itemIndex, value) => {
+    const incidentKey = incidentAllocationKey(incident, incidentIndex);
+    const itemKey = itemAllocationKey(item, itemIndex);
+    const allocations = incidents.map((row, rowIndex) => {
+      const rowKey = incidentAllocationKey(row, rowIndex);
+      const existing = incidentFniAllocations.find((allocation) => String(allocation.incident_key) === rowKey) || {};
+      return {
+        ...existing,
+        incident_key: rowKey,
+        source_reference: row.source_reference || null,
+        series_key: row.series_key || null,
+        incident_type: row.incident_type || null,
+        barangay: row.barangay || null,
+        items: form.data.items.map((itemRow, currentItemIndex) => {
+          const currentItemKey = itemAllocationKey(itemRow, currentItemIndex);
+          const existingItem = (existing.items || []).find((entry) => String(entry.item_key) === currentItemKey) || {};
+          return {
+            ...existingItem,
+            item_key: currentItemKey,
+            fni_library_item_id: itemRow.fni_library_item_id || null,
+            item_name: itemRow.item_name || null,
+            quantity: rowKey === incidentKey && currentItemKey === itemKey ? value : (existingItem.quantity ?? ""),
+          };
+        }),
+      };
+    });
+    setMeta("incident_fni_allocations", allocations);
+  };
+  const occurrenceBounds = incidentOccurrenceBounds(incidents);
+  const occurrenceStart = occurrenceBounds.start
+    || String(meta.occurrence_started_at || form.data.incident_date || "").slice(0, 10);
+  const occurrenceEnd = occurrenceBounds.end
+    || String(meta.occurrence_ended_span || occurrenceStart).slice(0, 10);
+  const incidentDateIsRange = Boolean(
+    isDisaster && occurrenceStart && occurrenceEnd && occurrenceStart !== occurrenceEnd,
+  );
+  const incidentDateDisplay = !isDisaster
+    ? ""
+    : (incidentDateIsRange
+      ? formatIncidentDateDisplay(occurrenceStart, occurrenceEnd)
+      : occurrenceStart);
   const setIncident = (index, key, value) => {
     const next = incidents.map((row, rowIndex) => rowIndex === index ? { ...row, [key]: value } : row);
+    const bounds = incidentOccurrenceBounds(next);
     form.setData((current) => ({
       ...current,
       incident_name: index === 0 && key === "incident_type" ? value : current.incident_name,
-      incident_date: index === 0 && key === "occurrence_at" ? String(value).slice(0, 10) : current.incident_date,
+      incident_date: bounds.start || (index === 0 && key === "occurrence_at" ? String(value).slice(0, 10) : current.incident_date),
       incident_count: next.length,
-      assessment_form_data: { ...(current.assessment_form_data ?? {}), incidents: next },
+      assessment_form_data: {
+        ...(current.assessment_form_data ?? {}),
+        incidents: next,
+        occurrence_started_at: bounds.start || current.assessment_form_data?.occurrence_started_at,
+        occurrence_ended_span: bounds.end || bounds.start || null,
+        incident_occurrence_display: bounds.display || bounds.start || "",
+      },
     }));
   };
-  const addIncident = () => form.setData((current) => ({
-    ...current,
-    incident_count: incidents.length + 1,
-    assessment_form_data: {
-      ...(current.assessment_form_data ?? {}),
-      incidents: [...incidents, {
-        incident_type: current.incident_name || "",
-        incident_details: "",
-        occurrence_at: "",
-        city_municipality: current.municipality || "",
-        barangay: "",
-        affected_families: "",
-        affected_persons: "",
-        description: "",
-        source_reference: "",
-      }],
-    },
-  }));
-  const removeIncident = (index) => {
-    if (incidents.length <= 1) return;
-    const next = incidents.filter((_, rowIndex) => rowIndex !== index);
+  const setIncidentDate = (value) => {
+    if (incidents.length) {
+      setIncident(0, "occurrence_at", value);
+      return;
+    }
     form.setData((current) => ({
       ...current,
-      incident_name: next[0]?.incident_type || current.incident_name,
-      incident_date: String(next[0]?.occurrence_at || current.incident_date).slice(0, 10),
-      incident_count: next.length,
-      assessment_form_data: { ...(current.assessment_form_data ?? {}), incidents: next },
+      incident_date: value,
+      assessment_form_data: {
+        ...(current.assessment_form_data ?? {}),
+        occurrence_started_at: value,
+        occurrence_ended_span: value,
+        incident_occurrence_display: formatIncidentDateDisplay(value) || value,
+      },
     }));
   };
   const assessmentPrefixOptions = drnPrefixes.filter((row) => row.context === "assessment").map((row) => row.value);
@@ -219,6 +246,13 @@ export default function AssessmentExcelForm({
     form.setData("items", items);
   };
   const normalized = (value) => String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  /** Strip trailing " - brand" so LGU-prefilled lines match inventory item names. */
+  const inventoryItemKey = (value) => {
+    const raw = String(value ?? "").trim();
+    if (!raw) return "";
+    const base = raw.replace(/\s+-\s+.+$/, "").trim();
+    return normalized(base || raw);
+  };
   const combinedFniLibraryItems = Object.values(fniLibraryItems.reduce((items, row) => {
     const key = normalized(row.item_name);
     if (!key) return items;
@@ -228,29 +262,20 @@ export default function AssessmentExcelForm({
     if (!current || (rowHasNoBrand && currentHasBrand)) items[key] = row;
     return items;
   }, {}));
-  // Match RROS available-to-plan: physical available_balance minus active RIS reservations (per warehouse, then summed).
+  // Match Inventory Warehouse Stockpile: sum current balances (net of negatives), then RIS reservations.
   const totalAvailability = (itemName) => {
-    const key = normalized(itemName);
+    const key = inventoryItemKey(itemName);
     if (!key) return 0;
-    const physicalByWarehouse = warehouseStock
-      .filter((row) => normalized(row.item) === key)
-      .reduce((map, row) => {
-        const warehouseKey = String(row.warehouse_id ?? "");
-        map.set(warehouseKey, (map.get(warehouseKey) || 0) + Math.max(0, Number(row.available) || 0));
-        return map;
-      }, new Map());
-    const reservedByWarehouse = warehouseReservations
-      .filter((row) => (row.item_key || normalized(row.item_name)) === key)
-      .reduce((map, row) => {
-        const warehouseKey = String(row.warehouse_id ?? "");
-        map.set(warehouseKey, (map.get(warehouseKey) || 0) + Math.max(0, Number(row.quantity) || 0));
-        return map;
-      }, new Map());
-    let total = 0;
-    physicalByWarehouse.forEach((physical, warehouseKey) => {
-      total += Math.max(0, physical - (reservedByWarehouse.get(warehouseKey) || 0));
-    });
-    return Math.trunc(total);
+    const physical = warehouseStock
+      .filter((row) => inventoryItemKey(row.item) === key)
+      .reduce((sum, row) => sum + Number(row.current ?? row.available ?? 0), 0);
+    const reserved = warehouseReservations
+      .filter((row) => {
+        const reservationKey = row.item_key || inventoryItemKey(row.item_name);
+        return reservationKey === key || inventoryItemKey(row.item_name) === key;
+      })
+      .reduce((sum, row) => sum + Math.max(0, Number(row.quantity) || 0), 0);
+    return Math.trunc(Math.max(0, physical - reserved));
   };
   const unavailableItems = form.data.items.filter((item) =>
     item.fni_library_item_id && Number(item.requested_quantity || 0) > Number(totalAvailability(item.item_name) || 0)
@@ -389,6 +414,9 @@ export default function AssessmentExcelForm({
         affected_persons: meta.affected_persons,
         date_requested: form.data.date_requested,
         incident_date: form.data.incident_date,
+        incident_occurrence_display: incidentDateIsRange
+          ? formatIncidentDateDisplay(occurrenceStart, occurrenceEnd)
+          : (formatIncidentDateDisplay(occurrenceStart) || form.data.incident_date),
         incident_status: meta.incident_status,
         incident_ended_at: meta.incident_ended_at,
         source_report_classification: meta.source_report_classification,
@@ -455,14 +483,89 @@ export default function AssessmentExcelForm({
   };
   const signatoryOptions = (role) =>
     drrsSignatories.filter((row) => row.context === role);
-  const signatoryName = (value) => (value ?? "").split("|")[0].trim();
+  const signatoryName = (value) => (value ?? "").split("|")[0].trim().toUpperCase();
   const signatoryPosition = (value) =>
     (value ?? "").split("|").slice(1).join("|").trim();
+  const normalizeSignatoryValue = (value) => {
+    const raw = String(value ?? "").trim();
+    if (!raw) return "";
+    const [name, ...rest] = raw.split("|");
+    return [String(name || "").trim().toUpperCase(), ...rest].join("|");
+  };
   const preparedRole = [
     ...new Set(
       [currentUser?.position, currentUser?.designation].filter(Boolean),
     ),
   ].join(" / ");
+
+  const revokeDraftPreviewUrl = () => {
+    if (draftPreviewUrlRef.current) {
+      URL.revokeObjectURL(draftPreviewUrlRef.current);
+      draftPreviewUrlRef.current = null;
+    }
+    setDraftPreviewUrl(null);
+  };
+
+  const openDraftPreview = () => {
+    setDraftPreviewError("");
+    setDraftPreviewOpen(true);
+  };
+
+  useEffect(() => {
+    if (!draftPreviewOpen) {
+      revokeDraftPreviewUrl();
+      setDraftPreviewBusy(false);
+      setDraftPreviewError("");
+      return undefined;
+    }
+
+    let cancelled = false;
+    const loadDraftPdf = async () => {
+      setDraftPreviewBusy(true);
+      setDraftPreviewError("");
+      revokeDraftPreviewUrl();
+      try {
+        const response = await axios.post(
+          "/requests/assessment-draft-pdf",
+          {
+            ...form.data,
+            preview_request_id: requestId,
+            margin: 18,
+            items: (form.data.items || []).map((item) => ({
+              ...item,
+              available_quantity: item.item_name
+                ? totalAvailability(item.item_name)
+                : item.available_quantity,
+            })),
+          },
+          {
+            responseType: "blob",
+            headers: { Accept: "application/pdf" },
+            withXSRFToken: true,
+          },
+        );
+        if (cancelled) return;
+        const url = URL.createObjectURL(response.data);
+        draftPreviewUrlRef.current = url;
+        setDraftPreviewUrl(url);
+      } catch (error) {
+        if (cancelled) return;
+        setDraftPreviewError(
+          error?.response?.data?.message
+            || "Unable to build the assessment PDF preview from the current worksheet values.",
+        );
+      } finally {
+        if (!cancelled) setDraftPreviewBusy(false);
+      }
+    };
+
+    loadDraftPdf();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [draftPreviewOpen]);
+
   const submit = (e) => {
     e.preventDefault();
     setSubmitError("");
@@ -477,7 +580,8 @@ export default function AssessmentExcelForm({
         ...item,
         available_quantity: item.item_name ? totalAvailability(item.item_name) : 0,
       })),
-    }))[method](action, {
+    }));
+    form[method](action, {
       preserveScroll: true,
       onSuccess: (...args) => {
         setSubmitError("");
@@ -513,13 +617,9 @@ export default function AssessmentExcelForm({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => {
-              setPreviewDocument("assessment");
-              setPreviewZoom(DEFAULT_DOCUMENT_PREVIEW_ZOOM);
-              setDraftPreviewOpen(true);
-            }}
+            onClick={openDraftPreview}
             className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-black text-slate-700"
-            title="Preview assessment and response letter from the values currently encoded"
+            title="Preview assessment from the values currently encoded"
           >
             <Eye className="h-4 w-4" /> Preview Documents
           </button>
@@ -662,9 +762,27 @@ export default function AssessmentExcelForm({
                 <span>Disaster</span>
               </label>
             </div>
-            <div className={`col-span-4 grid grid-cols-[minmax(0,2fr)_minmax(118px,0.9fr)] border-b border-r border-black p-1 ${errorCell("incident_name", "incident_date")}`}>
+            <div className={`col-span-4 grid grid-cols-[minmax(0,1.4fr)_minmax(150px,1fr)] border-b border-r border-black p-1 ${errorCell("incident_name", "incident_date")}`}>
               <SearchableSelect disabled={!isDisaster} options={incidentOptions} value={isDisaster ? form.data.incident_name : ""} onChange={(v) => incidents.length ? setIncident(0, "incident_type", v) : form.setData("incident_name", v)} placeholder={isDisaster ? "Type of disaster" : ""} />
-              <CellInput disabled={!isDisaster} type="date" value={isDisaster ? form.data.incident_date : ""} onChange={(v) => incidents.length ? setIncident(0, "occurrence_at", v) : form.setData("incident_date", v)} aria-label="Date of disaster" className="ml-1 border-l border-slate-300 print:hidden disabled:cursor-not-allowed disabled:bg-slate-100" />
+              {incidentDateIsRange ? (
+                <CellInput
+                  disabled={!isDisaster}
+                  readOnly
+                  value={incidentDateDisplay}
+                  aria-label="Date range of disasters"
+                  title="Earliest to latest incident occurrence for this request"
+                  className="ml-1 border-l border-slate-300 print:hidden disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+              ) : (
+                <CellInput
+                  disabled={!isDisaster}
+                  type="date"
+                  value={incidentDateDisplay}
+                  onChange={setIncidentDate}
+                  aria-label="Date of disaster"
+                  className="ml-1 border-l border-slate-300 print:hidden disabled:cursor-not-allowed disabled:bg-slate-100"
+                />
+              )}
             </div>
             <div className="col-span-3 border-b border-r border-black">
               <CellInput
@@ -691,43 +809,6 @@ export default function AssessmentExcelForm({
               />
             </div>
           </div>
-          {isDisaster && (
-            <section className={`border-b border-black bg-white p-3 print:hidden ${errorCell("assessment_form_data.incidents")}`}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-xs font-black uppercase tracking-wide text-emerald-800">Incident breakdown</h3>
-                  <p className="mt-1 text-[11px] text-slate-600">One request, assessment, and RIS may cover multiple separate incidents. Encode each occurrence here; population subtotals must reconcile with the assessment totals.</p>
-                </div>
-                <button type="button" onClick={addIncident} className="rounded-lg border border-emerald-600 px-3 py-1.5 text-xs font-black text-emerald-700 hover:bg-emerald-50">+ Add incident</button>
-              </div>
-              <div className="mt-3 space-y-3">
-                {incidents.length === 0 && <p className="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-3 text-xs font-semibold text-amber-800">No structured occurrence is encoded yet. Add the first incident before completing the assessment.</p>}
-                {incidents.map((incident, incidentIndex) => (
-                  <div key={`incident-${incidentIndex}`} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                    <div className="mb-2 flex items-center justify-between">
-                      <strong className="text-xs text-slate-800">Incident {incidentIndex + 1}</strong>
-                      {incidents.length > 1 && <button type="button" onClick={() => removeIncident(incidentIndex)} className="text-xs font-bold text-rose-600">Remove</button>}
-                    </div>
-                    <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                      <SearchableSelect options={incidentOptions} value={incident.incident_type || ""} onChange={(value) => setIncident(incidentIndex, "incident_type", value)} placeholder="Incident type" />
-                      <input type="datetime-local" value={incident.occurrence_at || ""} onChange={(event) => setIncident(incidentIndex, "occurrence_at", event.target.value)} className="rounded-lg border-slate-300 text-xs" aria-label={`Incident ${incidentIndex + 1} occurrence`} />
-                      <input value={incident.city_municipality || ""} onChange={(event) => setIncident(incidentIndex, "city_municipality", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="City / municipality" />
-                      <input value={incident.barangay || ""} onChange={(event) => setIncident(incidentIndex, "barangay", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="Barangay / affected site" />
-                      <input type="number" min="1" value={incident.affected_families ?? ""} onChange={(event) => setIncident(incidentIndex, "affected_families", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="Affected families" />
-                      <input type="number" min="0" value={incident.affected_persons ?? ""} onChange={(event) => setIncident(incidentIndex, "affected_persons", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="Affected persons" />
-                      <input value={incident.source_reference || ""} onChange={(event) => setIncident(incidentIndex, "source_reference", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="Report / source reference" />
-                      <input value={incident.incident_details || ""} onChange={(event) => setIncident(incidentIndex, "incident_details", event.target.value)} className="rounded-lg border-slate-300 text-xs" placeholder="Incident details" />
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className={`mt-3 grid gap-2 rounded-lg px-3 py-2 text-xs font-bold sm:grid-cols-2 ${incidentFamilySubtotal === Number(form.data.affected_families || 0) && (!String(meta.affected_persons ?? "").trim() || incidentPersonSubtotal === Number(meta.affected_persons || 0)) ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-800"}`}>
-                <span>Families: {incidentFamilySubtotal.toLocaleString()} / {Number(form.data.affected_families || 0).toLocaleString()}</span>
-                <span>Persons: {incidentPersonSubtotal.toLocaleString()} / {Number(meta.affected_persons || 0).toLocaleString()}</span>
-              </div>
-              {form.errors["assessment_form_data.incidents"] && <p className="mt-2 text-xs font-bold text-rose-600">{form.errors["assessment_form_data.incidents"]}</p>}
-            </section>
-          )}
           <div id="assessment-items" className="grid scroll-mt-6 grid-cols-[4fr_3.7fr_52px] border-b border-black bg-slate-200 text-center text-xs font-black">
             <div className="border-r border-black py-1">DETAILS OF REQUEST</div>
             <div className="border-r border-black py-1">
@@ -818,17 +899,40 @@ export default function AssessmentExcelForm({
           >
             + Add requested item
           </button>
+          {incidents.length > 1 && (
+            <section className="border-b border-black bg-amber-50 p-3 print:hidden">
+              <h3 className="text-xs font-black uppercase text-amber-950">FNI Breakdown per Separate Incident</h3>
+              <p className="mt-1 text-[11px] text-amber-900">Allocate every requested item among the separate incidents. Each item column must equal its requested quantity so confirmed releases can be reported under the correct incident.</p>
+              <div className="mt-3 overflow-x-auto rounded border border-amber-300 bg-white">
+                <table className="w-full min-w-[720px] border-collapse text-xs">
+                  <thead className="bg-[#0a2f6b] text-white"><tr><th className="border border-slate-300 px-3 py-2 text-left">Incident / Affected Area</th>{form.data.items.map((item, itemIndex) => <th key={itemIndex} className="border border-slate-300 px-3 py-2 text-right">{item.item_name || `Item ${itemIndex + 1}`}<span className="block font-normal">Required: {formatWholeQuantity(item.requested_quantity, "0")}</span></th>)}</tr></thead>
+                  <tbody>{incidents.map((incident, incidentIndex) => <tr key={incidentAllocationKey(incident, incidentIndex)}><td className="border border-slate-300 px-3 py-2"><span className="font-bold">{incident.incident_type || `Incident ${incidentIndex + 1}`}</span><span className="block text-[10px] text-slate-600">{[incident.barangay, incident.city_municipality].filter(Boolean).join(", ") || incident.source_reference || "Area not specified"}</span></td>{form.data.items.map((item, itemIndex) => <td key={itemIndex} className="border border-slate-300 p-1"><input type="number" min="0" step="1" className="w-full rounded border border-slate-300 px-2 py-1 text-right" aria-label={`${incident.incident_type || `Incident ${incidentIndex + 1}`} ${item.item_name || `Item ${itemIndex + 1}`} allocation`} value={incidentAllocationQuantity(incident, incidentIndex, item, itemIndex)} onChange={(event) => setIncidentAllocationQuantity(incident, incidentIndex, item, itemIndex, event.target.value === "" ? "" : Math.max(0, Math.trunc(Number(event.target.value) || 0)))} /></td>)}</tr>)}</tbody>
+                  <tfoot><tr className="bg-slate-100 font-black"><td className="border border-slate-300 px-3 py-2">Allocated Total</td>{form.data.items.map((item, itemIndex) => { const allocated = incidents.reduce((total, incident, incidentIndex) => total + Number(incidentAllocationQuantity(incident, incidentIndex, item, itemIndex) || 0), 0); const valid = allocated === Number(item.requested_quantity || 0); return <td key={itemIndex} className={`border border-slate-300 px-3 py-2 text-right ${valid ? "text-emerald-700" : "text-rose-700"}`}>{formatWholeQuantity(allocated, "0")} / {formatWholeQuantity(item.requested_quantity, "0")}</td>; })}</tr></tfoot>
+                </table>
+              </div>
+              {hasFieldError("assessment_form_data.incident_fni_allocations") && <p className="mt-2 text-xs font-bold text-rose-700">Complete the per-incident allocation. Every item total must equal the requested quantity.</p>}
+            </section>
+          )}
           <Header>ASSESSMENT AND VALIDATION</Header>
           <div className="grid grid-cols-2 text-xs">
             <label className="col-span-2 flex border-b border-black px-2 font-bold">
               Date of Disaster Occurrence:
-              <CellInput
-                type="date"
-                value={form.data.incident_date}
-                onChange={(v) => incidents.length ? setIncident(0, "occurrence_at", v) : form.setData("incident_date", v)}
-              />
+              {incidentDateIsRange ? (
+                <CellInput
+                  readOnly
+                  value={incidentDateDisplay}
+                  aria-label="Date range of disasters"
+                  className="ml-2"
+                />
+              ) : (
+                <CellInput
+                  type="date"
+                  value={incidentDateDisplay}
+                  onChange={setIncidentDate}
+                />
+              )}
             </label>
-            <label className={`grid grid-cols-[11rem_minmax(5rem,1fr)_auto] items-center border-b border-r border-black px-2 font-bold ${errorCell("affected_families")}`}>
+            <label className={`grid grid-cols-[11rem_minmax(4rem,0.7fr)_auto_minmax(4rem,0.7fr)_auto] items-center border-b border-r border-black px-2 font-bold ${errorCell("affected_families")}`}>
               <span>Actual Affected Families:</span>
               <CellInput
                 type="number"
@@ -837,11 +941,19 @@ export default function AssessmentExcelForm({
                 value={form.data.affected_families}
                 onChange={setAffectedFamilies}
               />
-              <span className="whitespace-nowrap pr-2 font-semibold text-slate-600">
+              <span className="whitespace-nowrap pr-1 font-semibold text-slate-600">
                 {countNoun(form.data.affected_families, "family", "families")}
-                {String(meta.affected_persons ?? "").trim() !== ""
-                  ? ` (${formattedCount(meta.affected_persons, "person", "persons")})`
-                  : ""}
+              </span>
+              <CellInput
+                type="number"
+                min="0"
+                step="1"
+                value={meta.affected_persons ?? ""}
+                onChange={(v) => setMeta("affected_persons", v)}
+                aria-label="Actual affected persons"
+              />
+              <span className="whitespace-nowrap pr-2 font-semibold text-slate-600">
+                {countNoun(meta.affected_persons, "person", "persons")}
               </span>
             </label>
             <label className="flex border-b border-black px-2 font-bold">
@@ -1147,12 +1259,12 @@ export default function AssessmentExcelForm({
               <b>Reviewed by:</b>
               <select
                 className={`mt-3 w-full border-0 border-b border-black bg-transparent p-2 text-center font-black ${errorCell("assessment_form_data.reviewed_by")}`}
-                value={meta.reviewed_by ?? ""}
-                onChange={(e) => setMeta("reviewed_by", e.target.value)}
+                value={normalizeSignatoryValue(meta.reviewed_by ?? "")}
+                onChange={(e) => setMeta("reviewed_by", normalizeSignatoryValue(e.target.value))}
               >
                 <option value="">Select reviewed by signatory</option>
                 {signatoryOptions("reviewed_by").map((row) => (
-                  <option key={row.id} value={row.value}>
+                  <option key={row.id} value={normalizeSignatoryValue(row.value)}>
                     {signatoryName(row.value)}
                   </option>
                 ))}
@@ -1182,12 +1294,12 @@ export default function AssessmentExcelForm({
             </p>
             <select
               className={`mx-auto mt-3 block w-2/3 border-0 border-b border-black bg-transparent p-2 text-center font-black ${errorCell("assessment_form_data.approved_by")}`}
-              value={meta.approved_by ?? ""}
-              onChange={(e) => setMeta("approved_by", e.target.value)}
+              value={normalizeSignatoryValue(meta.approved_by ?? "")}
+              onChange={(e) => setMeta("approved_by", normalizeSignatoryValue(e.target.value))}
             >
               <option value="">Select approved by signatory</option>
               {signatoryOptions("approved_by").map((row) => (
-                <option key={row.id} value={row.value}>
+                <option key={row.id} value={normalizeSignatoryValue(row.value)}>
                   {signatoryName(row.value)}
                 </option>
               ))}
@@ -1211,27 +1323,26 @@ export default function AssessmentExcelForm({
         onClose={() => setDraftPreviewOpen(false)}
         eyebrow="Document preview"
         badge="Draft / local preview"
-        title={previewDocument === "response" ? "Response Letter" : "FNI Assessment and Delivery Form"}
-        subtitle="A4 paper preview · live values from this worksheet (not a signed PDF)"
-        notice="Draft preview only — save the assessment to generate downloadable PDFs and enable e-PIRMA routing."
-        tabs={[
-          { id: "assessment", label: "Assessment" },
-          { id: "response", label: "Response Letter" },
-        ]}
-        activeTab={previewDocument}
-        onTabChange={setPreviewDocument}
-        zoom={previewZoom}
-        onZoomChange={setPreviewZoom}
-        paperWidth="210mm"
+        title="FNI Assessment and Delivery Form"
+        subtitle="Official DomPDF layout · live values from this worksheet"
+        notice="Draft assessment preview only — save the assessment to generate downloadable PDFs and enable e-PIRMA routing."
+        usePaperCanvas={false}
       >
-        {previewDocument === "response" ? (
-          <PrintableResponseLetterDocument
-            formData={form.data}
-            responseApprover={responseApprover}
+        {draftPreviewBusy ? (
+          <div className="flex h-full min-h-[60vh] items-center justify-center p-8 text-sm font-bold text-slate-600">
+            Building assessment PDF preview…
+          </div>
+        ) : draftPreviewError ? (
+          <div className="flex h-full min-h-[60vh] items-center justify-center p-8 text-center text-sm font-bold text-rose-700">
+            {draftPreviewError}
+          </div>
+        ) : draftPreviewUrl ? (
+          <iframe
+            title="Assessment PDF draft preview"
+            src={`${draftPreviewUrl}#toolbar=1&navpanes=0`}
+            className="h-full min-h-[60vh] w-full bg-slate-200"
           />
-        ) : (
-          <PrintableAssessmentDocument formData={form.data} />
-        )}
+        ) : null}
       </DocumentPreviewModal>
     </form>
   );

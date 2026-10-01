@@ -17,13 +17,27 @@ class DistributionPlanController extends Controller
 {
     public function index(InventoryBalanceService $inventoryBalances): Response
     {
-        $batches = InventoryBatch::with(['item', 'warehouse', 'transactions' => fn ($query) => $query->latest('transaction_date')])
-            ->where('quantity', '>', 0)
-            ->orderBy('expiration_date')
-            ->get();
+        return $this->renderNearExpiry($inventoryBalances);
+    }
+
+    /**
+     * @param  list<int>|null  $warehouseIds
+     * @param  array<string, mixed>  $viewProps
+     */
+    public function renderNearExpiry(
+        InventoryBalanceService $inventoryBalances,
+        ?array $warehouseIds = null,
+        array $viewProps = [],
+    ): Response {
+        $includePlans = $viewProps['include_plans'] ?? true;
+        $scopedIds = $warehouseIds === null ? null : collect($warehouseIds)->map(fn ($id): int => (int) $id);
 
         $expiryRows = $inventoryBalances->balanceRows()
             ->filter(fn (array $row): bool => (float) ($row['current_balance'] ?? 0) > 0 && $this->hasExpiry($row['expiry'] ?? null))
+            ->when(
+                $scopedIds !== null,
+                fn ($rows) => $rows->filter(fn (array $row): bool => $scopedIds->contains((int) ($row['warehouse_id'] ?? 0))),
+            )
             ->map(fn (array $row): array => $this->expiryRowFromBalance($row))
             ->values();
 
@@ -34,7 +48,15 @@ class DistributionPlanController extends Controller
             ->sortBy(fn (string $month): int => CarbonImmutable::parse('01 '.$month)->timestamp)
             ->values();
 
-        return Inertia::render('Inventory/NearExpiry', [
+        $nearExpiryQuery = InventoryBatch::with(['item', 'warehouse'])
+            ->nearExpiry()
+            ->when(
+                $scopedIds !== null,
+                fn ($query) => $query->whereIn('warehouse_id', $scopedIds->all()),
+            )
+            ->orderBy('expiration_date');
+
+        return Inertia::render('Inventory/NearExpiry', array_merge([
             'monitoring' => [
                 'expiryRows' => $expiryRows,
                 'ageingRows' => $expiryRows->map(fn (array $row): array => $this->ageingRowFromExpiry($row, $ageingMonths->all()))->values(),
@@ -50,10 +72,13 @@ class DistributionPlanController extends Controller
                     'statuses' => $expiryRows->pluck('status')->filter()->unique()->values(),
                 ],
             ],
-            'nearExpiry' => InventoryBatch::with(['item', 'warehouse'])->nearExpiry()->orderBy('expiration_date')->paginate(15),
-            'plans' => DistributionPlan::with(['batch.item', 'batch.warehouse'])->latest()->paginate(15),
+            'nearExpiry' => $nearExpiryQuery->paginate(15),
+            'plans' => $includePlans
+                ? DistributionPlan::with(['batch.item', 'batch.warehouse'])->latest()->paginate(15)
+                : ['data' => []],
             'libraryOptions' => OperationalLibraryValue::groupedOptions(),
-        ]);
+            'workspace' => 'rros',
+        ], $viewProps));
     }
 
     private function expiryRowFromBalance(array $row): array

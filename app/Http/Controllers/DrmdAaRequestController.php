@@ -6,6 +6,7 @@ use App\Models\AssistanceRequest;
 use App\Models\RequestParty;
 use App\Services\AuditLogger;
 use App\Services\WorkflowNotificationService;
+use App\Support\LinkedLguDromicIncidentReports;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -50,7 +51,7 @@ class DrmdAaRequestController extends Controller
                 ->with([
                     'requestParty:id,requesting_party,office_agency_details',
                     'encoder:id,name',
-                    'sourceLguDromicReport:id,reference_number,lgu_relief_request_reference,lgu_signed_request_path,lgu_signed_report_path,lgu_relief_validation_status,lgu_routing_status',
+                    'sourceLguDromicReport:id,reference_number,lgu_relief_request_reference,lgu_signed_request_path,lgu_signed_report_path,lgu_signed_report_name,lgu_relief_validation_status,lgu_routing_status,lgu_dromic_payload,lgu_dromic_series_key,lgu_dromic_report_number,lgu_report_status,municipality,province',
                 ])
                 ->where('submission_type', $submissionType)
                 ->where(function ($query) use ($request, $submissionType): void {
@@ -62,6 +63,15 @@ class DrmdAaRequestController extends Controller
                 })
                 ->latest('submitted_at')
                 ->paginate(15)
+                ->through(function (AssistanceRequest $record): AssistanceRequest {
+                    if ($record->sourceLguDromicReport) {
+                        $linked = LinkedLguDromicIncidentReports::for($record->sourceLguDromicReport);
+                        $record->sourceLguDromicReport->setAttribute('linked_incident_reports', $linked);
+                        $record->setAttribute('linked_incident_reports', $linked);
+                    }
+
+                    return $record;
+                })
                 ->withQueryString(),
         ]);
     }

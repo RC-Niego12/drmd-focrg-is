@@ -11,6 +11,7 @@ class DromicReport extends Model
     use SoftDeletes;
 
     protected $fillable = [
+        'consolidation',
         'report_number',
         'request_id',
         'incident_id',
@@ -29,6 +30,7 @@ class DromicReport extends Model
     protected function casts(): array
     {
         return [
+            'consolidation' => 'array',
             'date_released' => 'date',
             'released_items' => 'array',
             'last_synced_at' => 'datetime',
@@ -38,5 +40,10 @@ class DromicReport extends Model
     public function request(): BelongsTo
     {
         return $this->belongsTo(AssistanceRequest::class, 'request_id');
+    }
+
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
     }
 }

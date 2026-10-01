@@ -11,6 +11,10 @@ class LguDirectoryLswdoAlternate extends Model
         'name',
         'position',
         'contact_number',
+        'id_number',
+        'email',
+        'user_id',
+        'login_username',
         'is_locally_updated',
     ];
 

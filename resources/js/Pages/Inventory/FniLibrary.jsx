@@ -59,6 +59,7 @@ const operationalMeta = {
   program_activity_type: [Activity, "RROS References", "Programs & Documents"],
   incident_type: [Flame, "DRIMS References", "Incidents"],
   drrs_signatory: [ClipboardCheck, "DRRS References", "Assessment & Correspondence"],
+  drims_signatory: [ClipboardCheck, "DRIMS References", "DROMIC Report Signatories"],
   rros_ris_signatory: [ClipboardCheck, "RROS References", "RIS Signatories"],
   rros_dr_signatory: [Truck, "RROS References", "DR Signatories"],
   rros_stf_signatory: [FileText, "RROS References", "STF Signatories"],
@@ -101,11 +102,13 @@ const subgroupOrder = [
   "STF Signatories",
   "Directories",
   "Incidents",
+  "DROMIC Report Signatories",
   "Assessment & Correspondence",
   "System Identity",
   "Other References",
 ];
 const rrosSignatoryTypes = ["rros_ris_signatory", "rros_dr_signatory", "rros_stf_signatory"];
+const allDocumentSignatoryTypes = [...rrosSignatoryTypes, "drims_signatory"];
 const rrosDocumentLabels = {
   rros_ris_signatory: "RIS / DR",
   rros_dr_signatory: "Delivery Receipt",
@@ -115,11 +118,13 @@ const defaultSignatoryContext = {
   rros_ris_signatory: "requested_by",
   rros_dr_signatory: "issuance_approved_by",
   rros_stf_signatory: "requested_by",
+  drims_signatory: "recommended_by",
 };
 const rrosSignatoryRoles = {
   rros_ris_signatory: [["requested_by", "Requested By"], ["approved_by", "Approved By"], ["issued_by", "Issued By"]],
   rros_dr_signatory: [["issuance_approved_by", "Issuance Approved By"], ["released_by", "Released By"]],
   rros_stf_signatory: [["requested_by", "Requested By"], ["approved_by", "Approved By"], ["issued_by", "Issued By"]],
+  drims_signatory: [["recommended_by", "DRMD Chief (DC)"], ["approved_by", "Regional Director (RD)"]],
 };
 const drrsSignatoryRoles = {
   assessment: [["reviewed_by", "Reviewed By"], ["approved_by", "Approved By"]],
@@ -149,7 +154,7 @@ const signatorySetFromRows = (libraryType, rows) => Object.fromEntries((rrosSign
 }));
 const existingSignatoriesFor = (employee, rows = []) => {
   const name = String(employee?.value || "").trim().toLowerCase();
-  return rows.filter((row) => ["drrs_signatory", ...rrosSignatoryTypes].includes(row.library_type)
+  return rows.filter((row) => ["drrs_signatory", ...allDocumentSignatoryTypes].includes(row.library_type)
     && (String(row.metadata?.employee_name || "").trim().toLowerCase() === name
       || String(row.value || "").split("|")[0].trim().toLowerCase().startsWith(name)));
 };
@@ -265,6 +270,7 @@ export default function FniLibrary({
     designation: "",
     office: "",
     contact_number: "",
+    id_number: "",
     suffix: "",
     initials: "",
     short_name: "",
@@ -384,10 +390,12 @@ export default function FniLibrary({
       ? Object.entries(rrosDocumentLabels).map(([type, label]) => ({ type, label, roles: rrosSignatoryRoles[type] || [] }))
       : activeType === "drrs_signatory"
         ? Object.entries(drrsDocumentLabels).map(([type, label]) => ({ type, label, roles: drrsRolesFor(type) }))
+        : activeType === "drims_signatory"
+          ? [{ type: "drims_signatory", label: "DROMIC Report", roles: rrosSignatoryRoles.drims_signatory }]
         : [];
     const needle = search.trim().toLowerCase();
     return documents.map((document) => {
-      const rows = operationalLibraries.filter((row) => isRrosSignatoryLibrary
+      const rows = operationalLibraries.filter((row) => isRrosSignatoryLibrary || activeType === "drims_signatory"
         ? row.library_type === document.type
         : row.library_type === "drrs_signatory" && (row.metadata?.document_type || "assessment") === document.type);
       return { ...document, rows, configured: document.roles.filter(([context]) => rows.some((row) => row.context === context)).length };
@@ -404,10 +412,11 @@ export default function FniLibrary({
       });
     else if (activeType === "drrs_signatory") {
       drrsSignatoryForm.setData({ document_type: "", signatories: {} });
-      operationalForm.setData({ library_type: "drrs_signatory", document_type: "assessment", value: "", position: "", suffix: "", designation: "", office: "", contact_number: "", initials: "", short_name: "", context: defaultContextFor("drrs_signatory", "assessment"), is_active: true });
-    } else if (isRrosSignatoryLibrary) {
-      rrosSignatoryForm.setData({ library_type: "", signatories: {} });
-      operationalForm.setData({ library_type: "rros_ris_signatory", value: "", position: "", suffix: "", designation: "", office: "", contact_number: "", initials: "", short_name: "", context: defaultContextFor("rros_ris_signatory"), is_active: true });
+      operationalForm.setData({ library_type: "drrs_signatory", document_type: "assessment", value: "", position: "", suffix: "", designation: "", office: "", contact_number: "", id_number: "", initials: "", short_name: "", context: defaultContextFor("drrs_signatory", "assessment"), is_active: true });
+    } else if (isRrosSignatoryLibrary || activeType === "drims_signatory") {
+      const libraryType = activeType === "drims_signatory" ? "drims_signatory" : "";
+      rrosSignatoryForm.setData({ library_type: libraryType, signatories: libraryType ? signatorySetFromRows(libraryType, operationalLibraries) : {} });
+      operationalForm.setData({ library_type: libraryType || "rros_ris_signatory", value: "", position: "", suffix: "", designation: "", office: "", contact_number: "", id_number: "", initials: "", short_name: "", context: defaultContextFor(libraryType || "rros_ris_signatory"), is_active: true });
     } else if (isOperational)
       operationalForm.setData({
         library_type: isRrosSignatoryLibrary ? "rros_ris_signatory" : activeType,
@@ -416,10 +425,11 @@ export default function FniLibrary({
         designation: "",
         office: "",
         contact_number: "",
+        id_number: "",
         suffix: "",
         initials: "",
         short_name: "",
-        context: ["drrs_signatory", ...rrosSignatoryTypes, "drn_prefix", "response_letter_initials"].includes(activeType)
+        context: ["drrs_signatory", ...allDocumentSignatoryTypes, "drn_prefix", "response_letter_initials"].includes(activeType)
           ? defaultContextFor(activeType)
           : "all",
         is_active: true,
@@ -452,12 +462,13 @@ export default function FniLibrary({
       operationalForm.setData({
         library_type: row.library_type,
         document_type: row.library_type === "drrs_signatory" ? (row.metadata?.document_type || "assessment") : "",
-        value: ["drrs_signatory", ...rrosSignatoryTypes].includes(row.library_type) ? String(row.value || "").split("|")[0].trim() : row.value,
+        value: ["drrs_signatory", ...allDocumentSignatoryTypes].includes(row.library_type) ? String(row.value || "").split("|")[0].trim() : row.value,
         position: row.metadata?.position || "",
         suffix: row.metadata?.suffix || "",
         designation: row.metadata?.designation || String(row.value || "").split("|").slice(1).join("|").trim(),
         office: row.metadata?.office || "",
         contact_number: row.metadata?.contact_number || "",
+        id_number: row.metadata?.id_number || "",
         initials: row.metadata?.initials || "",
         short_name: row.metadata?.short_name || "",
         context: (() => {
@@ -487,7 +498,7 @@ export default function FniLibrary({
     });
   };
   const openDocumentSignatories = (documentType) => {
-    if (isRrosSignatoryLibrary) {
+    if (isRrosSignatoryLibrary || activeType === "drims_signatory") {
       rrosSignatoryForm.setData({ library_type: documentType, signatories: signatorySetFromRows(documentType, operationalLibraries) });
     } else {
       drrsSignatoryForm.setData({
@@ -505,7 +516,7 @@ export default function FniLibrary({
     const close = { preserveScroll: true, onSuccess: () => setModal(null) };
     if (activeType === "drrs_signatory" && !modal.row) {
       drrsSignatoryForm.post("/operational-library/drrs-signatories", close);
-    } else if (isRrosSignatoryLibrary && !modal.row) {
+    } else if ((isRrosSignatoryLibrary || activeType === "drims_signatory") && !modal.row) {
       rrosSignatoryForm.post("/operational-library/rros-signatories", close);
     } else if (modal.kind === "fni")
       modal.row
@@ -728,7 +739,7 @@ export default function FniLibrary({
                   />
                 ))}
               />
-            ) : (isRrosSignatoryLibrary || activeType === "drrs_signatory") ? (
+            ) : (isRrosSignatoryLibrary || activeType === "drrs_signatory" || activeType === "drims_signatory") ? (
               <DataTable
                 numbered={false}
                 stickyHeader
@@ -761,7 +772,8 @@ export default function FniLibrary({
                   "Status",
                   { label: "Actions", align: "right", actionColumn: true },
                 ] : activeType === "dispatch_driver" ? [
-                  "Driver Name",
+                  "Name",
+                  "ID Number",
                   "Contact No.",
                   "Position",
                   "Office",
@@ -769,6 +781,7 @@ export default function FniLibrary({
                   { label: "Actions", align: "right", actionColumn: true },
                 ] : activeType === "dispatch_received_by" ? [
                   "Name",
+                  "ID Number",
                   "Position",
                   "Office",
                   "Status",
@@ -798,12 +811,14 @@ export default function FniLibrary({
                       row.is_active ? "Active" : "Inactive",
                     ] : activeType === "dispatch_driver" ? [
                       row.value,
+                      row.metadata?.id_number || "—",
                       row.metadata?.contact_number || "—",
                       row.metadata?.position || "—",
                       row.metadata?.office || "—",
                       row.is_active ? "Active" : "Inactive",
                     ] : activeType === "dispatch_received_by" ? [
                       row.value,
+                      row.metadata?.id_number || "—",
                       row.metadata?.position || "—",
                       row.metadata?.office || "—",
                       row.is_active ? "Active" : "Inactive",
@@ -947,7 +962,8 @@ function LibraryModal({
 }) {
   const bulkRrosSignatories = definition.key === "rros_signatories" && !modal.row;
   const bulkDrrsSignatories = definition.key === "operational:drrs_signatory" && !modal.row;
-  const form = bulkRrosSignatories
+  const bulkDrimsSignatories = definition.key === "operational:drims_signatory" && !modal.row;
+  const form = bulkRrosSignatories || bulkDrimsSignatories
     ? rrosSignatoryForm
     : bulkDrrsSignatories ? drrsSignatoryForm
     : modal.kind === "fni"
@@ -963,7 +979,7 @@ function LibraryModal({
     >
       <form
         onSubmit={onSubmit}
-        className={`w-full overflow-hidden rounded-lg bg-white shadow-2xl dark:bg-zinc-950 ${bulkRrosSignatories || bulkDrrsSignatories ? "max-w-5xl" : "max-w-xl"}`}
+        className={`w-full overflow-hidden rounded-lg bg-white shadow-2xl dark:bg-zinc-950 ${bulkRrosSignatories || bulkDrrsSignatories || bulkDrimsSignatories ? "max-w-5xl" : "max-w-xl"}`}
       >
         <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-5 py-4 dark:border-zinc-800 dark:bg-zinc-900">
           <div>
@@ -971,7 +987,7 @@ function LibraryModal({
               {definition.label}
             </p>
             <h2 className="text-xl font-black">
-              {bulkRrosSignatories ? "Configure Document Signatories" : bulkDrrsSignatories ? "Configure DRRS Signatories" : modal.row ? "Edit Library Value" : "Add Library Value"}
+              {bulkDrimsSignatories ? "Configure DRIMS Signatories" : bulkRrosSignatories ? "Configure Document Signatories" : bulkDrrsSignatories ? "Configure DRRS Signatories" : modal.row ? "Edit Library Value" : "Add Library Value"}
             </h2>
           </div>
           <button type="button" onClick={onClose} aria-label="Close modal" data-tip="Close modal" data-tip-side="bottom" data-tip-preferred-side="bottom" data-tip-locked="true" className="dromis-tip">
@@ -979,8 +995,12 @@ function LibraryModal({
           </button>
         </div>
         <div className="space-y-4 p-5">
-          {bulkRrosSignatories ? (
-            <RrosSignatorySetFields form={rrosSignatoryForm} operationalLibraries={operationalLibraries} />
+          {bulkRrosSignatories || bulkDrimsSignatories ? (
+            <RrosSignatorySetFields
+              form={rrosSignatoryForm}
+              operationalLibraries={operationalLibraries}
+              fixedLibraryType={bulkDrimsSignatories ? "drims_signatory" : null}
+            />
           ) : bulkDrrsSignatories ? (
             <DrrsSignatorySetFields form={drrsSignatoryForm} operationalLibraries={operationalLibraries} />
           ) : modal.kind === "fni" ? (
@@ -1034,7 +1054,7 @@ function LibraryModal({
                 <p className="rounded-md border border-sky-100 bg-sky-50 p-3 text-xs font-semibold text-sky-800 dark:border-sky-900 dark:bg-sky-950/30 dark:text-sky-100">
                   The long name appears on public and sign-in screens. The short name appears below the agency name in the authenticated sidebar.
                 </p>
-              </> : ["drrs_signatory", "rros_ris_signatory", "rros_dr_signatory", "rros_stf_signatory"].includes(form.data.library_type) ? <div className="space-y-4">
+              </> : ["drrs_signatory", ...allDocumentSignatoryTypes].includes(form.data.library_type) ? <div className="space-y-4">
                 {form.data.library_type === "drrs_signatory" && <label className="block text-sm font-bold">Document Type<select className="mt-1 w-full" value={form.data.document_type} onChange={(event) => {
                   const documentType = event.target.value;
                   const roles = drrsRolesFor(documentType);
@@ -1069,9 +1089,16 @@ function LibraryModal({
                   onChange={(value) => form.setData("value", value)}
                 />
                 <Input
+                  label="ID Number"
+                  value={form.data.id_number}
+                  onChange={(value) => form.setData("id_number", value)}
+                  required={false}
+                />
+                <Input
                   label="Contact No."
                   value={form.data.contact_number}
                   onChange={(value) => form.setData("contact_number", value)}
+                  required
                 />
                 <Input
                   label="Position"
@@ -1090,6 +1117,12 @@ function LibraryModal({
                   label="Name"
                   value={form.data.value}
                   onChange={(value) => form.setData("value", value)}
+                />
+                <Input
+                  label="ID Number"
+                  value={form.data.id_number}
+                  onChange={(value) => form.setData("id_number", value)}
+                  required={false}
                 />
                 <Input
                   label="Position"
@@ -1167,7 +1200,7 @@ function LibraryModal({
             disabled={form.processing || (bulkRrosSignatories && !form.data.library_type) || (bulkDrrsSignatories && !form.data.document_type)}
             className="w-full rounded-md bg-brand-600 px-4 py-2.5 text-sm font-black text-white"
           >
-            {form.processing ? "Saving..." : bulkRrosSignatories ? (form.data.library_type ? `Save ${rrosDocumentLabels[form.data.library_type]} Signatories` : "Select a Document") : bulkDrrsSignatories ? (form.data.document_type ? `Save ${drrsDocumentLabels[form.data.document_type]} Signatories` : "Select a Document") : "Save Library Value"}
+            {form.processing ? "Saving..." : bulkDrimsSignatories ? "Save DRIMS Signatories" : bulkRrosSignatories ? (form.data.library_type ? `Save ${rrosDocumentLabels[form.data.library_type]} Signatories` : "Select a Document") : bulkDrrsSignatories ? (form.data.document_type ? `Save ${drrsDocumentLabels[form.data.document_type]} Signatories` : "Select a Document") : "Save Library Value"}
           </button>
         </div>
       </form>
@@ -1215,7 +1248,7 @@ function DrrsSignatorySetFields({ form, operationalLibraries }) {
   </div>;
 }
 
-function RrosSignatorySetFields({ form, operationalLibraries }) {
+function RrosSignatorySetFields({ form, operationalLibraries, fixedLibraryType = null }) {
   const setEntry = (context, field, value) => form.setData("signatories", {
     ...form.data.signatories,
     [context]: { ...form.data.signatories[context], [field]: value },
@@ -1226,7 +1259,7 @@ function RrosSignatorySetFields({ form, operationalLibraries }) {
   });
 
   return <div className="space-y-4">
-    <div className="rounded-xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-sky-50 p-4">
+    {!fixedLibraryType && <div className="rounded-xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-sky-50 p-4">
       <label className="block text-sm font-black text-emerald-950">RROS Document Type
         <select className="mt-2 w-full bg-white" value={form.data.library_type} onChange={(event) => changeDocument(event.target.value)}>
           <option value="">Select RIS / DR, Delivery Receipt, or STF</option>
@@ -1234,7 +1267,11 @@ function RrosSignatorySetFields({ form, operationalLibraries }) {
         </select>
       </label>
       <p className="mt-2 text-xs font-semibold text-emerald-800">Complete all official signatory assignments for this document, then save them together.</p>
-    </div>
+    </div>}
+    {fixedLibraryType === "drims_signatory" && <div className="rounded-xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-sky-50 p-4">
+      <p className="text-sm font-black text-emerald-950">DROMIC Report Signatories</p>
+      <p className="mt-1 text-xs font-semibold text-emerald-800">Assign the DRMD Chief and Regional Director used in DSWD DROMIC reports.</p>
+    </div>}
     <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
       {(rrosSignatoryRoles[form.data.library_type] || []).map(([context, label], index) => {
         const entry = form.data.signatories[context] || { name: "", position: "", suffix: "", designation: "", office: "" };

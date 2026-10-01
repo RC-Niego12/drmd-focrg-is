@@ -24,9 +24,11 @@ import {
   LayoutDashboard,
   LogOut,
   Mail,
+  Menu,
   LoaderCircle,
   MessageCircle,
   Moon,
+  MoreHorizontal,
   PackageCheck,
   PencilLine,
   Phone,
@@ -34,8 +36,10 @@ import {
   RefreshCw,
   Save,
   Send,
+  ShieldCheck,
   Sparkles,
   Sun,
+  Tent,
   Truck,
   UploadCloud,
   UserCog,
@@ -101,6 +105,12 @@ const dashboardViewRoles = [
 const inventoryManageRoles = ["Super Admin", "RROS", "RROS AA"];
 const nearExpiryRoles = ["Super Admin", "RROS", "RROS AA", "DRRS"];
 const dispatchRoles = ["Super Admin", "RROS", "RROS AA"];
+const deliveryMonitoringRoles = [
+  "Super Admin", "RROS", "RROS AA", "DRRS", "DRRS AA", "DRIMS", "DRMD AA",
+  "DRMD Chief", "DRMD Financial Analyst", "QRT", "Quick Response Team",
+  "Regional Director", "RD", "Assistant Regional Director", "ARD",
+  "Assistant Regional Director for Operations", "ARDO",
+];
 const dswdStaffRoles = [
   "Super Admin", "RROS", "RROS AA", "DRRS", "DRRS AA", "DRIMS",
   "DRMD AA", "DRMD Chief", "DRMD Financial Analyst", "QRT", "Quick Response Team",
@@ -116,13 +126,28 @@ const nav = [
   },
   {
     href: "/requests",
-    label: "FNI Requests",
+    label: "Requests Workspace",
     icon: ClipboardList,
     permissions: ["encode requests", "monitor requests", "process requests"],
     // Role fallback when permission pivots drift; matches route middleware.
     roles: ["Super Admin", "DRRS", "DRIMS", "RROS", "RROS AA"],
-    // Keep sidebar highlight when DRRS workspace switches to LGU Reports & Requests.
+    // Keep sidebar highlight when DRRS workspace switches to LGU request letters.
     matchHrefs: ["/requests", "/dromic/lgu-reports"],
+    hideForRoles: ["DRIMS"],
+  },
+  {
+    href: "/rros/requests",
+    label: "RIS/DR/STF Workspace",
+    icon: ClipboardList,
+    roles: ["Super Admin"],
+    roleOnly: true,
+  },
+  {
+    href: "/preparedness-for-response",
+    label: "Preparedness for Response",
+    icon: ShieldCheck,
+    roles: ["DRIMS", "Super Admin"],
+    roleOnly: true,
   },
   {
     href: "/dispatches",
@@ -130,6 +155,13 @@ const nav = [
     icon: Truck,
     permissions: ["manage dispatches"],
     roles: dispatchRoles,
+  },
+  {
+    href: "/delivery-monitoring",
+    label: "Delivery Monitoring",
+    icon: RadioTower,
+    permissions: ["view dispatch delivery monitoring"],
+    roles: deliveryMonitoringRoles,
   },
   {
     href: "/delivery-escort",
@@ -147,6 +179,14 @@ const nav = [
     roleOnly: true,
   },
   {
+    href: "/evacuation-centers",
+    label: "Evacuation Centers",
+    icon: Tent,
+    permissions: ["manage dromic reports"],
+    roles: ["DRIMS", "Super Admin"],
+    roleOnly: true,
+  },
+  {
     href: "/warehouses",
     label: "Warehouses",
     icon: Warehouse,
@@ -160,6 +200,7 @@ const nav = [
     icon: Boxes,
     permissions: ["manage inventory", "view dashboards"],
     roles: dashboardViewRoles,
+    hideForRoles: ["DRIMS"],
   },
   {
     href: "/inventory/e-stock-card",
@@ -181,6 +222,7 @@ const nav = [
     icon: PackageCheck,
     permissions: ["manage inventory", "view dashboards"],
     roles: dashboardViewRoles,
+    hideForRoles: ["DRIMS"],
   },
   {
     href: "/drmd-aa/requests",
@@ -214,6 +256,38 @@ const nav = [
     roles: ["LGU", "Super Admin"],
   },
   {
+    href: "/lgu/evacuation-centers",
+    label: "Evacuation Centers",
+    icon: Tent,
+    permissions: ["submit lgu dromic requests"],
+    roles: ["LGU"],
+    roleOnly: true,
+  },
+  {
+    href: "/lgu/inventory",
+    label: "Inventory",
+    icon: Boxes,
+    permissions: ["submit lgu dromic requests"],
+    roles: ["LGU"],
+    roleOnly: true,
+  },
+  {
+    href: "/lgu/near-expiry",
+    label: "Near Expiry",
+    icon: Send,
+    permissions: ["submit lgu dromic requests"],
+    roles: ["LGU"],
+    roleOnly: true,
+  },
+  {
+    href: "/lgu/population",
+    label: "Population Data",
+    icon: UsersRound,
+    permissions: ["submit lgu dromic requests"],
+    roles: ["LGU"],
+    roleOnly: true,
+  },
+  {
     href: "/drmd-chief/lgu-intake",
     label: "Validated LGU Documents",
     icon: ClipboardList,
@@ -231,7 +305,7 @@ const nav = [
   },
   {
     href: "/dromic",
-    label: "DROMIC",
+    label: "DSWD DROMIC Reporting",
     icon: ClipboardList,
     permissions: ["manage dromic reports"],
     roles: ["Super Admin", "DRIMS"],
@@ -310,8 +384,10 @@ const superAdminAccessGroups = [
     icon: Warehouse,
     hrefs: [
       "/",
-      "/requests",
+      "/rros/requests",
       "/dispatches",
+      "/delivery-monitoring",
+      "/delivery-escort",
       "/warehouses",
       "/inventory",
       "/inventory/e-stock-card",
@@ -325,13 +401,53 @@ const superAdminAccessGroups = [
     icon: ClipboardList,
     hrefs: [
       "/",
+      "/requests",
+      "/delivery-monitoring",
+      "/delivery-escort",
       "/inventory",
       "/near-expiry",
       "/fni-issuances",
-      "/requests",
+    ],
+  },
+  {
+    key: "drims",
+    label: "DRIMS",
+    icon: RadioTower,
+    hrefs: [
+      "/",
+      "/preparedness-for-response",
+      "/delivery-monitoring",
+      "/delivery-escort",
+      "/dromic/lgu-reports",
+      "/dromic",
+    ],
+  },
+  {
+    key: "drmd-financial-analyst",
+    label: "DRMD Financial Analyst",
+    icon: BadgeDollarSign,
+    hrefs: [
+      "/",
+      "/delivery-monitoring",
+      "/delivery-escort",
+      "/inventory",
+      "/fni-issuances",
+      "/standby-funds",
     ],
   },
 ];
+
+// Super Admin navigation is intentionally opt-in. Gate::before grants a Super
+// Admin every permission, but that must not make newly added role workspaces
+// appear automatically in the administration sidebar.
+const superAdminCoreHrefs = new Set([
+  "/access-management",
+  "/audit-trail",
+  "/psgc-addresses",
+  "/population",
+  "/libraries",
+  "/alert-acknowledgments",
+]);
 
 const dashboardTree = [
   { id: "dashboard-overview", label: "Overview Cards" },
@@ -351,6 +467,45 @@ const dashboardTree = [
 const pageTrees = {
   "/": dashboardTree,
   "/rros-dashboard": dashboardTree,
+  "/preparedness-for-response": [
+    { id: "report-register", label: "Report Register", href: "/preparedness-for-response", exact: true },
+    { id: "briefing-title", label: "01  Opening Page", children: [
+      { id: "briefing-synopsis", label: "02  Synopsis" },
+      { id: "briefing-forecast", label: "03  Provincial Weather Forecast" },
+    ] },
+    { id: "resource-capacity-title", label: "04  Resource Capacity" },
+    { id: "food-nfi-title", label: "05  Food and Non-Food Items", children: [
+      { id: "rros-standby-summary", label: "06  Standby Funds & Stockpile" },
+      { id: "rros-ffp-summary", label: "07  FFP Summary" },
+      { id: "ffp-province", label: "08  FFPs per Province" },
+      { id: "ffp-dswd", label: "09  FFPs at DSWD Warehouses" },
+      { id: "ffp-lgu-province-summary", label: "10  LGU FFPs per Province" },
+      { id: "rtef-capacity", label: "11  Ready-to-Eat Food" },
+      { id: "bottled-water", label: "12  Bottled Water" },
+      { id: "relief-shelter-items", label: "13  Non-Food Items per Province" },
+      { id: "protection-cccm-items", label: "14  CCCM & IDPP Resources" },
+      { id: "production-materials", label: "15  Other NFIs, Raw & Indirect" },
+    ] },
+    { id: "response-assets-title", label: "16  Mobile Response Vehicles and Equipment", children: [
+      { id: "response-assets", label: "17  Vehicles & Equipment" },
+    ] },
+    { id: "qrt-human-resources-title", label: "18  Human Resources (QRT)", children: [
+      { id: "qrt-human-resources", label: "19  Human Resources Details" },
+      { id: "qrt-specializations", label: "20  QRT Specializations" },
+    ] },
+    { id: "cccm-idpp-title", label: "21  CCCM and IDPP", children: [
+      { id: "cccm-idpp-updates", label: "22  CCCM and IDPP Updates" },
+      { id: "evacuation-centers-dashboard", label: "23  Evacuation Centers Dashboard" },
+    ] },
+    { id: "actions-taken-title", label: "24  Actions Taken", children: [
+      { id: "actions-taken-1", label: "25  Actions Taken 1" },
+      { id: "actions-taken-2", label: "26  Actions Taken 2" },
+    ] },
+    { id: "challenges-ways-forward-title", label: "27  Challenges and Concerns / Ways Forward", children: [
+      { id: "challenges-recommendations", label: "28  Challenges and Recommendations" },
+    ] },
+    { id: "thank-you", label: "29  Closing Page" },
+  ],
   "/warehouses": [
     { id: "warehouse-overview", label: "Overview & Sync" },
     { id: "warehouse-dashboard", label: "Warehouse Dashboard" },
@@ -367,6 +522,11 @@ const pageTrees = {
     { id: "inventory-filters", label: "Filters & Search" },
     { id: "warehouse-stockpile", label: "Warehouse Stockpile" },
   ],
+  "/lgu/inventory": [
+    { id: "inventory-overview", label: "Inventory Overview" },
+    { id: "inventory-filters", label: "Filters & Search" },
+    { id: "warehouse-stockpile", label: "Warehouse Stockpile" },
+  ],
   "/near-expiry": [
     { id: "near-expiry-overview", label: "Expiry & Ageing Overview" },
     { id: "near-expiry-filters", label: "Filters & Tabs" },
@@ -374,6 +534,11 @@ const pageTrees = {
     { id: "near-expiry-warehouse-breakdown", label: "Warehouse Breakdown" },
     { id: "near-expiry-stock", label: "Monitoring Table" },
     { id: "near-expiry-plans", label: "Distribution Plans" },
+  ],
+  "/lgu/near-expiry": [
+    { id: "near-expiry-overview", label: "Expiry & Ageing Overview" },
+    { id: "near-expiry-filters", label: "Filters & Tabs" },
+    { id: "near-expiry-stock", label: "Monitoring Table" },
   ],
   "/fni-issuances": [
     { id: "fni-issuance-overview", label: "Issuance Overview" },
@@ -390,7 +555,7 @@ const pageTrees = {
     { id: "psgc-barangay-browser", label: "PSGC Barangay Browser" },
     { id: "psgc-district-options", label: "Province District Options" },
     { id: "psgc-city-assignment", label: "City / Municipality Assignment" },
-    { id: "psgc-managed-districts", label: "Districts" },
+    { id: "psgc-district-coverage", label: "District Coverage Atlas" },
   ],
   "/population": [
     { id: "population-summary-cards", label: "Summary Cards" },
@@ -402,21 +567,44 @@ const pageTrees = {
     { id: "top-cities-population", label: "Top Cities / Municipalities" },
     { id: "population-records", label: "Population Records" },
   ],
+  "/lgu/population": [
+    { id: "population-summary-cards", label: "Summary Cards" },
+    { id: "population-management", label: "Filters & Search" },
+    { id: "caraga-population-summary", label: "Caraga Population Summary" },
+    { id: "population-map", label: "Interactive LGU Map" },
+    { id: "top-cities-population", label: "Cities / Municipalities" },
+    { id: "population-records", label: "Population Records" },
+  ],
+  "/lgu/evacuation-centers": [
+    { id: "evac-dashboard-table", label: "Dashboard" },
+    { id: "evac-dashboard-charts", label: "Charts" },
+    { id: "evac-map", label: "Map" },
+    { id: "evac-details", label: "Details" },
+    { id: "evac-latrines", label: "Latrines" },
+    { id: "evac-facilities", label: "Facilities" },
+    { id: "evac-photo-gallery", label: "Photos" },
+  ],
+  "/evacuation-centers": [
+    { id: "evac-dashboard-table", label: "Dashboard" },
+    { id: "evac-dashboard-charts", label: "Charts" },
+    { id: "evac-map", label: "Map" },
+    { id: "evac-details", label: "Details" },
+    { id: "evac-latrines", label: "Latrines" },
+    { id: "evac-facilities", label: "Facilities" },
+    { id: "evac-photo-gallery", label: "Photos" },
+  ],
   "/requests": [
-    { id: "fni-requests", label: "FNI Requests", href: "/requests" },
     {
       id: "lgu-reports-requests",
-      label: "LGU Reports & Requests",
-      href: "/dromic/lgu-reports",
+      label: "Request letters",
+      href: "/dromic/lgu-reports?tab=requests",
       roles: ["DRRS", "Super Admin"],
     },
-    { id: "request-list", label: "Still for Action", sectionId: "request-list" },
-    { id: "created-assessments", label: "In Progress", sectionId: "created-assessments" },
-    { id: "approved-requests", label: "Approved", sectionId: "approved-requests" },
+    { id: "fni-requests", label: "FNI assessments", href: "/requests" },
   ],
   "/rros/requests": [
-    { id: "ris-dr", label: "RIS/DR" },
-    { id: "stf", label: "STF" },
+    { id: "ris-dr", label: "RIS/DR", href: "/rros/requests" },
+    { id: "stf", label: "STF", href: "/rros/requests?section=stf" },
     { id: "ris-epirma", label: "e-PIRMA", href: "/rros-aa/epirma", roles: ["RROS AA"] },
   ],
   "/drmd-aa/requests": [
@@ -424,8 +612,8 @@ const pageTrees = {
     { id: "aa-proposals", label: "Proposals", href: "/drmd-aa/proposals" },
   ],
   "/dispatches": [
-    { id: "dispatch-ready", label: "Still for Action", sectionId: "dispatch-ready" },
-    { id: "dispatch-list", label: "Dispatch / Delivery", sectionId: "dispatch-list" },
+    { id: "dispatch-ready", label: "Still for Action", href: "/dispatches?bucket=still_for_action#dispatch-ready" },
+    { id: "dispatch-list", label: "Dispatch / Delivery", href: "/dispatches?bucket=in_progress#dispatch-list" },
   ],
   "/libraries": [
     { id: "fni-library-overview", label: "Libraries Overview" },
@@ -435,8 +623,8 @@ const pageTrees = {
     { id: "library-group-system-configuration", label: "System Configuration" },
   ],
   "/dromic": [
-    { id: "dromic-create", label: "Create DROMIC / Situational Report" },
-    { id: "dromic-list", label: "DROMIC Reports" },
+    { id: "dromic-create", label: "Prepare consolidated report" },
+    { id: "dromic-list", label: "Saved DSWD reports" },
   ],
   "/audit-trail": [
     { id: "audit-summary", label: "Activity Summary" },
@@ -494,8 +682,10 @@ export default function AppLayout({ title, children }) {
     notificationCenter: initialNotificationCenter,
     realtime,
     sessionPolicy,
+    actionPages: preparednessActionPages = [],
   } = usePage().props;
-  const currentUrl = usePage().url.split("?")[0];
+  const currentPageUrl = usePage().url;
+  const currentUrl = currentPageUrl.split("?")[0].split("#")[0];
   const permissions = auth.user?.permissions ?? [];
   const isLguAccess = Boolean(
     auth.user?.is_lgu ||
@@ -514,6 +704,8 @@ export default function AppLayout({ title, children }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     typeof window !== "undefined" ? window.innerWidth < 1024 : false,
   );
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [compactActionsOpen, setCompactActionsOpen] = useState(false);
   const getGlobalLoaderRemaining = () =>
     Math.max((window.__drmdPageLoaderVisibleUntil ?? 0) - Date.now(), 0);
   const [pageLoading, setPageLoading] = useState(
@@ -521,7 +713,10 @@ export default function AppLayout({ title, children }) {
   );
   const [toast, setToast] = useState(null);
   const [openPageTrees, setOpenPageTrees] = useState({});
+  const [openPageSections, setOpenPageSections] = useState({});
+  const [currentHash, setCurrentHash] = useState(() => window.location.hash);
   const [openAccessGroups, setOpenAccessGroups] = useState({});
+  const [selectedAccessGroupKey, setSelectedAccessGroupKey] = useState("rros");
   const [notificationCenter, setNotificationCenter] = useState(initialNotificationCenter);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [regionalAlertPrompt, setRegionalAlertPrompt] = useState(() =>
@@ -531,6 +726,15 @@ export default function AppLayout({ title, children }) {
   const [messageCenterOpen, setMessageCenterOpen] = useState(false);
 
   useEffect(() => installDromisTooltips(), []);
+  useEffect(() => {
+    setMobileSidebarOpen(false);
+    setCompactActionsOpen(false);
+  }, [currentUrl]);
+  useEffect(() => {
+    const updateHash = () => setCurrentHash(window.location.hash);
+    window.addEventListener("hashchange", updateHash);
+    return () => window.removeEventListener("hashchange", updateHash);
+  }, []);
   const [messageCenter, setMessageCenter] = useState({ unread_count: 0, messages: [], contacts: [] });
   const [messageDraft, setMessageDraft] = useState({ recipient_id: "", subject: "", body: "" });
   const [messageSending, setMessageSending] = useState(false);
@@ -928,9 +1132,21 @@ export default function AppLayout({ title, children }) {
   const visitNotificationDestination = (value, fallback = "/") => {
     const destination = normalizeNotificationDestination(value, fallback);
     const destinationPath = destination.split("?")[0].split("#")[0];
+    const destinationQuery = destination.includes("?")
+      ? destination.slice(destination.indexOf("?"))
+      : "";
+    const currentFull = `${currentUrl}${typeof window !== "undefined" ? window.location.search : ""}`;
     setNotificationsOpen(false);
 
-    if (currentUrl === destinationPath) {
+    // Each monitoring / LGU deep link can target a different record while sharing
+    // the same pathname. Always apply the complete URL — comparing path only made
+    // clicks appear dead when the user was already on that workspace.
+    if (destinationPath === "/delivery-monitoring" || destinationPath === "/lgu/dromic-sitrep" || destinationPath.startsWith("/lgu/dispatch-plans/")) {
+      window.location.assign(destination);
+      return;
+    }
+
+    if (currentFull === destination || (currentUrl === destinationPath && !destinationQuery)) {
       hideWorkspaceLoaderNow();
       showToast({
         type: "success",
@@ -1040,7 +1256,7 @@ export default function AppLayout({ title, children }) {
     setToast(nextToast);
     toastTimeout.current = setTimeout(
       () => setToast(null),
-      nextToast.type === "message" ? 6000 : 3000,
+      nextToast.type === "message" ? 6000 : nextToast.type === "success" ? 5000 : 4000,
     );
   };
 
@@ -1274,6 +1490,7 @@ export default function AppLayout({ title, children }) {
         { reason: "inactivity" },
         {
           preserveScroll: false,
+          onSuccess: () => window.location.replace("/login"),
           onError: () => {
             inactivityLoggedOut.current = false;
           },
@@ -1411,9 +1628,14 @@ export default function AppLayout({ title, children }) {
       && !auth.user?.roles?.some((role) => ["RROS", "RROS AA"].includes(role))
       && !auth.user?.roles?.includes("DRMD AA"),
   );
+  const superAdminSidebarHrefs = new Set([
+    ...superAdminCoreHrefs,
+    ...superAdminAccessGroups.flatMap((group) => group.hrefs),
+  ]);
   const visibleNav = nav.filter(
     (item) =>
       canSee(item) &&
+      (!isSuperAdmin || superAdminSidebarHrefs.has(item.href)) &&
       (item.href !== "/libraries" || isSuperAdmin) &&
       (!isDrrsUser || item.href !== "/dromic/lgu-reports") &&
       (!isDrrsUser || !drrsExcludedNavHrefs.has(item.href)) &&
@@ -1422,7 +1644,15 @@ export default function AppLayout({ title, children }) {
       (!Array.isArray(item.hideForRoles)
         || !item.hideForRoles.some((role) => auth.user?.roles?.includes(role))),
   ).map((item) => {
-    if (item.href === "/requests" && isDrrsUser) return { ...item, label: "Requests Workspace" };
+    if (item.href === "/requests" && isDrrsUser) {
+      return {
+        ...item,
+        label: "Requests Workspace",
+        // Land on request-letter validation first — FNI rows appear only after Validated — No Findings.
+        href: "/dromic/lgu-reports?tab=requests",
+        matchHrefs: ["/requests", "/dromic/lgu-reports"],
+      };
+    }
     if (item.href === "/requests" && isRrosLevel) {
       return {
         ...item,
@@ -1439,8 +1669,16 @@ export default function AppLayout({ title, children }) {
   const standaloneSuperAdminNav = visibleNav.filter(
     (item) => !groupedSuperAdminHrefs.has(item.href),
   );
-  const pathMatches = (candidate) =>
-    currentUrl === candidate || currentUrl.startsWith(`${candidate}/`);
+  const selectedAccessGroup = superAdminAccessGroups.find(
+    (group) => group.key === selectedAccessGroupKey,
+  ) ?? superAdminAccessGroups[0];
+  const selectedAccessGroupItems = selectedAccessGroup.hrefs
+    .map((href) => visibleNav.find((item) => item.href === href))
+    .filter(Boolean);
+  const pathMatches = (candidate) => {
+    const path = String(candidate || "").split("?")[0];
+    return currentUrl === path || currentUrl.startsWith(`${path}/`);
+  };
   const matchesHref = (itemOrHref) => {
     const item = typeof itemOrHref === "string"
       ? visibleNav.find((navItem) => navItem.href === itemOrHref) ?? { href: itemOrHref }
@@ -1477,24 +1715,130 @@ export default function AppLayout({ title, children }) {
   const userInitial = auth.user?.name?.trim()?.charAt(0)?.toUpperCase() ?? "U";
   const sidebarLguProfile = auth.user?.lgu_profile ?? null;
   const sidebarAgencyProfile = auth.user?.agency_profile ?? null;
-  const sidebarAvatar = sidebarLguProfile?.logo_url || sidebarAgencyProfile?.logo_url || auth.user?.avatar || null;
-  const sidebarAvatarAlt = sidebarLguProfile?.logo_url
-    ? `${sidebarLguProfile?.name || auth.user?.name || "LGU"} logo`
-    : sidebarAgencyProfile?.logo_url
-      ? `${sidebarAgencyProfile?.agency_name || auth.user?.name || "Agency"} logo`
-    : auth.user?.name || "User";
+  const sidebarPersonnelPhoto = sidebarLguProfile?.personnel_photo_url || null;
+  const sidebarLguLogo = sidebarLguProfile?.logo_url || null;
+  const sidebarAvatar = isLguAccess
+    ? (sidebarPersonnelPhoto || sidebarLguLogo || auth.user?.avatar || null)
+    : (sidebarAgencyProfile?.logo_url || auth.user?.avatar || null);
+  const sidebarAvatarAlt = sidebarPersonnelPhoto
+    ? `${auth.user?.name || "LGU user"} photo`
+    : sidebarLguLogo
+      ? `${sidebarLguProfile?.name || auth.user?.name || "LGU"} logo`
+      : sidebarAgencyProfile?.logo_url
+        ? `${sidebarAgencyProfile?.agency_name || auth.user?.name || "Agency"} logo`
+        : auth.user?.name || "User";
+  const formatLguWorkspaceLabel = () => {
+    const levelRaw = String(sidebarLguProfile?.level || auth.user?.lgu_level || "").trim();
+    const normalized = levelRaw.toLowerCase();
+    const level = normalized === "province" || normalized === "plgu"
+      ? "PLGU"
+      : normalized === "city" || normalized === "city_municipality" || normalized === "clgu"
+        ? "CLGU"
+        : normalized === "municipality" || normalized === "mlgu"
+          ? "MLGU"
+          : (levelRaw.toUpperCase() || "LGU");
+    const place = String(
+      sidebarLguProfile?.name
+      || auth.user?.lgu_name
+      || "",
+    ).trim();
+    if (!place) {
+      return level;
+    }
+    // Avoid "MLGU MLGU Tubod" if the stored name already starts with the level.
+    const placeWithoutLevel = place.replace(/^(PLGU|CLGU|MLGU|LGU)\s*[-–—:]?\s*/i, "").trim() || place;
+    return `${level} ${placeWithoutLevel}`;
+  };
+  const lguWorkspaceLabel = formatLguWorkspaceLabel();
+  const formatLguPersonnelRoleLabel = () => {
+    const linkedRoles = Array.isArray(sidebarLguProfile?.roles) ? sidebarLguProfile.roles : [];
+    const labels = linkedRoles
+      .map((value) => formatSingleLguPersonnelRoleLabel(value))
+      .filter(Boolean);
+    if (labels.length) {
+      return [...new Set(labels)].join(" · ");
+    }
+
+    return formatSingleLguPersonnelRoleLabel(
+      sidebarLguProfile?.linked?.role
+      || auth.user?.lgu_directory_role
+      || auth.user?.position
+      || auth.user?.designation
+      || "",
+    );
+  };
+  const formatSingleLguPersonnelRoleLabel = (rawRole) => {
+    const role = String(rawRole || "").trim().toLowerCase().replace(/\s+/g, "_");
+
+    if (!role) {
+      return null;
+    }
+
+    if (["lce", "local_chief_executive", "mayor"].includes(role) || /\blce\b|\bmayor\b/.test(role.replaceAll("_", " "))) {
+      return "LCE";
+    }
+    if (["lswd_officer", "lswdo", "mswdo", "cswdo", "pswdo"].includes(role) || /\blswdo\b|\bmswdo\b|\bcswdo\b|\bpswdo\b/.test(role.replaceAll("_", " "))) {
+      return "LSWDO";
+    }
+    if (["lswd_officer_alternate", "lswdo_alternate", "alternate_lswdo"].includes(role)) {
+      return "Alternate LSWDO";
+    }
+    if (["ldrrmo", "mdrrmo", "cdrrmo", "pdrrmo"].includes(role) || /\bldrrmo\b|\bmdrrmo\b|\bcdrrmo\b/.test(role.replaceAll("_", " "))) {
+      return "LDRRMO";
+    }
+    if (["ldrrmo_alternate", "alternate_ldrrmo"].includes(role)) {
+      return "Alternate LDRRMO";
+    }
+    if (role === "dromic_encoder" || role.includes("sitrep") || role.includes("dromic")) {
+      return "DROMIC / SitReport Encoder";
+    }
+    if (role === "warehouse_focal" || role.includes("wh_focal") || (role.includes("focal") && role.includes("warehouse"))) {
+      return "Warehouse Focal";
+    }
+    if (role === "warehouse_storekeeper" || role.includes("storekeeper")) {
+      return "Warehouse Storekeeper";
+    }
+    if (role === "driver" || role.includes("driver")) {
+      return "Driver";
+    }
+    if (role.includes("alternate") && (role.includes("lswd") || role.includes("social"))) {
+      return "Alternate LSWDO";
+    }
+    if (role.includes("alternate") && (role.includes("ldrrm") || role.includes("drrm"))) {
+      return "Alternate LDRRMO";
+    }
+
+    return null;
+  };
+  const lguPersonnelRoleLabel = isLguAccess ? formatLguPersonnelRoleLabel() : null;
   const scrollToPageSection = (href, sectionId) => {
-    const scroll = () => {
-      document
-        .getElementById(sectionId)
-        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (href === "/preparedness-for-response") {
       window.history.replaceState(null, "", `#${sectionId}`);
+      setCurrentHash(`#${sectionId}`);
+      window.dispatchEvent(new CustomEvent("preparedness:navigate", {
+        detail: { pageKey: sectionId },
+      }));
+      return;
+    }
+
+    const scroll = (attempt = 0) => {
+      const target = document.getElementById(sectionId);
+      if (!target && attempt < 20) {
+        window.setTimeout(() => scroll(attempt + 1), 100);
+        return;
+      }
+      if (!target) return;
+
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      const hash = `#${sectionId}`;
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${hash}`);
+      setCurrentHash(hash);
     };
 
     if (!matchesHref({ href })) {
       router.visit(href, {
         preserveScroll: false,
-        onSuccess: () => window.setTimeout(scroll, 150),
+        onSuccess: () => window.setTimeout(() => scroll(), 50),
       });
       return;
     }
@@ -1505,15 +1849,31 @@ export default function AppLayout({ title, children }) {
   const renderNavItem = (item, groupKey = "main") => {
     const Icon = item.icon;
     const active = activeHref === item.href;
-    const configuredPageTree = item.href === "/" && hasBlankPrimaryDashboard
+    const treeLookupPath = String(item.href || "").split("?")[0];
+    let configuredPageTree = item.href === "/" && hasBlankPrimaryDashboard
       ? null
-      : (pageTrees[item.href] ?? null);
+      : (pageTrees[treeLookupPath] ?? (Array.isArray(item.matchHrefs)
+        ? item.matchHrefs.map((href) => pageTrees[String(href).split("?")[0]]).find(Boolean)
+        : null) ?? null);
+    if (item.href === "/preparedness-for-response" && currentUrl === "/preparedness-for-response") {
+      configuredPageTree = null;
+    }
+    if (item.href === "/preparedness-for-response" && configuredPageTree) {
+      configuredPageTree = configuredPageTree.map((section) => section.id === "actions-taken-title"
+        ? { ...section, children: preparednessActionPages.map((page, index) => ({ id: `actions-taken-${page.id}`, label: `${25 + index}  Actions Taken ${index + 1}` })) }
+        : section.id === "thank-you"
+          ? { ...section, label: `${25 + preparednessActionPages.length}  Closing Page` }
+          : section);
+    }
     const pageTree = configuredPageTree?.filter(
       (section) => !section.roles || section.roles.some((role) => auth.user?.roles?.includes(role)),
     );
     const treeKey = `${groupKey}:${item.href}`;
-    const pageTreeOpen = Boolean(openPageTrees[treeKey]);
-    const forceDocumentNavigation = item.href === "/ocd/alerts";
+    const pageTreeOpen = openPageTrees[treeKey] ?? active;
+    // Monitoring may be opened from a long-lived installed PWA shell. Use a full
+    // document navigation so a newly deployed page cannot be swallowed by stale
+    // Inertia component state or an open notification overlay.
+    const forceDocumentNavigation = ["/ocd/alerts", "/delivery-monitoring"].includes(item.href);
     const NavLink = forceDocumentNavigation ? "a" : Link;
 
     return (
@@ -1556,7 +1916,10 @@ export default function AppLayout({ title, children }) {
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                setOpenPageTrees((current) => ({ ...current, [treeKey]: !current[treeKey] }));
+                setOpenPageTrees((current) => ({
+                  ...current,
+                  [treeKey]: !(current[treeKey] ?? active),
+                }));
               }}
               data-tip={pageTreeOpen ? undefined : `Open ${item.label} submenu`}
               data-tip-side="left"
@@ -1570,9 +1933,26 @@ export default function AppLayout({ title, children }) {
           <div className="relative z-20 ml-7 mt-2 space-y-1 rounded-r-xl border-l-2 border-brand-300/70 bg-gradient-to-br from-white via-brand-50/40 to-emerald-50/30 pb-2 pl-4 pr-1 pt-1 shadow-sm dark:border-brand-400/30 dark:from-zinc-950 dark:via-brand-950/20 dark:to-zinc-950">
             {pageTree.map((section) => {
               const sectionHref = section.href;
-              const sectionActive = sectionHref
-                ? currentUrl === sectionHref || currentUrl.startsWith(`${sectionHref}/`)
-                : false;
+              const sectionChildren = section.children ?? [];
+              const sectionTreeKey = `${treeKey}:${section.id}`;
+              const childActive = sectionChildren.some((child) => currentHash === `#${child.id}`);
+              const sectionOpen = openPageSections[sectionTreeKey] ?? childActive;
+              const sectionActive = childActive || (sectionHref
+                ? (() => {
+                    const [sectionPath, sectionQuery = ""] = String(sectionHref).split("?");
+                    if (!(section.exact ? currentUrl === sectionPath : pathMatches(sectionPath))) {
+                      return false;
+                    }
+                    const wantedTab = new URLSearchParams(sectionQuery).get("tab");
+                    if (!wantedTab) {
+                      return true;
+                    }
+                    const currentTab = new URLSearchParams((currentPageUrl.split("?")[1] || "")).get("tab");
+                    return currentTab === wantedTab;
+                  })()
+                : item.href === "/preparedness-for-response"
+                  ? currentHash === `#${section.id}` || (!currentHash && section.id === "overview")
+                  : false);
               const itemClass = clsx(
                 "group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs font-bold transition",
                 sectionActive
@@ -1590,6 +1970,23 @@ export default function AppLayout({ title, children }) {
                   <span>{section.label}</span>
                 </>
               );
+
+              if (sectionChildren.length) {
+                return (
+                  <div key={section.id} className="space-y-1">
+                    <div className="flex items-center gap-1">
+                      <button type="button" onClick={() => scrollToPageSection(item.href, section.sectionId || section.id)} className={clsx(itemClass, "min-w-0 flex-1")}>{content}</button>
+                      <button type="button" aria-label={sectionOpen ? `Collapse ${section.label}` : `Expand ${section.label}`} onClick={() => setOpenPageSections((current) => ({ ...current, [sectionTreeKey]: !sectionOpen }))} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-white hover:text-brand-700">
+                        {sectionOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                      </button>
+                    </div>
+                    {sectionOpen && <div className="ml-3 space-y-1 border-l border-brand-200 pl-2">{sectionChildren.map((child) => {
+                      const activeChild = currentHash === `#${child.id}`;
+                      return <button key={child.id} type="button" onClick={() => scrollToPageSection(item.href, child.id)} className={clsx("flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[11px] font-semibold transition", activeChild ? "bg-white text-brand-800 shadow-sm" : "text-slate-500 hover:bg-white/80 hover:text-brand-800")}><span className={clsx("h-1 w-1 shrink-0 rounded-full", activeChild ? "bg-brand-600" : "bg-slate-300")} /><span>{child.label}</span></button>;
+                    })}</div>}
+                  </div>
+                );
+              }
 
               return sectionHref ? (
                 <Link key={section.id} href={sectionHref} className={itemClass}>
@@ -1619,7 +2016,12 @@ export default function AppLayout({ title, children }) {
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-brand-50/20 to-emerald-50/30 text-slate-900 dark:from-zinc-950 dark:via-brand-950/10 dark:to-zinc-950 dark:text-zinc-100">
       <CreativePageLoader active={pageLoading} />
       {toast && (
-        <div className="fixed right-4 top-5 z-[200] w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-md border border-slate-200 bg-white shadow-2xl shadow-slate-950/10 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-black/30">
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="fixed right-4 top-5 z-[1200] w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-md border border-slate-200 bg-white shadow-2xl shadow-slate-950/10 dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-black/30"
+        >
           <div
             className={clsx(
               "h-1",
@@ -1669,11 +2071,20 @@ export default function AppLayout({ title, children }) {
           </div>
         </div>
       )}
+      {mobileSidebarOpen && (
+        <button
+          type="button"
+          aria-label="Close navigation menu"
+          onClick={() => setMobileSidebarOpen(false)}
+          className="fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-[2px] md:hidden"
+        />
+      )}
       <aside
         data-app-sidebar
         className={clsx(
-          "fixed inset-y-0 left-0 z-40 isolate max-w-[100vw] overflow-visible border-r border-brand-200/70 bg-gradient-to-b from-white via-brand-50/35 to-emerald-50/40 transition-all duration-200 dark:border-brand-900/50 dark:from-zinc-950 dark:via-brand-950/25 dark:to-zinc-950",
-          sidebarCollapsed ? "w-20" : "w-72",
+          "fixed inset-y-0 left-0 z-[60] isolate w-[min(18rem,calc(100vw-2rem))] max-w-[100vw] overflow-visible border-r border-brand-200 bg-gradient-to-b from-white via-brand-50 to-emerald-50 shadow-2xl transition-all duration-200 md:z-40 md:translate-x-0 md:border-brand-200/70 md:via-brand-50/35 md:to-emerald-50/40 md:shadow-none dark:border-brand-900 dark:from-zinc-950 dark:via-brand-950 dark:to-zinc-950 md:dark:border-brand-900/50 md:dark:via-brand-950/25",
+          mobileSidebarOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full",
+          sidebarCollapsed ? "md:w-20" : "md:w-72",
         )}
       >
         <div
@@ -1691,7 +2102,7 @@ export default function AppLayout({ title, children }) {
           data-tip={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
           data-tip-side="right"
           className={clsx(
-            "dromis-tip absolute top-6 z-[70] flex h-8 w-8 items-center justify-center text-brand-700 transition hover:text-brand-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 dark:text-brand-100 dark:hover:text-white",
+            "dromis-tip absolute top-6 z-[70] hidden h-8 w-8 items-center justify-center text-brand-700 transition hover:text-brand-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 md:flex dark:text-brand-100 dark:hover:text-white",
             sidebarCollapsed ? "-right-2" : "-right-3",
           )}
         >
@@ -1724,7 +2135,7 @@ export default function AppLayout({ title, children }) {
                   className="relative h-11 w-11 rounded-full object-contain shadow-sm ring-2 ring-white dark:ring-zinc-900"
                 />
               </div>
-              <div className={clsx(sidebarCollapsed && "hidden")}>
+              <div className={clsx(sidebarCollapsed && "md:hidden")}>
                 <div className="text-[10px] font-black uppercase tracking-[0.18em] text-brand-700 dark:text-brand-200">
                   {activeRegion?.field_office_label || "DSWD CARAGA"}
                 </div>
@@ -1739,7 +2150,7 @@ export default function AppLayout({ title, children }) {
             <div
               className={clsx(
                 "mt-4 flex items-center gap-3 rounded-xl border border-brand-200/70 bg-gradient-to-br from-white via-brand-50/60 to-emerald-50/40 px-3 py-3 shadow-sm dark:border-brand-800/60 dark:from-zinc-950 dark:via-brand-950/30 dark:to-zinc-900",
-                sidebarCollapsed && "hidden",
+                sidebarCollapsed && "md:hidden",
               )}
             >
               <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white text-brand-700 shadow-sm ring-1 ring-brand-100 dark:bg-zinc-950 dark:text-brand-100 dark:ring-brand-800">
@@ -1773,7 +2184,7 @@ export default function AppLayout({ title, children }) {
                 </p>
                 <p className="mt-0.5 truncate text-xs font-black uppercase tracking-wide text-brand-700 dark:text-brand-100">
                   {isLguAccess
-                    ? (auth.user?.lgu_level || "LGU")
+                    ? [lguWorkspaceLabel, lguPersonnelRoleLabel].filter(Boolean).join(" · ")
                     : isAgencyAccess
                       ? "OCD"
                       : (roleAcronymLabel(auth.user?.roles, auth.user?.office, auth.user?.position) || auth.user?.office || "DSWD")}
@@ -1784,40 +2195,50 @@ export default function AppLayout({ title, children }) {
           <nav className="relative z-10 min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden px-3 py-4">
             {isSuperAdmin ? (
               <>
-                {superAdminAccessGroups.map((group) => {
-                  const GroupIcon = group.icon;
-                  const groupOpen = Boolean(openAccessGroups[group.key]);
-                  const groupItems = group.hrefs
-                    .map((href) => visibleNav.find((item) => item.href === href))
-                    .filter(Boolean);
-
-                  return (
-                    <div key={group.key} className="rounded-xl border border-brand-200/60 bg-white/70 p-1 shadow-sm backdrop-blur-sm dark:border-brand-900/40 dark:bg-zinc-900/50">
-                      <button
-                        type="button"
-                        onClick={() => setOpenAccessGroups((current) => ({ ...current, [group.key]: !current[group.key] }))}
-                        className={clsx(
-                          "flex w-full items-center rounded-lg px-2 py-2 text-left text-sm font-black text-slate-700 transition hover:bg-brand-50 hover:text-brand-800 dark:text-zinc-200 dark:hover:bg-brand-950/40 dark:hover:text-brand-100",
-                          sidebarCollapsed ? "justify-center" : "gap-3",
-                        )}
-                        title={sidebarCollapsed ? group.label : undefined}
-                      >
-                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-white to-brand-50 text-brand-700 shadow-sm ring-1 ring-brand-100 dark:from-zinc-950 dark:to-brand-950 dark:text-brand-100 dark:ring-brand-800">
-                          <GroupIcon className="h-4 w-4" />
-                        </span>
-                        <span className={clsx("min-w-0 flex-1", sidebarCollapsed && "hidden")}>{group.label}</span>
-                        {!sidebarCollapsed && (groupOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />)}
-                      </button>
-                      {groupOpen && !sidebarCollapsed && (
-                        <div className="mt-1 space-y-1 border-l-2 border-brand-200 pl-2 dark:border-brand-300/30">
-                          {groupItems.map((item) => renderNavItem(item, group.key))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-                <div className="my-2 h-px bg-gradient-to-r from-transparent via-brand-300/70 to-transparent dark:via-brand-700/50" />
                 {standaloneSuperAdminNav.map((item) => renderNavItem(item))}
+                <div className="my-2 h-px bg-gradient-to-r from-transparent via-brand-300/70 to-transparent dark:via-brand-700/50" />
+                <div className="rounded-xl border border-brand-200/60 bg-white/70 p-1 shadow-sm backdrop-blur-sm dark:border-brand-900/40 dark:bg-zinc-900/50">
+                  <button
+                    type="button"
+                    onClick={() => setOpenAccessGroups((current) => ({ ...current, userLevels: !current.userLevels }))}
+                    className={clsx(
+                      "flex w-full items-center rounded-lg px-2 py-2 text-left text-sm font-black text-slate-700 transition hover:bg-brand-50 hover:text-brand-800 dark:text-zinc-200 dark:hover:bg-brand-950/40 dark:hover:text-brand-100",
+                      sidebarCollapsed ? "justify-center" : "gap-3",
+                    )}
+                    title={sidebarCollapsed ? "User Level Pages" : undefined}
+                  >
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-white to-brand-50 text-brand-700 shadow-sm ring-1 ring-brand-100 dark:from-zinc-950 dark:to-brand-950 dark:text-brand-100 dark:ring-brand-800">
+                      <UsersRound className="h-4 w-4" />
+                    </span>
+                    <span className={clsx("min-w-0 flex-1", sidebarCollapsed && "hidden")}>User Level Pages</span>
+                    {!sidebarCollapsed && (openAccessGroups.userLevels ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />)}
+                  </button>
+                  {openAccessGroups.userLevels && !sidebarCollapsed && (
+                    <div className="mt-1 border-l-2 border-brand-200 pl-2 dark:border-brand-300/30">
+                      <p className="px-2 pb-1 pt-2 text-[10px] font-black uppercase tracking-wide text-slate-400">Navigate as user level</p>
+                      <div className="grid gap-1 px-1 pb-2">
+                        {superAdminAccessGroups.map((group) => (
+                          <button
+                            key={group.key}
+                            type="button"
+                            onClick={() => setSelectedAccessGroupKey(group.key)}
+                            className={clsx(
+                              "rounded-md px-2 py-1.5 text-left text-xs font-bold transition",
+                              selectedAccessGroup.key === group.key
+                                ? "bg-brand-700 text-white shadow-sm"
+                                : "text-slate-600 hover:bg-brand-50 hover:text-brand-800 dark:text-zinc-300 dark:hover:bg-brand-950/40",
+                            )}
+                          >
+                            {group.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="space-y-1 border-t border-brand-100 pt-2 dark:border-brand-900/50">
+                        {selectedAccessGroupItems.map((item) => renderNavItem(item, `user-level-${selectedAccessGroup.key}`))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </>
             ) : (
               visibleNav.map((item) => renderNavItem(item))
@@ -1826,7 +2247,7 @@ export default function AppLayout({ title, children }) {
           <div
             className={clsx(
               "relative shrink-0 overflow-hidden border-t border-brand-200/60 bg-gradient-to-r from-white via-brand-50/50 to-emerald-50/40 px-3 py-3 text-center text-[10px] leading-tight text-slate-500 dark:border-brand-900/40 dark:from-zinc-950 dark:via-brand-950/20 dark:to-zinc-950 dark:text-zinc-400",
-              sidebarCollapsed && "hidden",
+              sidebarCollapsed && "md:hidden",
             )}
           >
             <p>
@@ -1835,7 +2256,7 @@ export default function AppLayout({ title, children }) {
               All Rights Reserved
             </p>
             <p className="mt-1 font-semibold text-slate-600 dark:text-zinc-300">
-              Developer: Roger L. Ongue, PDO II
+              Developer: Roger L. Ongue, Computer Programmer I / DRIMS Head
             </p>
           </div>
         </div>
@@ -1844,14 +2265,14 @@ export default function AppLayout({ title, children }) {
       <div
         className={clsx(
           "min-w-0 transition-all duration-200",
-          sidebarCollapsed ? "ml-20" : "ml-72",
+          sidebarCollapsed ? "md:ml-20" : "md:ml-72",
         )}
       >
         <header
           data-app-header
           className={clsx(
-            "fixed right-0 top-0 z-40 overflow-visible border-b border-brand-200/70 bg-gradient-to-r from-white via-brand-50/40 to-emerald-50/30 px-4 py-3 backdrop-blur-xl transition-all duration-200 dark:border-brand-900/40 dark:from-zinc-950 dark:via-brand-950/20 dark:to-zinc-950",
-            sidebarCollapsed ? "left-20" : "left-72",
+            "fixed left-0 right-0 top-0 z-40 overflow-visible border-b border-brand-200/70 bg-gradient-to-r from-white via-brand-50/40 to-emerald-50/30 px-3 py-2 backdrop-blur-xl transition-all duration-200 md:px-4 md:py-3 dark:border-brand-900/40 dark:from-zinc-950 dark:via-brand-950/20 dark:to-zinc-950",
+            sidebarCollapsed ? "md:left-20" : "md:left-72",
           )}
         >
           <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
@@ -1861,8 +2282,19 @@ export default function AppLayout({ title, children }) {
               <span className="shell-accent-sweep absolute inset-y-0 left-0 w-1/4 bg-gradient-to-r from-transparent via-brand-500/80 to-transparent dark:via-brand-300/70" />
             </div>
           </div>
-          <div className="relative z-10 flex items-center justify-between gap-4">
-            <div className="flex h-16 shrink-0 items-center gap-3 bg-transparent">
+          <div className="relative z-10 flex min-w-0 items-center justify-between gap-2 md:gap-4">
+            <button
+              type="button"
+              onClick={() => {
+                setSidebarCollapsed(false);
+                setMobileSidebarOpen(true);
+              }}
+              aria-label="Open navigation menu"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-brand-200 bg-white/80 text-brand-700 shadow-sm md:hidden dark:border-brand-800 dark:bg-zinc-900 dark:text-brand-100"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <div className="hidden h-16 shrink-0 items-center gap-3 bg-transparent xl:flex">
               <span className="relative block h-12 w-[122px] shrink-0 rounded-lg bg-white/50 p-1 ring-1 ring-brand-100/80 dark:bg-zinc-900/40 dark:ring-brand-900/50">
                 <img
                   src="/images/dswd_logo_3.png"
@@ -1889,25 +2321,28 @@ export default function AppLayout({ title, children }) {
               </span>
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-[10px] font-black uppercase tracking-[0.18em] text-brand-700/80 dark:text-brand-200/80">
+              <p className="hidden text-[10px] font-black uppercase tracking-[0.18em] text-brand-700/80 sm:block dark:text-brand-200/80">
                 Current workspace
               </p>
-              <h1 className="mt-0.5 flex items-center gap-3 text-xl font-bold leading-tight text-slate-950 dark:text-white">
-                <span className="flex h-10 w-10 items-center justify-center rounded-xl border border-brand-200/80 bg-gradient-to-br from-white to-brand-50 text-brand-700 shadow-sm dark:border-brand-800 dark:from-zinc-900 dark:to-brand-950 dark:text-brand-100">
+              <h1 className="mt-0.5 flex min-w-0 items-center gap-2 text-base font-bold leading-tight text-slate-950 sm:text-lg md:gap-3 md:text-xl dark:text-white">
+                <span className="hidden h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-brand-200/80 bg-gradient-to-br from-white to-brand-50 text-brand-700 shadow-sm sm:flex dark:border-brand-800 dark:from-zinc-900 dark:to-brand-950 dark:text-brand-100">
                   <HeaderIcon className="h-5 w-5" />
                 </span>
                 <span className="truncate">{title}</span>
               </h1>
-              <p className="text-xs text-slate-500 dark:text-zinc-400">
-                {(isLguAccess
-                  ? (auth.user?.lgu_level || "LGU")
-                  : isAgencyAccess
-                    ? "OCD"
-                    : (roleAcronymLabel(auth.user?.roles, auth.user?.office, auth.user?.position) || auth.user?.office || "DSWD"))
-                } · {auth.user?.name}
+              <p className="hidden truncate text-xs text-slate-500 sm:block dark:text-zinc-400">
+                {[
+                  (isLguAccess
+                    ? lguWorkspaceLabel
+                    : isAgencyAccess
+                      ? "OCD"
+                      : (roleAcronymLabel(auth.user?.roles, auth.user?.office, auth.user?.position) || auth.user?.office || "DSWD")),
+                  auth.user?.name,
+                  isLguAccess ? lguPersonnelRoleLabel : null,
+                ].filter(Boolean).join(" · ")}
               </p>
             </div>
-            <div className="relative z-20 flex items-center gap-2 overflow-visible">
+            <div className="relative z-20 flex shrink-0 items-center gap-1 overflow-visible sm:gap-2">
               {isRrosLevel && (
                 <button
                   type="button"
@@ -1919,7 +2354,7 @@ export default function AppLayout({ title, children }) {
                       onFinish: () => setWitSyncing(false),
                     });
                   }}
-                  className="inline-flex h-10 items-center gap-2 rounded-xl border border-brand-200 bg-brand-700 px-3 text-xs font-black text-white shadow-sm transition hover:bg-brand-800 disabled:opacity-60 dark:border-brand-700 dark:bg-brand-600 dark:hover:bg-brand-500"
+                  className="hidden h-10 items-center gap-2 rounded-xl border border-brand-200 bg-brand-700 px-3 text-xs font-black text-white shadow-sm transition hover:bg-brand-800 disabled:opacity-60 lg:inline-flex dark:border-brand-700 dark:bg-brand-600 dark:hover:bg-brand-500"
                 >
                   <RefreshCw className={clsx("h-4 w-4", witSyncing && "animate-spin")} />
                   <span className="hidden xl:inline">Sync WIT</span>
@@ -1933,7 +2368,7 @@ export default function AppLayout({ title, children }) {
                 data-tip-align="right"
                 data-tip-preferred-side="bottom"
                 data-tip-locked="true"
-                className={clsx(shellActionClass, "border-emerald-200 text-brand-700 dark:border-brand-800")}
+                className={clsx(shellActionClass, "hidden border-emerald-200 text-brand-700 lg:inline-flex dark:border-brand-800")}
                 aria-label={isLguAccess ? "Open LGU profile" : isAgencyAccess ? "Open Agency Profile" : "Open employee profile"}
               >
                 <IdCard className="h-4 w-4" />
@@ -1997,7 +2432,7 @@ export default function AppLayout({ title, children }) {
                   data-tip="DROMIS Messages"
                   data-tip-side="bottom"
                   data-tip-align="right"
-                  className={clsx(shellActionClass, "relative")}
+                  className={clsx(shellActionClass, "relative hidden lg:inline-flex")}
                 >
                   <MessageCircle className="h-4 w-4" />
                   {(messageCenter?.unread_count ?? 0) > 0 && (
@@ -2025,7 +2460,7 @@ export default function AppLayout({ title, children }) {
                 data-tip={dark ? "Use light mode" : "Use dark mode"}
                 data-tip-side="bottom"
                 data-tip-align="right"
-                className={shellActionClass}
+                className={clsx(shellActionClass, "hidden lg:inline-flex")}
               >
                 {dark ? (
                   <Sun className="h-4 w-4" />
@@ -2033,9 +2468,53 @@ export default function AppLayout({ title, children }) {
                   <Moon className="h-4 w-4" />
                 )}
               </button>
+              <div className="relative lg:hidden">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCompactActionsOpen((open) => !open);
+                    setNotificationsOpen(false);
+                  }}
+                  aria-label="More workspace actions"
+                  className={shellActionClass}
+                >
+                  <MoreHorizontal className="h-5 w-5" />
+                </button>
+                {compactActionsOpen && (
+                  <div className="absolute right-0 top-12 z-[90] w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
+                    {isRrosLevel && (
+                      <button
+                        type="button"
+                        disabled={witSyncing}
+                        onClick={() => {
+                          setCompactActionsOpen(false);
+                          setWitSyncing(true);
+                          router.post("/wit/sync", {}, { preserveScroll: true, onFinish: () => setWitSyncing(false) });
+                        }}
+                        className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-bold hover:bg-slate-100 disabled:opacity-60 dark:hover:bg-zinc-900"
+                      >
+                        <RefreshCw className={clsx("h-4 w-4", witSyncing && "animate-spin")} /> Sync WIT inventory
+                      </button>
+                    )}
+                    <button type="button" onClick={() => { setCompactActionsOpen(false); setProfileOpen(true); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-bold hover:bg-slate-100 dark:hover:bg-zinc-900">
+                      <IdCard className="h-4 w-4" /> Account profile
+                    </button>
+                    <button type="button" onClick={() => { setCompactActionsOpen(false); setMessageCenterOpen(true); }} className="flex w-full items-center justify-between gap-3 rounded-xl px-3 py-3 text-left text-sm font-bold hover:bg-slate-100 dark:hover:bg-zinc-900">
+                      <span className="flex items-center gap-3"><MessageCircle className="h-4 w-4" /> DROMIS Messages</span>
+                      {(messageCenter?.unread_count ?? 0) > 0 && <span className="rounded-full bg-sky-600 px-2 py-0.5 text-[10px] text-white">{messageCenter.unread_count}</span>}
+                    </button>
+                    <button type="button" onClick={() => { setCompactActionsOpen(false); toggleTheme(); }} className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-bold hover:bg-slate-100 dark:hover:bg-zinc-900">
+                      {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />} {dark ? "Use light mode" : "Use dark mode"}
+                    </button>
+                  </div>
+                )}
+              </div>
               <button
                 type="button"
-                onClick={() => router.post("/logout")}
+                onClick={() => router.post("/logout", {}, {
+                  preserveScroll: false,
+                  onSuccess: () => window.location.replace("/login"),
+                })}
                 aria-label="Sign out"
                 data-tip="Sign out"
                 data-tip-side="bottom"
@@ -2047,7 +2526,7 @@ export default function AppLayout({ title, children }) {
             </div>
           </div>
         </header>
-        <main className="min-w-0 overflow-x-hidden px-4 pb-6 pt-28">
+        <main className="min-w-0 overflow-x-hidden px-2 pb-[calc(6rem+env(safe-area-inset-bottom))] pt-20 sm:px-3 md:px-4 md:pt-28">
           {flash?.success && (
             <div className="mb-4 rounded-md border border-brand-100 bg-brand-50 px-4 py-3 text-sm text-brand-700 dark:border-brand-800 dark:bg-brand-950/50 dark:text-brand-100">
               {flash.success}
@@ -2347,7 +2826,7 @@ function AiRogerWidget({ open, onToggle, messages, draft, setDraft, thinking, on
   }, [messages, open]);
 
   return (
-    <div className="fixed bottom-5 right-5 z-40">
+    <div className="fixed bottom-[calc(.75rem+env(safe-area-inset-bottom))] right-3 z-40 sm:bottom-5 sm:right-5">
       {open && (
         <div className="mb-3 flex h-[min(38rem,calc(100vh-7rem))] w-[min(26rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
           <div className="flex items-start justify-between border-b border-slate-200 bg-gradient-to-r from-brand-700 to-emerald-700 p-4 text-white dark:border-zinc-800">
@@ -2423,7 +2902,7 @@ function AiRogerWidget({ open, onToggle, messages, draft, setDraft, thinking, on
           "group relative ml-auto flex items-center gap-3 overflow-hidden rounded-full text-white shadow-2xl ring-4 ring-white transition hover:-translate-y-0.5 hover:scale-[1.02] dark:ring-zinc-950",
           open
             ? "h-14 w-14 justify-center bg-brand-800 shadow-brand-900/30"
-            : "min-h-14 bg-gradient-to-r from-emerald-700 via-brand-700 to-sky-700 px-4 pr-5 shadow-brand-900/30",
+            : "h-14 w-14 justify-center bg-gradient-to-r from-emerald-700 via-brand-700 to-sky-700 shadow-brand-900/30 2xl:min-h-14 2xl:w-auto 2xl:px-4 2xl:pr-5",
         )}
         title={open ? "Close AI Roger" : "Open AI Roger"}
       >
@@ -2438,7 +2917,7 @@ function AiRogerWidget({ open, onToggle, messages, draft, setDraft, thinking, on
           {!open && <span className="absolute -right-0.5 -top-0.5 h-3 w-3 animate-ping rounded-full bg-cyan-200 opacity-70" />}
         </span>
         {!open && (
-          <span className="relative hidden text-left sm:block">
+          <span className="relative hidden text-left 2xl:block">
             <span className="flex items-center gap-1 text-sm font-black leading-tight">
               Ask AI Roger
               <Sparkles className="h-3.5 w-3.5 text-cyan-100" />
@@ -2455,6 +2934,13 @@ function EmployeeProfileModal({ user, onClose }) {
   const roles = user?.roles?.length ? user.roles.join(", ") : "-";
   const lguProfile = user?.lgu_profile || null;
   const isLguProfile = Boolean(lguProfile);
+  const canEditLguProfile = Boolean(lguProfile?.can_edit);
+  const lguEditScope = lguProfile?.scope || (canEditLguProfile ? "full" : "none");
+  const isFullLguEditor = lguEditScope === "full";
+  const isSelfLguEditor = lguEditScope === "self";
+  const linkedLguIdentity = lguProfile?.linked || null;
+  const flash = usePage().props?.flash || {};
+  const issuedLguCredentials = Array.isArray(flash.lgu_issued_credentials) ? flash.lgu_issued_credentials : [];
   const identity = user?.identity_profile || {};
   const identityData = identity?.data || {};
   const identitySource = identity?.source || "Caraga Connect SSO";
@@ -2621,13 +3107,129 @@ function EmployeeProfileModal({ user, onClose }) {
         name: lguLswdAlternate?.name || "",
         position: lguLswdAlternate?.position || "",
         contact_number: lguLswdAlternate?.phone || "",
+        id_number: lguLswdAlternate?.id_number || "",
       }];
+  const emptyLguStaffRow = () => ({
+    office: lguProfile?.name || user?.lgu_name || "",
+    name: "",
+    position: "",
+    id_number: "",
+    contact_number: "",
+    email: "",
+    login_username: "",
+    login_password: "",
+    link_user_id: null,
+    linked_from: "",
+  });
+  const lguLinkablePersonnel = Array.isArray(lguProfile?.linkable_personnel) ? lguProfile.linkable_personnel : [];
+  const resolveLinkedSelfDefaults = () => {
+    const linked = linkedLguIdentity;
+    if (!linked) {
+      return {
+        self_name: user?.name || "",
+        self_position: user?.position || "",
+        self_id_number: user?.id_number || "",
+        self_contact_number: user?.contact_number || user?.mobile_no || "",
+        self_email: user?.email || "",
+        self_office: lguProfile?.name || user?.lgu_name || "",
+        login_password: "",
+        login_password_confirmation: "",
+      };
+    }
+
+    if (linked.type === "staff") {
+      const pool = [
+        ...(lguProfile?.dromic_encoders || []),
+        ...(lguProfile?.warehouse_focals || []),
+        ...(lguProfile?.warehouse_storekeepers || []),
+        ...(lguProfile?.drivers || []),
+      ];
+      const member = pool.find((row) => Number(row.id) === Number(linked.id)) || {};
+      return {
+        self_name: member.name || user?.name || "",
+        self_position: member.position || "",
+        self_id_number: member.id_number || "",
+        self_contact_number: member.contact_number || "",
+        self_email: member.email || user?.email || "",
+        self_office: member.office || lguProfile?.name || "",
+        login_password: "",
+        login_password_confirmation: "",
+      };
+    }
+
+    if (linked.type === "lswdo_alternate") {
+      const alternate = (lguProfile?.lswdo_alternates || []).find((row) => Number(row.id) === Number(linked.id)) || {};
+      return {
+        self_name: alternate.name || user?.name || "",
+        self_position: alternate.position || "",
+        self_id_number: alternate.id_number || "",
+        self_contact_number: alternate.contact_number || "",
+        self_email: alternate.email || user?.email || "",
+        self_office: lguProfile?.name || "",
+        login_password: "",
+        login_password_confirmation: "",
+      };
+    }
+
+    if (linked.type === "ldrrmo_officer") {
+      const officer = (lguProfile?.ldrrmo?.officers || []).find((row) => Number(row.id) === Number(linked.id)) || {};
+      return {
+        self_name: officer.name || user?.name || "",
+        self_position: officer.designation || "",
+        self_id_number: officer.id_number || "",
+        self_contact_number: officer.mobile_number || "",
+        self_email: officer.email_address || user?.email || "",
+        self_office: officer.office || lguProfile?.name || "",
+        login_password: "",
+        login_password_confirmation: "",
+      };
+    }
+
+    const roleKey = linked.role === "lce"
+      ? "lce"
+      : linked.role === "lswd_officer"
+        ? "lswd_officer"
+        : linked.role === "lswd_officer_alternate"
+          ? "lswd_officer_alternate"
+          : null;
+    const official = roleKey ? (lguProfile?.officials?.[roleKey] || {}) : {};
+    return {
+      self_name: official.name || user?.name || "",
+      self_position: official.position || "",
+      self_id_number: official.id_number || "",
+      self_contact_number: official.phone || "",
+      self_email: official.email || user?.email || "",
+      self_office: lguProfile?.name || "",
+      login_password: "",
+      login_password_confirmation: "",
+    };
+  };
+  const withLinkMeta = (rows) => rows.map((row) => ({
+    ...row,
+    link_user_id: row.link_user_id ?? row.user_id ?? null,
+    linked_from: row.linked_from || "",
+    login_password: row.login_password || "",
+  }));
+  const lguDromicEncoders = Array.isArray(lguProfile?.dromic_encoders) && lguProfile.dromic_encoders.length
+    ? withLinkMeta(lguProfile.dromic_encoders)
+    : [emptyLguStaffRow()];
+  const lguWarehouseFocals = Array.isArray(lguProfile?.warehouse_focals) && lguProfile.warehouse_focals.length
+    ? withLinkMeta(lguProfile.warehouse_focals)
+    : [emptyLguStaffRow()];
+  const lguWarehouseStorekeepers = Array.isArray(lguProfile?.warehouse_storekeepers) && lguProfile.warehouse_storekeepers.length
+    ? withLinkMeta(lguProfile.warehouse_storekeepers)
+    : [emptyLguStaffRow()];
+  const lguHasWarehouses = Boolean(lguProfile?.has_warehouses);
+  const lguDrivers = Array.isArray(lguProfile?.drivers) && lguProfile.drivers.length
+    ? withLinkMeta(lguProfile.drivers)
+    : [emptyLguStaffRow()];
   const lguLdrrmo = lguProfile?.ldrrmo || {};
   const lguLdrrmoOfficers = Array.isArray(lguLdrrmo?.officers) && lguLdrrmo.officers.length
     ? [...lguLdrrmo.officers].sort((left, right) => Number(Boolean(right.is_primary)) - Number(Boolean(left.is_primary)))
     : [{
         name: lguLdrrmo?.name || "",
         designation: lguLdrrmo?.position || "",
+        id_number: lguLdrrmo?.id_number || "",
         mobile_number: lguLdrrmo?.contact || "",
         email_address: lguLdrrmo?.email || "",
         facebook: lguLdrrmo?.facebook || "",
@@ -2645,19 +3247,30 @@ function EmployeeProfileModal({ user, onClose }) {
   const [lguLogoPreview, setLguLogoPreview] = useState(null);
   const [ldrrmcLogoPreview, setLdrrmcLogoPreview] = useState(null);
   const [lguPhotoPreviews, setLguPhotoPreviews] = useState({});
+  useEffect(() => {
+    if (!canEditLguProfile) {
+      setEditingLguProfile(false);
+    }
+  }, [canEditLguProfile]);
   const lguProfileForm = useForm({
     lgu_name: lguProfile?.name || user?.lgu_name || user?.name || "",
     province_name: lguProfile?.province_name || "",
     managed_district_name: lguProfile?.managed_district_name || "",
     lce_name: lguChief?.name || "",
     lce_position: lguChief?.position || "",
+    lce_id_number: lguChief?.id_number || "",
     lce_email: lguChief?.email || "",
     lce_phone: lguChief?.phone || "",
+    lce_login_username: lguChief?.login_username || "",
+    lce_login_password: "",
     lswd_name: lguLswd?.name || "",
     lswd_position: lguLswd?.position || "",
+    lswd_id_number: lguLswd?.id_number || "",
     lswd_email: lguLswd?.email || "",
     lswd_phone: lguLswd?.phone || "",
     lswd_facebook: lguLswd?.facebook || "",
+    lswd_login_username: lguLswd?.login_username || "",
+    lswd_login_password: "",
     lswd_alt_name: lguLswdAlternate?.name || "",
     lswd_alt_position: lguLswdAlternate?.position || "",
     lswd_alt_email: lguLswd?.alternate_email || "",
@@ -2670,11 +3283,16 @@ function EmployeeProfileModal({ user, onClose }) {
     ldrrmo_facebook: lguLdrrmo?.facebook || "",
     ldrrmo_vhf: lguLdrrmo?.vhf || "",
     ldrrmo_officers: lguLdrrmoOfficers,
+    dromic_encoders: lguDromicEncoders,
+    warehouse_focals: lguWarehouseFocals,
+    warehouse_storekeepers: lguWarehouseStorekeepers,
+    drivers: lguDrivers,
     logo: null,
     ldrrmc_logo: null,
     lce_photo: null,
     lswd_photo: null,
     ldrrmo_photo: null,
+    ...resolveLinkedSelfDefaults(),
   });
   useEffect(() => () => {
     if (lguLogoPreview) {
@@ -2721,6 +3339,62 @@ function EmployeeProfileModal({ user, onClose }) {
     alternates[index] = { ...alternates[index], [key]: value };
     lguProfileForm.setData("lswdo_alternates", alternates);
   };
+  const updateLguStaffMember = (field, index, key, value) => {
+    const rows = [...(lguProfileForm.data[field] || [])];
+    rows[index] = { ...rows[index], [key]: value };
+    lguProfileForm.setData(field, rows);
+  };
+  const applyLinkedLguPersonnel = (field, memberIndex, personKey) => {
+    const person = lguLinkablePersonnel.find((row) => row.key === personKey);
+    const rows = [...(lguProfileForm.data[field] || [])];
+    if (!person) {
+      rows[memberIndex] = {
+        ...rows[memberIndex],
+        linked_from: "",
+        link_user_id: null,
+      };
+      lguProfileForm.setData(field, rows);
+      return;
+    }
+
+    const defaultPosition = field === "warehouse_focals"
+      ? "Warehouse Focal"
+      : field === "warehouse_storekeepers"
+        ? "Warehouse Storekeeper"
+        : (person.position || "");
+
+    rows[memberIndex] = {
+      ...rows[memberIndex],
+      linked_from: person.key,
+      link_user_id: person.user_id || null,
+      name: person.name || "",
+      office: person.office || rows[memberIndex].office || lguProfileForm.data.lgu_name || "",
+      position: person.position || defaultPosition,
+      id_number: person.id_number || "",
+      contact_number: person.contact_number || "",
+      email: person.email || "",
+      login_username: person.login_username || "",
+      login_password: "",
+    };
+    lguProfileForm.setData(field, rows);
+  };
+  const addLguStaffMember = (field) => {
+    lguProfileForm.setData(field, [
+      ...(lguProfileForm.data[field] || []),
+      {
+        office: lguProfileForm.data.lgu_name || "",
+        name: "",
+        position: "",
+        id_number: "",
+        contact_number: "",
+        email: "",
+        login_username: "",
+        login_password: "",
+        link_user_id: null,
+        linked_from: "",
+      },
+    ]);
+  };
   const handleLguPhotoChange = (field, event) => {
     const file = event.target.files?.[0] || null;
     lguProfileForm.setData(field, file);
@@ -2735,8 +3409,20 @@ function EmployeeProfileModal({ user, onClose }) {
   };
   const submitLguProfile = (event) => {
     event.preventDefault();
-    lguProfileForm.post("/lgu/profile", {
-      forceFormData: true,
+    const payload = isSelfLguEditor
+      ? {
+          self_name: lguProfileForm.data.self_name,
+          self_position: lguProfileForm.data.self_position,
+          self_id_number: lguProfileForm.data.self_id_number,
+          self_contact_number: lguProfileForm.data.self_contact_number,
+          self_email: lguProfileForm.data.self_email,
+          self_office: lguProfileForm.data.self_office,
+          login_password: lguProfileForm.data.login_password,
+          login_password_confirmation: lguProfileForm.data.login_password_confirmation,
+        }
+      : undefined;
+    lguProfileForm.transform((data) => (payload ? payload : data)).post("/lgu/profile", {
+      forceFormData: !isSelfLguEditor,
       preserveScroll: true,
       onSuccess: () => {
         setEditingLguProfile(false);
@@ -2747,9 +3433,14 @@ function EmployeeProfileModal({ user, onClose }) {
         lguProfileForm.setData("lce_photo", null);
         lguProfileForm.setData("lswd_photo", null);
         lguProfileForm.setData("ldrrmo_photo", null);
+        lguProfileForm.setData("lce_login_password", "");
+        lguProfileForm.setData("lswd_login_password", "");
+        lguProfileForm.setData("login_password", "");
+        lguProfileForm.setData("login_password_confirmation", "");
         setLguPhotoPreviews({});
         router.reload({ only: ["auth", "flash"], preserveScroll: true });
       },
+      onFinish: () => lguProfileForm.transform((data) => data),
     });
   };
   const lguInfoFields = [
@@ -2794,14 +3485,26 @@ function EmployeeProfileModal({ user, onClose }) {
       </label>
     );
   };
-  const renderLguInput = (label, name, type = "text") => (
-    <label key={name} className="block text-xs font-black uppercase tracking-wide text-slate-500 dark:text-zinc-400">
+  const renderLguFieldLabel = (label, required = false) => (
+    <>
       {label}
+      {required ? (
+        <span className="text-rose-600" aria-hidden="true"> *</span>
+      ) : (
+        <span className="ml-1 font-normal normal-case tracking-normal text-slate-400">(optional)</span>
+      )}
+    </>
+  );
+  const renderLguInput = (label, name, type = "text", required = false) => (
+    <label key={name} className="block text-xs font-black uppercase tracking-wide text-slate-500 dark:text-zinc-400">
+      {renderLguFieldLabel(label, required)}
       <input
         type={type}
+        required={required}
         value={lguProfileForm.data[name] || ""}
         onChange={(event) => lguProfileForm.setData(name, event.target.value)}
         className="mt-1 w-full text-sm normal-case tracking-normal"
+        autoComplete={type === "password" ? "new-password" : undefined}
       />
       {lguProfileForm.errors[name] && (
         <span className="mt-1 block text-xs font-bold normal-case text-red-600 dark:text-red-400">
@@ -2809,6 +3512,39 @@ function EmployeeProfileModal({ user, onClose }) {
         </span>
       )}
     </label>
+  );
+  const renderLoginCredentialPair = (usernameName, passwordName, usernameValue, onUsernameChange, onPasswordChange, passwordValue = "") => (
+    <div className="grid gap-3 rounded-md border border-dashed border-emerald-200 bg-emerald-50/70 p-3 sm:grid-cols-2 sm:col-span-2 dark:border-emerald-900 dark:bg-emerald-950/30">
+      <p className="text-[10px] font-black uppercase tracking-wide text-emerald-800 sm:col-span-2 dark:text-emerald-100">
+        Portal login identity
+      </p>
+      <label className="text-xs font-black text-slate-700 dark:text-zinc-200">
+        {renderLguFieldLabel("Login username", false)}
+        <input
+          value={usernameValue || ""}
+          onChange={(event) => onUsernameChange(event.target.value)}
+          className="mt-1 w-full"
+          autoComplete="off"
+        />
+        {lguProfileForm.errors[usernameName] && (
+          <span className="mt-1 block text-xs font-bold normal-case text-red-600">{lguProfileForm.errors[usernameName]}</span>
+        )}
+      </label>
+      <label className="text-xs font-black text-slate-700 dark:text-zinc-200">
+        {renderLguFieldLabel("Set / reset password", false)}
+        <input
+          type="password"
+          value={passwordValue || ""}
+          onChange={(event) => onPasswordChange(event.target.value)}
+          className="mt-1 w-full"
+          autoComplete="new-password"
+          placeholder="Leave blank to keep current"
+        />
+        {lguProfileForm.errors[passwordName] && (
+          <span className="mt-1 block text-xs font-bold normal-case text-red-600">{lguProfileForm.errors[passwordName]}</span>
+        )}
+      </label>
+    </div>
   );
   const renderLguSection = (title, fields) => (
     <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
@@ -2821,7 +3557,7 @@ function EmployeeProfileModal({ user, onClose }) {
       <div className="grid gap-3 md:grid-cols-2">{fields}</div>
     </section>
   );
-  const renderPhotoUpload = (label, field, fallbackUrl) => {
+  const renderPhotoUpload = (label, field, fallbackUrl, required = false) => {
     const previewUrl = lguPhotoPreviews[field] || fallbackUrl;
 
     return (
@@ -2834,7 +3570,7 @@ function EmployeeProfileModal({ user, onClose }) {
           )}
         </span>
         <span className="min-w-0">
-          <span className="block">{label}</span>
+          <span className="block">{renderLguFieldLabel(label, required)}</span>
           <span className="mt-0.5 block text-[10px] font-bold normal-case text-slate-500 dark:text-zinc-400">
             Click to upload or replace photo
           </span>
@@ -2949,7 +3685,7 @@ function EmployeeProfileModal({ user, onClose }) {
   ];
 
   return (
-        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overflow-x-hidden bg-slate-950/50 p-4 py-6 backdrop-blur-sm sm:items-center" role="dialog" aria-modal="true" aria-label="Employee profile">
+        <div className="fixed inset-0 z-[1100] flex items-start justify-center overflow-y-auto overflow-x-hidden bg-slate-950/50 p-4 py-6 backdrop-blur-sm sm:items-center" role="dialog" aria-modal="true" aria-label="Employee profile">
       <div className="flex max-h-[calc(100vh-3rem)] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
         <div className="shrink-0 flex items-start justify-between border-b border-slate-200 bg-slate-50 p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="min-w-0">
@@ -2957,7 +3693,7 @@ function EmployeeProfileModal({ user, onClose }) {
             <h2 className="mt-1 truncate text-xl font-black text-slate-950 dark:text-white">{isLguProfile ? "LGU Profile" : "Employee Profile"}</h2>
           </div>
           <div className="flex items-center gap-2">
-            {isLguProfile && (
+            {isLguProfile && canEditLguProfile && (
               <button
                 type="button"
                 onClick={() => setEditingLguProfile((current) => !current)}
@@ -3017,24 +3753,86 @@ function EmployeeProfileModal({ user, onClose }) {
                   </div>
                 </div>
 
-                {editingLguProfile && (
+                <div className={`rounded-md border p-3 text-sm font-semibold ${canEditLguProfile
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-900 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-100"
+                  : "border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100"
+                }`}
+                >
+                  {isFullLguEditor
+                    ? "Note: As LCE, LSWDO, LDRRMO, or an alternate, you can update the full LGU profile and create individual login usernames for each listed person."
+                    : isSelfLguEditor
+                      ? "Note: You can update only your own details in this LGU profile. Ask LCE / LSWDO / LDRRMO (or an alternate) for changes to other personnel."
+                      : "Note: Only LCE, LSWDO, LDRRMO, and their alternates can maintain the full LGU profile. Operations staff with a linked login can update their own details only."}
+                </div>
+
+                {issuedLguCredentials.length > 0 && (
+                  <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-950 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-100">
+                    <p className="font-black uppercase tracking-wide text-xs">Issued / updated login credentials</p>
+                    <ul className="mt-2 space-y-1 text-xs font-semibold">
+                      {issuedLguCredentials.map((entry) => (
+                        <li key={`${entry.username}-${entry.password}`}>
+                          {entry.name}: username <span className="font-black">{entry.username}</span>
+                          {entry.password ? <> · password <span className="font-black">{entry.password}</span></> : null}
+                          {entry.created ? " (new account)" : " (password updated)"}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-2 text-[11px] font-medium opacity-80">Share these securely with the personnel. Temporary passwords are shown only once.</p>
+                  </div>
+                )}
+
+                {editingLguProfile && canEditLguProfile && isSelfLguEditor && (
+                  <form onSubmit={submitLguProfile} className="rounded-lg border border-brand-200 bg-brand-50/60 p-4 shadow-sm dark:border-brand-900 dark:bg-brand-950/30">
+                    <div className="mb-4">
+                      <h3 className="text-base font-black uppercase tracking-wide text-brand-800 dark:text-brand-100">Update my details</h3>
+                      <p className="mt-1 text-xs font-bold text-slate-600 dark:text-zinc-300">
+                        Changes apply only to your linked personnel record on this LGU profile.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {renderLguInput("Full Name", "self_name", "text", true)}
+                      {renderLguInput("Position / Designation", "self_position")}
+                      {renderLguInput("Office ID Number", "self_id_number")}
+                      {renderLguInput("Contact Number", "self_contact_number")}
+                      {renderLguInput("Email", "self_email", "email")}
+                      {renderLguInput("Office", "self_office")}
+                      {renderLguInput("New password", "login_password", "password")}
+                      {renderLguInput("Confirm new password", "login_password_confirmation", "password")}
+                    </div>
+                    <div className="mt-4 flex justify-end">
+                      <button
+                        type="submit"
+                        disabled={lguProfileForm.processing}
+                        className="inline-flex items-center justify-center gap-2 rounded-md bg-brand-700 px-4 py-2 text-xs font-black uppercase tracking-wide text-white shadow-sm transition hover:bg-brand-800 disabled:opacity-60"
+                      >
+                        <Save className="h-4 w-4" />
+                        {lguProfileForm.processing ? "Saving..." : "Save my details"}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {editingLguProfile && canEditLguProfile && isFullLguEditor && (
                   <form onSubmit={submitLguProfile} className="rounded-lg border border-brand-200 bg-brand-50/60 p-4 shadow-sm dark:border-brand-900 dark:bg-brand-950/30">
                     <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div>
                         <h3 className="text-base font-black uppercase tracking-wide text-brand-800 dark:text-brand-100">Update LGU Profile</h3>
                         <p className="mt-1 text-xs font-bold text-slate-600 dark:text-zinc-300">
-                          Upload the official LGU logo and keep LCE, LSWDO, and LDRRMO details ready for generated reports.
+                          Upload the official LGU logo and keep LCE, LSWDO, and LDRRMO details ready for generated reports. Assign a login username per person so they can sign in with their own identity.
+                        </p>
+                        <p className="mt-1 text-[11px] font-semibold text-slate-500 dark:text-zinc-400">
+                          Fields marked with <span className="font-black text-rose-600">*</span> are required. All other fields are optional.
                         </p>
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md bg-brand-700 px-4 py-2 text-xs font-black uppercase tracking-wide text-white shadow-sm transition hover:bg-brand-800">
                           <UploadCloud className="h-4 w-4" />
-                          Upload LGU logo
+                          Upload LGU logo <span className="normal-case tracking-normal opacity-80">(optional)</span>
                           <input type="file" accept="image/*" onChange={handleLguLogoChange} className="sr-only" />
                         </label>
                         <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md bg-sky-700 px-4 py-2 text-xs font-black uppercase tracking-wide text-white shadow-sm transition hover:bg-sky-800">
                           <UploadCloud className="h-4 w-4" />
-                          Upload LDRRMC logo
+                          Upload LDRRMC logo <span className="normal-case tracking-normal opacity-80">(optional)</span>
                           <input type="file" accept="image/*" onChange={handleLdrrmcLogoChange} className="sr-only" />
                         </label>
                       </div>
@@ -3056,40 +3854,69 @@ function EmployeeProfileModal({ user, onClose }) {
                     </div>
                     <div className="space-y-4">
                       {renderLguSection("LGU", [
-                        renderLguInput("Name of LGU", "lgu_name"),
+                        renderLguInput("Name of LGU", "lgu_name", "text", true),
                         renderLguInput("Province", "province_name"),
                         renderLguInput("District", "managed_district_name"),
                       ])}
                       {renderLguSection("LCE", [
                         renderLguInput("LCE Full Name", "lce_name"),
                         renderLguInput("Designation", "lce_position"),
+                        renderLguInput("Office ID Number", "lce_id_number"),
                         renderLguInput("LGU/LCE Office Email Address", "lce_email", "email"),
+                        renderLoginCredentialPair(
+                          "lce_login_username",
+                          "lce_login_password",
+                          lguProfileForm.data.lce_login_username,
+                          (value) => lguProfileForm.setData("lce_login_username", value),
+                          (value) => lguProfileForm.setData("lce_login_password", value),
+                          lguProfileForm.data.lce_login_password,
+                        ),
                       ])}
                       {renderLguSection("LSWDO", [
                         renderLguInput("LSWD Officer", "lswd_name"),
                         renderLguInput("Position", "lswd_position"),
+                        renderLguInput("Office ID Number", "lswd_id_number"),
                         renderLguInput("LSWD Office Email Address", "lswd_email", "email"),
                         renderLguInput("Alternate Email / Copy Furnish", "lswd_alt_email", "email"),
                         renderLguInput("Contact Number", "lswd_phone"),
                         renderLguInput("Facebook Link", "lswd_facebook"),
+                        renderLoginCredentialPair(
+                          "lswd_login_username",
+                          "lswd_login_password",
+                          lguProfileForm.data.lswd_login_username,
+                          (value) => lguProfileForm.setData("lswd_login_username", value),
+                          (value) => lguProfileForm.setData("lswd_login_password", value),
+                          lguProfileForm.data.lswd_login_password,
+                        ),
                         <div key="lswdo-alternates" className="space-y-3 sm:col-span-2">
                           {lguProfileForm.data.lswdo_alternates.map((alternate, alternateIndex) => (
-                            <div key={alternate.id || alternateIndex} className="grid gap-3 rounded-md bg-slate-50 p-3 sm:grid-cols-3 dark:bg-zinc-900">
-                              <p className="text-xs font-black uppercase text-brand-700 sm:col-span-3">Alternate LSWDO {alternateIndex + 1}</p>
+                            <div key={alternate.id || alternateIndex} className="grid gap-3 rounded-md bg-slate-50 p-3 sm:grid-cols-2 lg:grid-cols-4 dark:bg-zinc-900">
+                              <p className="text-xs font-black uppercase text-brand-700 sm:col-span-2 lg:col-span-4">Alternate LSWDO {alternateIndex + 1}</p>
                               {[
-                                ["Full Name", "name"],
-                                ["Position", "position"],
-                                ["Contact Number", "contact_number"],
-                              ].map(([label, key]) => (
+                                ["Full Name", "name", true],
+                                ["Position", "position", false],
+                                ["Office ID Number", "id_number", false],
+                                ["Contact Number", "contact_number", false],
+                                ["Email", "email", false],
+                              ].map(([label, key, required]) => (
                                 <label key={key} className="text-xs font-black text-slate-700 dark:text-zinc-200">
-                                  {label}
+                                  {renderLguFieldLabel(label, required)}
                                   <input
+                                    type={key === "email" ? "email" : "text"}
                                     value={alternate[key] || ""}
                                     onChange={(event) => updateLguLswdoAlternate(alternateIndex, key, event.target.value)}
                                     className="mt-1 w-full"
                                   />
                                 </label>
                               ))}
+                              {renderLoginCredentialPair(
+                                `lswdo_alternates.${alternateIndex}.login_username`,
+                                `lswdo_alternates.${alternateIndex}.login_password`,
+                                alternate.login_username,
+                                (value) => updateLguLswdoAlternate(alternateIndex, "login_username", value),
+                                (value) => updateLguLswdoAlternate(alternateIndex, "login_password", value),
+                                alternate.login_password,
+                              )}
                             </div>
                           ))}
                           <button
@@ -3111,18 +3938,19 @@ function EmployeeProfileModal({ user, onClose }) {
                                 {officerIndex === 0 ? "Main LDRRMO" : `Alternate LDRRMO ${officerIndex}`}
                               </p>
                               {[
-                                ["Office", "office"],
-                                ["Officer", "name"],
-                                ["Designation", "designation"],
-                                ["Mobile Number", "mobile_number"],
-                                ["Hotline Number", "hotline_number"],
-                                ["Landline Number", "landline_number"],
-                                ["Email Address", "email_address"],
-                                ["Alternate Email Address", "alternate_email_address"],
-                                ["Facebook", "facebook"],
-                              ].map(([label, key]) => (
+                                ["Office", "office", false],
+                                ["Officer", "name", true],
+                                ["Designation", "designation", false],
+                                ["Office ID Number", "id_number", false],
+                                ["Mobile Number", "mobile_number", false],
+                                ["Hotline Number", "hotline_number", false],
+                                ["Landline Number", "landline_number", false],
+                                ["Email Address", "email_address", false],
+                                ["Alternate Email Address", "alternate_email_address", false],
+                                ["Facebook", "facebook", false],
+                              ].map(([label, key, required]) => (
                                 <label key={key} className="text-xs font-black text-slate-700 dark:text-zinc-200">
-                                  {label}
+                                  {renderLguFieldLabel(label, required)}
                                   <input
                                     type={key.includes("email") ? "email" : "text"}
                                     value={officer[key] || ""}
@@ -3133,13 +3961,21 @@ function EmployeeProfileModal({ user, onClose }) {
                               ))}
                               {officerIndex === 0 && (
                                 <label className="text-xs font-black text-slate-700 dark:text-zinc-200">
-                                  VHF Radio Frequency
+                                  {renderLguFieldLabel("VHF Radio Frequency", false)}
                                   <input
                                     value={officer.vhf_radio_frequency || ""}
                                     onChange={(event) => updateLguLdrrmoOfficer(officerIndex, "vhf_radio_frequency", event.target.value)}
                                     className="mt-1 w-full"
                                   />
                                 </label>
+                              )}
+                              {renderLoginCredentialPair(
+                                `ldrrmo_officers.${officerIndex}.login_username`,
+                                `ldrrmo_officers.${officerIndex}.login_password`,
+                                officer.login_username,
+                                (value) => updateLguLdrrmoOfficer(officerIndex, "login_username", value),
+                                (value) => updateLguLdrrmoOfficer(officerIndex, "login_password", value),
+                                officer.login_password,
                               )}
                             </div>
                           ))}
@@ -3152,6 +3988,94 @@ function EmployeeProfileModal({ user, onClose }) {
                           </button>
                         </div>
                       </section>
+                      {[
+                        ["dromic_encoders", "DROMIC / SitReport Encoders", "Add DROMIC / SitRep encoder"],
+                        ...(lguHasWarehouses
+                          ? [
+                              ["warehouse_focals", "Warehouse Focals", "Add warehouse focal"],
+                              ["warehouse_storekeepers", "Warehouse Storekeepers", "Add warehouse storekeeper"],
+                            ]
+                          : []),
+                        ["drivers", "Drivers", "Add driver"],
+                      ].map(([field, title, addLabel]) => (
+                        <section key={field} className="rounded-lg border border-slate-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+                          <h4 className="text-xs font-black uppercase tracking-wide text-brand-700 dark:text-brand-100">{title}</h4>
+                          <p className="mt-1 text-xs text-slate-500">
+                            {field === "warehouse_focals" || field === "warehouse_storekeepers"
+                              ? "Defaults come from the RROS warehouse list. Values you save here supersede later warehouse syncs. Assign an existing LCE / LSWDO / LDRRMO / alternate / encoder / driver to reuse their portal login instead of creating a second account."
+                              : "Optional Office ID Number is used to autofill dispatch / delivery release forms when this person is selected."}
+                            {field === "drivers" ? " Saving also updates the shared operational library." : ""}
+                            {field !== "warehouse_focals" && field !== "warehouse_storekeepers"
+                              ? " Assign a login username so this person can sign in with their own identity."
+                              : ""}
+                          </p>
+                          <div className="mt-3 space-y-4">
+                            {(lguProfileForm.data[field] || []).map((member, memberIndex) => (
+                              <div key={member.id || `${field}-${memberIndex}`} className="grid gap-3 rounded-md bg-slate-50 p-3 sm:grid-cols-2 lg:grid-cols-3 dark:bg-zinc-900">
+                                <p className="text-xs font-black uppercase text-brand-700 sm:col-span-2 lg:col-span-3">
+                                  {title.replace(/s$/, "")} {memberIndex + 1}
+                                </p>
+                                {(field === "warehouse_focals" || field === "warehouse_storekeepers") && lguLinkablePersonnel.length > 0 && (
+                                  <label className="text-xs font-black text-slate-700 sm:col-span-2 lg:col-span-3 dark:text-zinc-200">
+                                    Assign from existing LGU personnel
+                                    <select
+                                      className="mt-1 w-full"
+                                      value={member.linked_from || ""}
+                                      onChange={(event) => applyLinkedLguPersonnel(field, memberIndex, event.target.value)}
+                                    >
+                                      <option value="">New person / keep current entry</option>
+                                      {lguLinkablePersonnel.map((person) => (
+                                        <option key={person.key} value={person.key}>
+                                          {person.label}{person.login_username ? ` (${person.login_username})` : ""}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </label>
+                                )}
+                                {[
+                                  ["Name of Office", "office", false],
+                                  ["Name of Staff", "name", true],
+                                  ["Position", "position", false],
+                                  ["ID Number", "id_number", false],
+                                  ["Contact Number", "contact_number", false],
+                                  ["Email", "email", false],
+                                ].map(([label, key, required]) => (
+                                  <label key={key} className="text-xs font-black text-slate-700 dark:text-zinc-200">
+                                    {renderLguFieldLabel(label, required)}
+                                    <input
+                                      type={key === "email" ? "email" : "text"}
+                                      value={member[key] || ""}
+                                      onChange={(event) => updateLguStaffMember(field, memberIndex, key, event.target.value)}
+                                      className="mt-1 w-full"
+                                    />
+                                  </label>
+                                ))}
+                                {member.link_user_id ? (
+                                  <div className="rounded-md border border-brand-200 bg-brand-50/70 p-3 text-xs font-semibold text-brand-800 sm:col-span-2 lg:col-span-3 dark:border-brand-900 dark:bg-brand-950/40 dark:text-brand-100">
+                                    Reuses existing portal login <span className="font-mono">{member.login_username || "linked account"}</span>. No separate password is created for this warehouse role.
+                                  </div>
+                                ) : (
+                                  renderLoginCredentialPair(
+                                    `${field}.${memberIndex}.login_username`,
+                                    `${field}.${memberIndex}.login_password`,
+                                    member.login_username,
+                                    (value) => updateLguStaffMember(field, memberIndex, "login_username", value),
+                                    (value) => updateLguStaffMember(field, memberIndex, "login_password", value),
+                                    member.login_password,
+                                  )
+                                )}
+                              </div>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={() => addLguStaffMember(field)}
+                              className="rounded-md border border-brand-200 px-3 py-2 text-xs font-black text-brand-700"
+                            >
+                              {addLabel}
+                            </button>
+                          </div>
+                        </section>
+                      ))}
                     </div>
                     <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:justify-end">
                       <button
@@ -3200,6 +4124,7 @@ function EmployeeProfileModal({ user, onClose }) {
                       name={lguChief?.name}
                       fields={[
                         ["Designation", lguChief?.position],
+                        ["Office ID Number", lguChief?.id_number],
                         ["LGU/LCE Office Email Address", lguChief?.email],
                       ]}
                     />
@@ -3209,6 +4134,7 @@ function EmployeeProfileModal({ user, onClose }) {
                       name={lguLswd?.name}
                       fields={[
                         ["Position", lguLswd?.position],
+                        ["Office ID Number", lguLswd?.id_number],
                         ["LSWD Office Email Address", lguLswd?.email],
                         ["Alternate Email / Copy Furnish", lguLswd?.alternate_email],
                         ["Contact Number", lguLswd?.phone],
@@ -3222,7 +4148,7 @@ function EmployeeProfileModal({ user, onClose }) {
                         </div>
                         <div className="mt-2 divide-y divide-slate-200 dark:divide-zinc-700">
                           {lguLswdoAlternates.map((alternate, alternateIndex) => (
-                            <div key={alternate.id || alternateIndex} className="grid gap-2 py-3 sm:grid-cols-[2rem_2fr_1fr_1fr] sm:items-center">
+                            <div key={alternate.id || alternateIndex} className="grid gap-2 py-3 sm:grid-cols-[2rem_1.5fr_1fr_1fr_1fr] sm:items-center">
                               <span className="flex h-7 w-7 items-center justify-center rounded-full bg-brand-50 text-xs font-black text-brand-700 dark:bg-brand-950 dark:text-brand-100">{alternateIndex + 1}</span>
                               <div>
                                 <p className="text-[10px] font-black uppercase text-slate-400">Full Name</p>
@@ -3231,6 +4157,10 @@ function EmployeeProfileModal({ user, onClose }) {
                               <div>
                                 <p className="text-[10px] font-black uppercase text-slate-400">Position</p>
                                 <p className="text-sm font-bold">{profileValue(alternate.position)}</p>
+                              </div>
+                              <div>
+                                <p className="text-[10px] font-black uppercase text-slate-400">Office ID Number</p>
+                                <p className="text-sm font-bold">{profileValue(alternate.id_number)}</p>
                               </div>
                               <div>
                                 <p className="text-[10px] font-black uppercase text-slate-400">Contact Number</p>
@@ -3247,6 +4177,7 @@ function EmployeeProfileModal({ user, onClose }) {
                       name={lguLdrrmoOfficers[0]?.name}
                       fields={[
                         ["Designation", lguLdrrmoOfficers[0]?.designation],
+                        ["Office ID Number", lguLdrrmoOfficers[0]?.id_number],
                         ["Mobile Number", lguLdrrmoOfficers[0]?.mobile_number],
                         ["Hotline Number", lguLdrrmoOfficers[0]?.hotline_number],
                         ["Landline Number", lguLdrrmoOfficers[0]?.landline_number],
@@ -3273,6 +4204,7 @@ function EmployeeProfileModal({ user, onClose }) {
                               </div>
                               <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                                 {[
+                                  ["Office ID Number", officer.id_number],
                                   ["Mobile Number", officer.mobile_number],
                                   ["Hotline Number", officer.hotline_number],
                                   ["Landline Number", officer.landline_number],
@@ -3292,6 +4224,61 @@ function EmployeeProfileModal({ user, onClose }) {
                         </div>
                       )}
                     </OfficialProfileCard>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+                  <div className="mb-3 flex items-center gap-2">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-brand-50 text-brand-700 dark:bg-brand-950 dark:text-brand-100">
+                      <UsersRound className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <h3 className="text-sm font-black uppercase tracking-wide text-slate-800 dark:text-zinc-100">Operations Personnel</h3>
+                      <p className="text-xs text-slate-500 dark:text-zinc-400">
+                        DROMIC / SitRep encoders{lguHasWarehouses ? ", warehouse focals, storekeepers," : ""} and drivers used in dispatch and delivery releases.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="space-y-5">
+                    {[
+                      ["DROMIC / SitReport Encoders", lguDromicEncoders.filter((row) => String(row?.name || "").trim())],
+                      ...(lguHasWarehouses
+                        ? [
+                            ["Warehouse Focals", lguWarehouseFocals.filter((row) => String(row?.name || "").trim())],
+                            ["Warehouse Storekeepers", lguWarehouseStorekeepers.filter((row) => String(row?.name || "").trim())],
+                          ]
+                        : []),
+                      ["Drivers", lguDrivers.filter((row) => String(row?.name || "").trim())],
+                    ].map(([title, rows]) => (
+                      <div key={title}>
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <p className="text-[10px] font-black uppercase tracking-wide text-brand-700 dark:text-brand-100">{title}</p>
+                          <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-black text-brand-700 dark:bg-brand-950 dark:text-brand-100">{rows.length}</span>
+                        </div>
+                        {rows.length === 0 ? (
+                          <p className="rounded-md bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-500 dark:bg-zinc-900 dark:text-zinc-400">No personnel encoded yet.</p>
+                        ) : (
+                          <div className="divide-y divide-slate-200 rounded-md border border-slate-200 dark:divide-zinc-700 dark:border-zinc-700">
+                            {rows.map((member, memberIndex) => (
+                              <div key={member.id || `${title}-${memberIndex}`} className="grid gap-2 p-3 sm:grid-cols-2 lg:grid-cols-5">
+                                {[
+                                  ["Name of Office", member.office],
+                                  ["Name of Staff", member.name],
+                                  ["Position", member.position],
+                                  ["ID Number", member.id_number],
+                                  ["Contact Number", member.contact_number],
+                                ].map(([label, value]) => (
+                                  <div key={label}>
+                                    <p className="text-[10px] font-black uppercase tracking-wide text-slate-400">{label}</p>
+                                    <p className="text-sm font-bold text-slate-800 dark:text-zinc-100">{profileValue(value)}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 </div>
 

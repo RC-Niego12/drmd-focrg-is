@@ -1,5 +1,5 @@
 import { Head, Link, router, useForm, usePage } from '@inertiajs/react';
-import { AlertTriangle, BarChart3, Bot, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardPaste, Clock3, Download, Edit3, ExternalLink, Eye, FileCheck2, FilePlus2, History, Images, ListChecks, Move, Plus, Printer, Search, Send, Sparkles, Trash2, Undo2, UploadCloud, X } from 'lucide-react';
+import { AlertTriangle, BarChart3, Bot, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ClipboardPaste, Clock3, Download, Edit3, ExternalLink, Eye, FileCheck2, FilePlus2, History, Images, ListChecks, MapPin, Move, Plus, Printer, Search, Send, Sparkles, Trash2, Undo2, UploadCloud, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import LookerMultiSelect from '@/Components/LookerMultiSelect';
 import AppLayout, { Card, DataTable } from '@/Layouts/AppLayout';
@@ -66,6 +66,81 @@ const situationOverviewIssue = (value) => {
     }
 
     return '';
+};
+
+const sumEncodedFniItems = (incidents) => {
+    const totals = new Map();
+
+    (incidents || []).forEach((incident) => {
+        (incident.requested_fni_items || []).forEach((row) => {
+            const id = Number(row.fni_library_item_id);
+            const quantity = Number(row.requested_quantity || 0);
+            if (!id || quantity < 1) {
+                return;
+            }
+            totals.set(id, (totals.get(id) || 0) + quantity);
+        });
+    });
+
+    return Array.from(totals.entries()).map(([fni_library_item_id, requested_quantity]) => ({
+        fni_library_item_id,
+        requested_quantity,
+    }));
+};
+
+const normalizeAffectedAreas = (incident) => [...new Set((incident?.affected_barangays || [])
+    .map((name) => String(name || '').trim())
+    .filter(Boolean))];
+
+const AFFECTED_AREA_PREVIEW_LIMIT = 2;
+
+const linkedIncidentsForRow = (row) => {
+    const linked = row?.lgu_dromic_payload?.linked_incidents;
+    if (Array.isArray(linked) && linked.length) {
+        return linked;
+    }
+    if (row?.incident_code) {
+        return [{
+            incident_code: row.incident_code,
+            incident_name: row.lgu_dromic_payload?.incident_name || row.report_title,
+            affected_barangays: row.lgu_dromic_payload?.affected_barangays || [],
+        }];
+    }
+    return [];
+};
+
+const linkedAffectedAreasForRow = (row) => {
+    const linked = linkedIncidentsForRow(row);
+    if (row?.lgu_dromic_payload?.standalone_relief_request && linked.length) {
+        return [...new Set(linked.flatMap((incident) => normalizeAffectedAreas(incident)))];
+    }
+    return normalizeAffectedAreas({
+        affected_barangays: row?.lgu_dromic_payload?.affected_barangays || row?.affected_barangays || [],
+    });
+};
+
+const isStandaloneReliefRequest = (row) => Boolean(row?.lgu_dromic_payload?.standalone_relief_request);
+
+const retainedSignedRequestFor = (row) => {
+    if (!row?.id) return null;
+    if (row.lgu_signed_request_path) {
+        return {
+            name: row.lgu_signed_request_name || 'Signed request letter.pdf',
+            viewUrl: `/lgu/dromic-sitrep/${row.id}/signed-copy/request`,
+            active: true,
+        };
+    }
+    const archived = [...(row.signed_document_versions || [])]
+        .filter((version) => version.kind === 'request')
+        .sort((left, right) => Number(right.id) - Number(left.id))[0];
+    if (!archived?.id) return null;
+
+    return {
+        name: archived.original_name || 'Signed request letter.pdf',
+        viewUrl: `/lgu/dromic-sitrep/signed-history/${archived.id}`,
+        active: false,
+        versionId: archived.id,
+    };
 };
 
 const hasNonZeroNowValue = (value) => {
@@ -1261,10 +1336,11 @@ const readPreviewFromUrl = () => {
     }
 
     const params = new URLSearchParams(window.location.search);
-    const id = Number(params.get('preview') || 0) || null;
+    // `focus` is used by workflow notification deep links as an alias for preview.
+    const id = Number(params.get('preview') || params.get('focus') || 0) || null;
     const mode = ['incident', 'report', 'request'].includes(params.get('preview_mode') || '')
         ? params.get('preview_mode')
-        : 'incident';
+        : (params.get('focus') ? 'request' : 'incident');
 
     return { id, mode };
 };
@@ -1284,10 +1360,16 @@ const syncPreviewInUrl = (id, mode = 'incident') => {
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
 };
 
-export default function Index({ lguProfile, defaultIncidentDate, requests, correctionDraft = null, incidentGroups = [], reportFilters = {}, monitoringSummary = {}, reportDashboard = {}, requestDashboard = {}, incidentTypes = [], barangayOptions = [], psgcOptions = {}, fniLibraryItems = [] }) {
-    const { flash = {} } = usePage().props;
+export default function Index({ lguProfile, defaultIncidentDate, requests, correctionDraft = null, incidentGroups = [], reliefRequestIncidentOptions = [], reportFilters = {}, monitoringSummary = {}, reportDashboard = {}, requestDashboard = {}, incidentTypes = [], barangayOptions = [], psgcOptions = {}, fniLibraryItems = [] }) {
+    const { flash = {}, auth = {} } = usePage().props;
     const initialUrlPreview = readPreviewFromUrl();
     const [open, setOpen] = useState(false);
+    const [consolidatedRequestOpen, setConsolidatedRequestOpen] = useState(false);
+    const [editingConsolidatedId, setEditingConsolidatedId] = useState(null);
+    const consolidatedSaveModeRef = useRef('final');
+    const [consolidatedOptionsLoading, setConsolidatedOptionsLoading] = useState(false);
+    const [consolidatedAreasViewer, setConsolidatedAreasViewer] = useState(null);
+    const [consolidatedLinkedViewer, setConsolidatedLinkedViewer] = useState(null);
     const [editingRequestId, setEditingRequestId] = useState(null);
     const [sourceSeriesSummary, setSourceSeriesSummary] = useState({ drafts_saved: 0, reports_finalized: 0, is_terminal: false });
     const [finalConfirmationOpen, setFinalConfirmationOpen] = useState(false);
@@ -1297,7 +1379,7 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
     const [previewReportId, setPreviewReportId] = useState(flash.preview_report_id || initialUrlPreview.id || null);
     const [previewMode, setPreviewMode] = useState(
         flash.preview_report_id || initialUrlPreview.id
-            ? (flash.preview_report_id ? 'incident' : initialUrlPreview.mode)
+            ? (flash.preview_report_id ? (flash.preview_mode || 'incident') : initialUrlPreview.mode)
             : 'report',
     );
     const [historyPreview, setHistoryPreview] = useState(null);
@@ -1309,7 +1391,11 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
     const [previewSidebarCollapsed, setPreviewSidebarCollapsed] = useState(false);
     const [signedReport, setSignedReport] = useState(null);
     const [signedRequest, setSignedRequest] = useState(null);
+    const [signedUploadErrors, setSignedUploadErrors] = useState({});
+    const [signedUploadNotice, setSignedUploadNotice] = useState(null);
     const [submissionBusy, setSubmissionBusy] = useState(false);
+    const signedReportInputRef = useRef(null);
+    const signedRequestInputRef = useRef(null);
     const [aiMessage, setAiMessage] = useState('');
     const [aiBusy, setAiBusy] = useState(false);
     const [advisoryExtractionBusy, setAdvisoryExtractionBusy] = useState(false);
@@ -1319,10 +1405,20 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
     const [validationNotice, setValidationNotice] = useState('');
     const [responseLetterBusyId, setResponseLetterBusyId] = useState(null);
     const [responseLetterNotice, setResponseLetterNotice] = useState('');
-    const [responseLetterPreview, setResponseLetterPreview] = useState({ open: false, title: '', subtitle: null, src: null });
+    const [responseLetterPreview, setResponseLetterPreview] = useState({ open: false, title: '', subtitle: null, src: null, kind: null, zIndexClass: 'z-[100]' });
     const [draftPreviewOpen, setDraftPreviewOpen] = useState(false);
     const [draftPreviewZoom, setDraftPreviewZoom] = useState(DEFAULT_DOCUMENT_PREVIEW_ZOOM);
+    const [draftPreviewTab, setDraftPreviewTab] = useState('narrative');
+    const [draftPreviewUrl, setDraftPreviewUrl] = useState('');
+    const [draftPreviewBusy, setDraftPreviewBusy] = useState(false);
+    const [draftPreviewError, setDraftPreviewError] = useState('');
+    const draftPreviewUrlRef = useRef(null);
     const [reportSearch, setReportSearch] = useState(reportFilters.search || '');
+    const [amendmentRequestRow, setAmendmentRequestRow] = useState(null);
+    const [amendmentRequestTarget, setAmendmentRequestTarget] = useState('report');
+    const [amendmentReason, setAmendmentReason] = useState('');
+    const [amendmentBusy, setAmendmentBusy] = useState(false);
+    const [reopenBusy, setReopenBusy] = useState(false);
     const realtimeReloadTimer = useRef(null);
     const activeReportTab = ['reports', 'requests'].includes(reportFilters.tab) ? reportFilters.tab : 'incidents';
     const summaryFiltersActive = Boolean(reportFilters.search || reportFilters.status || reportFilters.classification || reportFilters.validation || reportFilters.series_key);
@@ -1360,6 +1456,12 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
     const [pendingDeleteSupportingRow, setPendingDeleteSupportingRow] = useState(null);
     const [pendingZeroNowEcIndex, setPendingZeroNowEcIndex] = useState(null);
     const form = useForm(emptyPayload(lguProfile, defaultIncidentDate));
+    const consolidatedForm = useForm({
+        incident_series_keys: [],
+        requested_fni_items: [],
+        signed_request: null,
+        submission_status: 'final',
+    });
     const isProvince = Boolean(lguProfile?.is_province);
     const withReliefRequest = Boolean(form.data.has_relief_request);
     const requestedFniItems = Array.isArray(form.data.requested_fni_items) ? form.data.requested_fni_items : [];
@@ -1383,12 +1485,13 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
     }));
     const requestedFniIds = requestedFniItems.map((row) => String(row.fni_library_item_id));
     const setRequestedFniSelection = (selectedIds) => {
+        const suggestedQuantity = Number(totalAffectedFamilies || 0) > 0 ? Number(totalAffectedFamilies) : '';
         form.setData('requested_fni_items', selectedIds.map((id) => {
             const existing = requestedFniItems.find((row) => String(row.fni_library_item_id) === String(id));
 
             return existing || {
                 fni_library_item_id: Number(id),
-                requested_quantity: '',
+                requested_quantity: suggestedQuantity,
             };
         }));
     };
@@ -1400,48 +1503,334 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                 : row
         )));
     };
+    const consolidatedRequestedItems = Array.isArray(consolidatedForm.data.requested_fni_items) ? consolidatedForm.data.requested_fni_items : [];
+    const consolidatedRequestedIds = consolidatedRequestedItems.map((row) => String(row.fni_library_item_id));
+    const selectedConsolidatedIncidents = reliefRequestIncidentOptions.filter((incident) => consolidatedForm.data.incident_series_keys.includes(incident.series_key));
+    const selectedConsolidatedType = selectedConsolidatedIncidents[0]?.incident_type || '';
+    const selectedEncodedFniCount = sumEncodedFniItems(selectedConsolidatedIncidents).length;
+    const selectedMissingEncodedFni = selectedConsolidatedIncidents.length > 0 && selectedEncodedFniCount === 0;
+    const reliefOptionsByType = reliefRequestIncidentOptions.reduce((groups, incident) => {
+        const type = String(incident.incident_type || 'Other').trim() || 'Other';
+        if (!groups[type]) groups[type] = [];
+        groups[type].push(incident);
+        return groups;
+    }, {});
+    const toggleConsolidatedIncident = (incident) => {
+        const selected = consolidatedForm.data.incident_series_keys.includes(incident.series_key);
+        if (!selected && selectedConsolidatedType && String(incident.incident_type).toLocaleLowerCase() !== String(selectedConsolidatedType).toLocaleLowerCase()) {
+            window.dispatchEvent(new CustomEvent('dromis:toast', {
+                detail: {
+                    type: 'error',
+                    title: 'Different incident type',
+                    message: `This lump request is limited to ${selectedConsolidatedType}. Deselect that type first to switch.`,
+                },
+            }));
+            return;
+        }
+        const nextKeys = selected
+            ? consolidatedForm.data.incident_series_keys.filter((key) => key !== incident.series_key)
+            : [...consolidatedForm.data.incident_series_keys, incident.series_key];
+        // While revising, keep the pre-filled / manually edited FNI list intact when incidents change.
+        if (editingConsolidatedId) {
+            consolidatedForm.setData({
+                ...consolidatedForm.data,
+                incident_series_keys: nextKeys,
+            });
+            return;
+        }
+        const nextIncidents = reliefRequestIncidentOptions.filter((option) => nextKeys.includes(option.series_key));
+        const summedItems = sumEncodedFniItems(nextIncidents);
+        // Keep manually encoded FNI when selected reports have none (forgot-to-encode case).
+        consolidatedForm.setData({
+            ...consolidatedForm.data,
+            incident_series_keys: nextKeys,
+            requested_fni_items: summedItems.length
+                ? summedItems
+                : (nextKeys.length ? consolidatedRequestedItems : []),
+        });
+    };
+    const setConsolidatedFniSelection = (selectedIds) => {
+        consolidatedForm.setData('requested_fni_items', selectedIds.map((id) => consolidatedRequestedItems.find((row) => String(row.fni_library_item_id) === String(id)) || {
+            fni_library_item_id: Number(id),
+            requested_quantity: '',
+        }));
+    };
+    const setConsolidatedFniQuantity = (fniLibraryItemId, value) => {
+        const next = coerceWholeQuantity(value, { min: 1 });
+        consolidatedForm.setData('requested_fni_items', consolidatedRequestedItems.map((row) => String(row.fni_library_item_id) === String(fniLibraryItemId)
+            ? { ...row, requested_quantity: next === '' ? '' : next }
+            : row));
+    };
+    const openConsolidatedRequest = () => {
+        consolidatedForm.clearErrors();
+        consolidatedForm.reset();
+        consolidatedForm.setData({
+            incident_series_keys: [],
+            requested_fni_items: [],
+            signed_request: null,
+            submission_status: 'final',
+        });
+        setEditingConsolidatedId(null);
+        setConsolidatedRequestOpen(true);
+        setConsolidatedAreasViewer(null);
+        setConsolidatedOptionsLoading(true);
+        // Refresh eligibility after signed-report uploads without requiring a full page reload.
+        router.get('/lgu/dromic-sitrep', { tab: 'requests' }, {
+            only: ['reliefRequestIncidentOptions', 'incidentGroups'],
+            preserveScroll: true,
+            preserveState: true,
+            replace: true,
+            onFinish: () => setConsolidatedOptionsLoading(false),
+        });
+    };
+    const openConsolidatedEdit = (row) => {
+        const payload = row?.lgu_dromic_payload || {};
+        consolidatedForm.clearErrors();
+        consolidatedForm.setData({
+            incident_series_keys: Array.isArray(payload.linked_incident_series_keys) ? payload.linked_incident_series_keys : [],
+            requested_fni_items: (Array.isArray(payload.requested_fni_items) ? payload.requested_fni_items : [])
+                .map((item) => ({
+                    fni_library_item_id: Number(item.fni_library_item_id),
+                    requested_quantity: Number(item.requested_quantity) || '',
+                }))
+                .filter((item) => item.fni_library_item_id > 0),
+            signed_request: null,
+            submission_status: 'final',
+        });
+        consolidatedSaveModeRef.current = 'final';
+        setEditingConsolidatedId(row.id);
+        setConsolidatedRequestOpen(true);
+        setConsolidatedAreasViewer(null);
+        setConsolidatedOptionsLoading(true);
+        router.get('/lgu/dromic-sitrep', { tab: 'requests', editing_relief_request_id: row.id }, {
+            only: ['requests', 'reliefRequestIncidentOptions', 'incidentGroups', 'requestDashboard'],
+            preserveScroll: true,
+            preserveState: true,
+            replace: true,
+            onFinish: () => setConsolidatedOptionsLoading(false),
+        });
+    };
+    const closeConsolidatedRequestModal = () => {
+        setConsolidatedRequestOpen(false);
+        setEditingConsolidatedId(null);
+        setConsolidatedAreasViewer(null);
+        consolidatedSaveModeRef.current = 'final';
+        // Drop editing_relief_request_id so partial reloads do not keep revise context sticky.
+        router.get('/lgu/dromic-sitrep', { tab: 'requests' }, {
+            only: ['reliefRequestIncidentOptions', 'incidentGroups'],
+            preserveScroll: true,
+            preserveState: true,
+            replace: true,
+        });
+    };
+    const submitConsolidatedRequest = (event) => {
+        event.preventDefault();
+        const submitterMode = event.nativeEvent?.submitter?.dataset?.saveMode;
+        const submissionStatus = submitterMode || consolidatedSaveModeRef.current || 'final';
+        consolidatedSaveModeRef.current = submissionStatus;
+        if (editingConsolidatedId) {
+            // Inertia v2 useForm.transform() returns void — do not chain .patch/.post.
+            // POST + _method keeps multipart file uploads working on Laravel.
+            consolidatedForm.transform((data) => ({
+                submission_status: submissionStatus,
+                incident_series_keys: data.incident_series_keys,
+                requested_fni_items: data.requested_fni_items,
+                signed_request: data.signed_request || null,
+                _method: 'patch',
+            }));
+            consolidatedForm.post(`/lgu/dromic-sitrep/${editingConsolidatedId}/relief-request`, {
+                preserveScroll: true,
+                forceFormData: true,
+                onSuccess: () => {
+                    setConsolidatedRequestOpen(false);
+                    setEditingConsolidatedId(null);
+                    consolidatedSaveModeRef.current = 'final';
+                    consolidatedForm.transform((data) => data);
+                },
+                onFinish: () => consolidatedForm.transform((data) => data),
+            });
+            return;
+        }
+        consolidatedForm.post('/lgu/dromic-sitrep/relief-requests', {
+            preserveScroll: true,
+            forceFormData: true,
+            onSuccess: () => setConsolidatedRequestOpen(false),
+        });
+    };
+    const finalizeStandaloneReliefForSubmit = (row) => {
+        if (!row?.id) return;
+        const status = row.lgu_report_status || row.status;
+        const retained = retainedSignedRequestFor(row);
+        if (!retained) {
+            openConsolidatedEdit(row);
+            return;
+        }
+
+        // Already finalized — submit to DSWD/DRRS immediately.
+        if (status === 'final') {
+            setSubmissionBusy(true);
+            router.post(`/lgu/dromic-sitrep/${row.id}/submit`, {}, {
+                preserveScroll: true,
+                onFinish: () => setSubmissionBusy(false),
+            });
+            return;
+        }
+
+        const payload = row?.lgu_dromic_payload || {};
+        const keys = Array.isArray(payload.linked_incident_series_keys) ? payload.linked_incident_series_keys : [];
+        const items = (Array.isArray(payload.requested_fni_items) ? payload.requested_fni_items : [])
+            .map((item) => ({
+                fni_library_item_id: Number(item.fni_library_item_id),
+                requested_quantity: Number(item.requested_quantity) || 0,
+            }))
+            .filter((item) => item.fni_library_item_id > 0 && item.requested_quantity > 0);
+        if (!keys.length || !items.length) {
+            openConsolidatedEdit(row);
+            return;
+        }
+
+        // Draft with signed letter: finalize then submit in one flow.
+        setSubmissionBusy(true);
+        router.post(`/lgu/dromic-sitrep/${row.id}/relief-request`, {
+            _method: 'patch',
+            submission_status: 'final',
+            incident_series_keys: keys,
+            requested_fni_items: items,
+        }, {
+            forceFormData: true,
+            preserveScroll: true,
+            onSuccess: () => {
+                router.post(`/lgu/dromic-sitrep/${row.id}/submit`, {}, {
+                    preserveScroll: true,
+                    onFinish: () => setSubmissionBusy(false),
+                });
+            },
+            onError: () => setSubmissionBusy(false),
+        });
+    };
     const previewReport = (requests?.data ?? []).find((row) => Number(row.id) === Number(previewReportId));
     const editingReport = (requests?.data ?? []).find((row) => Number(row.id) === Number(editingRequestId));
+    const editingConsolidatedRow = (requests?.data ?? []).find((row) => Number(row.id) === Number(editingConsolidatedId));
+    const editingRetainedSignedRequest = retainedSignedRequestFor(editingConsolidatedRow);
+    const editingHasRetainedSignedRequest = Boolean(editingRetainedSignedRequest);
+    const hasConsolidatedIncidentChoices = reliefRequestIncidentOptions.length > 0 || Boolean(editingConsolidatedId);
+    const canSubmitConsolidatedUpdate = Boolean(editingConsolidatedId)
+        && consolidatedForm.data.incident_series_keys.length > 0
+        && consolidatedRequestedItems.length > 0
+        && (Boolean(consolidatedForm.data.signed_request) || editingHasRetainedSignedRequest);
     const signedReportLocked = previewReport?.lgu_dromic_validation_status === 'validated_no_findings'
         && Boolean(previewReport?.lgu_signed_report_path);
-    const signedRequestLocked = previewReport?.lgu_relief_validation_status === 'validated_no_findings';
-    const reportReplacementAllowed = !previewReport?.lgu_signed_report_path
+    // Signed request-letter upload/preview only when Include request was ticked (or a lump request was created).
+    // Encoding FNI needs alone must not show the request-letter uploader.
+    const previewIsStandaloneRelief = isStandaloneReliefRequest(previewReport);
+    const previewIncludesRequestLetter = Boolean(previewReport?.lgu_dromic_payload?.has_relief_request)
+        || Boolean(previewReport?.lgu_relief_request_reference)
+        || previewIsStandaloneRelief;
+    const signedRequestLocked = previewIncludesRequestLetter
+        && previewReport?.lgu_relief_validation_status === 'validated_no_findings';
+    const reportReplacementAllowed = !previewIsStandaloneRelief && (
+        !previewReport?.lgu_signed_report_path
         || previewReport?.lgu_report_status === 'final'
         || (previewReport?.lgu_dromic_validation_status === 'needs_lgu_action'
             && (previewReport?.lgu_dromic_correction_scope || 'document') === 'document')
         || (previewReport?.lgu_dromic_validation_status === 'validated_no_findings'
-            && !previewReport?.lgu_signed_report_path);
-    const requestReplacementAllowed = !previewReport?.lgu_signed_request_path
+            && !previewReport?.lgu_signed_report_path)
+    );
+    const requestReplacementAllowed = previewIncludesRequestLetter && (
+        !previewReport?.lgu_signed_request_path
         || previewReport?.lgu_report_status === 'final'
         || (previewReport?.lgu_relief_validation_status === 'needs_lgu_action'
-            && (previewReport?.lgu_relief_correction_scope || 'document') === 'document');
-    const bothDocumentsValidated = signedReportLocked && signedRequestLocked && Boolean(previewReport?.lgu_signed_request_path);
-    const previewDocumentKind = previewMode === 'request' || (previewMode === 'incident' && combinedPreviewTab === 'request') ? 'request' : 'report';
+            && (previewReport?.lgu_relief_correction_scope || 'document') === 'document')
+    );
+    const bothDocumentsValidated = previewIsStandaloneRelief
+        ? signedRequestLocked && Boolean(previewReport?.lgu_signed_request_path)
+        : previewIncludesRequestLetter
+            && signedReportLocked
+            && signedRequestLocked
+            && Boolean(previewReport?.lgu_signed_request_path);
+    const previewDocumentKind = previewIncludesRequestLetter
+        && (previewMode === 'request' || (previewMode === 'incident' && combinedPreviewTab === 'request'))
+        ? 'request'
+        : 'report';
     const previewValidationNote = previewDocumentKind === 'request'
         ? previewReport?.lgu_relief_review_note
         : previewReport?.lgu_dromic_review_note;
     const previewCanExport = previewDocumentKind === 'request'
         ? signedRequestLocked && Boolean(previewReport?.lgu_signed_request_path)
         : previewReport?.lgu_dromic_validation_status === 'validated_no_findings';
+    // Keep signed DROMIC report upload available in Preview (report or incident mode).
+    // Only the request-letter uploader stays gated by Include request / lump reference.
+    const showSignedCopiesPanel = !isProvince
+        && Boolean(previewReport)
+        && (previewMode === 'incident' || previewMode === 'report');
     const openDocumentPreview = (row, mode) => {
+        const standalone = isStandaloneReliefRequest(row);
+        const includesRequest = Boolean(row?.lgu_dromic_payload?.has_relief_request)
+            || Boolean(row?.lgu_relief_request_reference)
+            || standalone;
+        const status = row?.lgu_report_status || row?.status;
+        // Eye used to open report-only preview without the signed-copies panel.
+        // Prefer the submission workspace whenever signed report upload/submit is still needed.
+        // Request-letter upload remains gated by Include request / lump reference inside that panel.
+        let nextMode = includesRequest ? mode : (mode === 'request' ? 'incident' : mode);
+        if (standalone) {
+            nextMode = 'incident';
+        } else if (mode === 'report' && (
+            status === 'final'
+            || status === 'advance_submitted'
+            || (status === 'submitted' && !row?.lgu_signed_report_path)
+        )) {
+            nextMode = 'incident';
+        }
         setPreviewContentTab('narrative');
         setPreviewControlsCollapsed(false);
         setPreviewSidebarCollapsed(false);
-        setPreviewMode(mode);
+        setPreviewMode(nextMode);
         setReportCopyTab('advance');
-        // Incident submission workspace must open on the DROMIC report PDF.
-        // Request-letter placeholder is only for explicit request correction/upload flows.
-        setCombinedPreviewTab(mode === 'request' ? 'request' : 'report');
+        setCombinedPreviewTab((includesRequest && (mode === 'request' || standalone)) ? 'request' : 'report');
+        setSignedReport(null);
+        setSignedRequest(null);
+        setSignedUploadErrors({});
+        setSignedUploadNotice(null);
+        setSubmissionBusy(false);
         setPreviewReportId(row.id);
-        syncPreviewInUrl(row.id, mode);
+        syncPreviewInUrl(row.id, nextMode);
+    };
+    const closePdfPreview = () => setResponseLetterPreview({ open: false, title: '', subtitle: null, src: null, kind: null, zIndexClass: 'z-[100]' });
+    const openSignedRequestPdfPreview = (retained, { title = 'Signed request letter', zIndexClass = 'z-[100]' } = {}) => {
+        if (!retained?.viewUrl) return;
+        setResponseLetterPreview({
+            open: true,
+            title,
+            subtitle: retained.name || null,
+            src: retained.viewUrl,
+            kind: 'signed',
+            zIndexClass,
+        });
+    };
+    const openRetainedSignedRequestView = (row) => {
+        const retained = retainedSignedRequestFor(row);
+        if (!retained) return;
+        if (retained.active) {
+            openDocumentPreview(row, 'request');
+            return;
+        }
+        openSignedRequestPdfPreview(retained, { title: 'Signed request letter' });
     };
     const openCorrectionWorkspace = (row, kind) => {
+        const includesRequest = Boolean(row?.lgu_dromic_payload?.has_relief_request)
+            || Boolean(row?.lgu_relief_request_reference);
         setPreviewContentTab('narrative');
         setPreviewControlsCollapsed(false);
         setPreviewSidebarCollapsed(false);
         setPreviewMode('incident');
-        setCombinedPreviewTab(kind);
+        setCombinedPreviewTab(kind === 'request' && includesRequest ? 'request' : 'report');
         setReportCopyTab('advance');
+        setSignedReport(null);
+        if (kind !== 'request' || !includesRequest) setSignedRequest(null);
+        setSignedUploadErrors({});
+        setSignedUploadNotice(null);
+        setSubmissionBusy(false);
         setPreviewReportId(row.id);
         syncPreviewInUrl(row.id, 'incident');
     };
@@ -1452,12 +1841,82 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
 
     useEffect(() => {
         if (!flash.preview_report_id) return;
-        setPreviewMode('incident');
-        setCombinedPreviewTab('report');
+        const previewRow = (requests?.data ?? []).find((row) => Number(row.id) === Number(flash.preview_report_id));
+        // Standalone relief must use incident mode so the Submit to DSWD panel is visible.
+        const mode = isStandaloneReliefRequest(previewRow) ? 'incident' : (flash.preview_mode || 'incident');
+        setPreviewMode(mode);
+        setCombinedPreviewTab(mode === 'request' || isStandaloneReliefRequest(previewRow) ? 'request' : 'report');
         setReportCopyTab('advance');
         setPreviewReportId(flash.preview_report_id);
-        syncPreviewInUrl(flash.preview_report_id, 'incident');
-    }, [flash.preview_report_id]);
+        syncPreviewInUrl(flash.preview_report_id, mode);
+    }, [flash.preview_report_id, flash.preview_mode]);
+
+    useEffect(() => {
+        if (!previewReport || previewIncludesRequestLetter) return;
+        if (combinedPreviewTab === 'request') setCombinedPreviewTab('report');
+        if (previewMode === 'request') setPreviewMode('incident');
+        setSignedRequest(null);
+    }, [previewReportId, previewIncludesRequestLetter, combinedPreviewTab, previewMode, previewReport]);
+
+    useEffect(() => {
+        if (!draftPreviewOpen) {
+            if (draftPreviewUrlRef.current) {
+                URL.revokeObjectURL(draftPreviewUrlRef.current);
+                draftPreviewUrlRef.current = null;
+            }
+            setDraftPreviewUrl('');
+            setDraftPreviewBusy(false);
+            setDraftPreviewError('');
+            return undefined;
+        }
+
+        if (draftPreviewTab === 'encoded') {
+            return undefined;
+        }
+
+        let cancelled = false;
+        const loadNarrativePreview = async () => {
+            setDraftPreviewBusy(true);
+            setDraftPreviewError('');
+            if (draftPreviewUrlRef.current) {
+                URL.revokeObjectURL(draftPreviewUrlRef.current);
+                draftPreviewUrlRef.current = null;
+            }
+            setDraftPreviewUrl('');
+            try {
+                const response = await window.axios.post('/lgu/dromic-sitrep/preview?pdf=1', {
+                    ...form.data,
+                    report_number: editingReport?.lgu_dromic_report_number || form.data.report_number || 1,
+                }, {
+                    responseType: 'blob',
+                    headers: { Accept: 'application/pdf' },
+                    withXSRFToken: true,
+                });
+                if (cancelled) {
+                    return;
+                }
+                const url = URL.createObjectURL(response.data);
+                draftPreviewUrlRef.current = url;
+                setDraftPreviewUrl(url);
+            } catch (error) {
+                if (cancelled) {
+                    return;
+                }
+                setDraftPreviewUrl('');
+                setDraftPreviewError(error?.response?.data?.message || 'Unable to build the LGU narrative report PDF preview.');
+            } finally {
+                if (!cancelled) {
+                    setDraftPreviewBusy(false);
+                }
+            }
+        };
+
+        loadNarrativePreview();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [draftPreviewOpen, draftPreviewTab]);
 
     const openCreateReport = () => {
         setEditingRequestId(null);
@@ -1496,13 +1955,15 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
             submission_status: 'draft',
             report_series_key: row.lgu_dromic_series_key || payload.report_series_key || '',
             report_classification: classification,
+            // Next SitRep must not inherit prior Include-request / FNI needs.
+            // Those stay on the earlier report (or lump letter); encode fresh needs here only if required.
             has_relief_request: false,
             requested_fni_items: [],
             relief_requested: '',
         });
         setValidationNotice(classification === 'terminal'
-            ? 'Terminal Report selected. All NOW values were initialized to 0. They remain editable if validated current counts still exist.'
-            : 'A new unnumbered update has been prepared from the latest report. It will receive the next report number only when finalized.');
+            ? 'Terminal Report selected. All NOW values were initialized to 0. Prior FNI needs / request letter were not carried over. NOW values remain editable if validated current counts still exist.'
+            : 'A new unnumbered update has been prepared from the latest report. Prior FNI needs / request letter were not carried over. It will receive the next report number only when finalized.');
         setOpen(true);
     };
 
@@ -1522,12 +1983,100 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
         });
     };
 
+    const amendmentTargetOf = (row) => row?.lgu_amendment_request_target || (row?.lgu_amendment_request_status ? 'report' : null);
+
+    const canReopenForRevision = (row) => {
+        const status = row?.lgu_report_status || row?.status;
+        return status === 'final'
+            && !row?.lgu_submitted_to_dswd_at
+            && !row?.lgu_correction_of_id;
+    };
+
+    const canRequestAmendment = (row, target = 'report') => {
+        const status = row?.lgu_report_status || row?.status;
+        // Amendment is only for documents already submitted to DSWD.
+        if (!['advance_submitted', 'submitted'].includes(status)) return false;
+        if (row?.lgu_correction_of_id) return false;
+        if (row?.lgu_amendment_request_status === 'requested') return false;
+
+        if (target === 'request') {
+            const hasRelief = Boolean(row?.lgu_relief_request_reference)
+                || Boolean(row?.lgu_dromic_payload?.has_relief_request)
+                || Boolean(row?.lgu_dromic_payload?.standalone_relief_request);
+            if (!hasRelief) return false;
+            if (row?.lgu_relief_validation_status === 'needs_lgu_action') return false;
+            if (['validated_no_findings', 'superseded'].includes(row?.lgu_relief_validation_status)) return false;
+            return true;
+        }
+
+        if (row?.lgu_dromic_payload?.standalone_relief_request) return false;
+        if (row?.lgu_dromic_validation_status === 'needs_lgu_action') return false;
+        if (['validated_no_findings', 'superseded'].includes(row?.lgu_dromic_validation_status)) return false;
+        return true;
+    };
+
+    const reopenForRevision = (row) => {
+        if (!row?.id || reopenBusy) return;
+        setReopenBusy(true);
+        router.post(`/lgu/dromic-sitrep/${row.id}/reopen`, {}, {
+            preserveScroll: true,
+            onSuccess: (page) => {
+                const draftId = page?.props?.flash?.reopen_draft_id || row.id;
+                const mode = page?.props?.flash?.reopen_draft_mode
+                    || (isStandaloneReliefRequest(row) ? 'request' : 'report');
+                const refreshed = (page?.props?.requests?.data ?? []).find((item) => Number(item.id) === Number(draftId))
+                    || { ...row, lgu_report_status: 'draft', status: 'draft', lgu_submitted_to_dswd_at: null };
+                if (mode === 'request' || isStandaloneReliefRequest(refreshed)) {
+                    openConsolidatedEdit(refreshed);
+                } else {
+                    openDraftReport(refreshed);
+                }
+            },
+            onFinish: () => setReopenBusy(false),
+        });
+    };
+
+    const openAmendmentRequest = (row, target = 'report') => {
+        setAmendmentRequestRow(row);
+        setAmendmentRequestTarget(target);
+        setAmendmentReason('');
+    };
+
+    const submitAmendmentRequest = (event) => {
+        event.preventDefault();
+        if (!amendmentRequestRow?.id || amendmentBusy) return;
+        setAmendmentBusy(true);
+        router.post(`/lgu/dromic-sitrep/${amendmentRequestRow.id}/amendment-request`, {
+            target: amendmentRequestTarget,
+            reason: amendmentReason,
+        }, {
+            preserveScroll: true,
+            onSuccess: () => {
+                setAmendmentRequestRow(null);
+                setAmendmentRequestTarget('report');
+                setAmendmentReason('');
+            },
+            onFinish: () => setAmendmentBusy(false),
+        });
+    };
+
     useEffect(() => {
         if (!flash.correction_draft_id) return;
         const correction = (requests?.data ?? []).find((row) => Number(row.id) === Number(flash.correction_draft_id))
             || (Number(correctionDraft?.id) === Number(flash.correction_draft_id) ? correctionDraft : null);
         if (correction) openDraftReport(correction);
     }, [flash.correction_draft_id, correctionDraft?.id]);
+
+    useEffect(() => {
+        if (!flash.reopen_draft_id) return;
+        const draft = (requests?.data ?? []).find((row) => Number(row.id) === Number(flash.reopen_draft_id));
+        if (!draft) return;
+        if (flash.reopen_draft_mode === 'request' || isStandaloneReliefRequest(draft)) {
+            openConsolidatedEdit(draft);
+        } else {
+            openDraftReport(draft);
+        }
+    }, [flash.reopen_draft_id, flash.reopen_draft_mode]);
 
     useEffect(() => {
         const reloadFniProcessing = (payload = {}) => {
@@ -1557,23 +2106,86 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
         };
     }, [lguProfile?.psgc_code]);
 
+    const clearSignedFileInputs = () => {
+        if (signedReportInputRef.current) signedReportInputRef.current.value = '';
+        if (signedRequestInputRef.current) signedRequestInputRef.current.value = '';
+    };
+
     const uploadSignedCopies = () => {
-        if (!previewReportId || (!signedReport && !signedRequest)) return;
-        const data = new FormData();
-        if (signedReport) data.append('signed_report', signedReport);
-        if (signedRequest) data.append('signed_request', signedRequest);
+        if (!previewReportId || submissionBusy) return;
+        const maxBytes = 10 * 1024 * 1024;
+        if (!signedReport && !(previewIncludesRequestLetter && signedRequest)) {
+            setSignedUploadErrors({
+                [previewIsStandaloneRelief ? 'signed_request' : 'signed_report']: 'Choose a PDF file before uploading.',
+            });
+            setSignedUploadNotice({ type: 'error', message: 'Choose a PDF file before uploading.' });
+            return;
+        }
+        if (!previewIsStandaloneRelief && signedReport && signedReport.size > maxBytes) {
+            setSignedUploadErrors({ signed_report: 'Signed report PDF must be 10 MB or smaller.' });
+            setSignedUploadNotice({ type: 'error', message: 'Signed report PDF must be 10 MB or smaller.' });
+            return;
+        }
+        if (previewIncludesRequestLetter && signedRequest && signedRequest.size > maxBytes) {
+            setSignedUploadErrors({ signed_request: 'Signed request-letter PDF must be 10 MB or smaller.' });
+            setSignedUploadNotice({ type: 'error', message: 'Signed request-letter PDF must be 10 MB or smaller.' });
+            return;
+        }
+        if (signedReport && !/\.pdf$/i.test(signedReport.name || '')) {
+            setSignedUploadErrors({ signed_report: 'Signed report must be a PDF file.' });
+            setSignedUploadNotice({ type: 'error', message: 'Signed report must be a PDF file.' });
+            return;
+        }
+        if (previewIncludesRequestLetter && signedRequest && !/\.pdf$/i.test(signedRequest.name || '')) {
+            setSignedUploadErrors({ signed_request: 'Signed request letter must be a PDF file.' });
+            setSignedUploadNotice({ type: 'error', message: 'Signed request letter must be a PDF file.' });
+            return;
+        }
+
+        const payload = {};
+        if (signedReport) payload.signed_report = signedReport;
+        if (previewIncludesRequestLetter && signedRequest) payload.signed_request = signedRequest;
+        const uploadingReportId = previewReportId;
+
+        setSignedUploadErrors({});
+        setSignedUploadNotice({ type: 'info', message: 'Uploading signed PDF…' });
         setSubmissionBusy(true);
-        router.post(`/lgu/dromic-sitrep/${previewReportId}/signed-copies`, data, {
+
+        // Avoid nesting router.reload() inside onSuccess — that can cancel the visit
+        // before onFinish and leave the upload button stuck disabled.
+        router.post(`/lgu/dromic-sitrep/${uploadingReportId}/signed-copies`, payload, {
             forceFormData: true,
             preserveScroll: true,
-            onSuccess: () => {
+            preserveState: true,
+            only: ['requests', 'incidentGroups', 'monitoringSummary', 'reliefRequestIncidentOptions', 'flash'],
+            onSuccess: (page) => {
+                const successMessage = page?.props?.flash?.success
+                    || 'Signed copy attachment(s) uploaded successfully.';
                 setSignedReport(null);
                 setSignedRequest(null);
-                setPreviewReportId(null);
-                router.reload({
-                    only: ['requests', 'incidentGroups', 'monitoringSummary'],
-                    preserveScroll: true,
-                });
+                setSignedUploadErrors({});
+                clearSignedFileInputs();
+                setSignedUploadNotice({ type: 'success', message: successMessage });
+                window.dispatchEvent(new CustomEvent('dromis:toast', {
+                    detail: { type: 'success', title: 'Signed copy uploaded', message: successMessage },
+                }));
+                window.setTimeout(() => {
+                    setPreviewReportId((current) => (Number(current) === Number(uploadingReportId) ? null : current));
+                    syncPreviewInUrl(null);
+                    setSignedUploadNotice(null);
+                }, 1400);
+            },
+            onError: (errors) => {
+                setSignedUploadErrors(errors || {});
+                const message = [...new Set(Object.values(errors || {}).flat().filter(Boolean))].slice(0, 2).join(' ')
+                    || 'Unable to upload the signed PDF. Please try again.';
+                setSignedUploadNotice({ type: 'error', message });
+                window.dispatchEvent(new CustomEvent('dromis:toast', {
+                    detail: { type: 'error', title: 'Upload failed', message },
+                }));
+            },
+            onCancel: () => {
+                setSignedUploadNotice({ type: 'error', message: 'Upload was interrupted. Please try again.' });
             },
             onFinish: () => setSubmissionBusy(false),
         });
@@ -2802,10 +3414,9 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
         return status === 'complete' || status === 'na';
     }) ? 'complete' : 'needs';
     const progressGroupRowsStarted = (groups) => groups.reduce((total, [, rows]) => total + rows.length, 0);
-    const reliefAugmentationReady = !withReliefRequest || (
-        requestedFniItems.length > 0
-        && requestedFniItems.every((item) => Number(item.requested_quantity || 0) >= 1)
-    );
+    const fniNeedsComplete = requestedFniItems.length > 0
+        && requestedFniItems.every((item) => Number(item.requested_quantity || 0) >= 1);
+    const reliefAugmentationReady = !withReliefRequest || fniNeedsComplete;
     const advisoryScreenshotRows = officialAdvisoryRows.filter((row) => String(row?.screenshot_data_url || '').trim());
     const advisoryIncidentText = [
         form.data.incident_type,
@@ -2946,14 +3557,18 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
         },
         ...postLifelineGroups.map(progressGroupItem),
         {
-            label: 'REQUEST LETTER (RELIEF AUGMENTATION)',
+            label: 'FNI NEEDS FOR THIS INCIDENT',
             anchor: progressAnchorFor('relief_augmentation'),
-            status: withReliefRequest ? (reliefAugmentationReady ? 'complete' : 'needs') : 'na',
+            status: withReliefRequest
+                ? (fniNeedsComplete ? 'complete' : 'needs')
+                : (requestedFniItems.length ? (fniNeedsComplete ? 'complete' : 'needs') : 'na'),
             summary: withReliefRequest
                 ? (reliefAugmentationReady
                     ? `${formatNumber(requestedFniItems.length)} requested FNI item/s with quantities encoded.`
                     : 'Select at least one FNI item and complete every requested quantity.')
-                : 'No relief augmentation requested for this report.',
+                : (requestedFniItems.length
+                    ? `${formatNumber(requestedFniItems.length)} FNI need/s encoded. Include request is off; a later lump request can total these.`
+                    : 'Optional. Encode FNI needs for affected families here even if Include request stays off.'),
             required: withReliefRequest,
         },
         {
@@ -3143,8 +3758,14 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                 text: form.data.narrative,
                 facts: facts(),
             });
-            form.setData('narrative', data.polished || '');
-            setAiMessage(`${mode === 'generate' ? 'Generated' : 'Polished'} with ${data.provider || 'AI'}. Please review before submitting.`);
+            const previousNarrative = String(form.data.narrative || '').trim();
+            const polished = String(data.polished || '').trim();
+            form.setData('narrative', polished);
+            setAiMessage(mode === 'generate'
+                ? `Generated with ${data.provider || 'AI'}. Please review before submitting.`
+                : polished === previousNarrative
+                    ? 'Polish kept the current wording. Edit a sentence, then try Polish again.'
+                    : `Polished with ${data.provider || 'AI'}. Please review before submitting.`);
         } catch (error) {
             setAiMessage(error?.response?.data?.message || 'AI helper is unavailable. You can still encode and submit manually.');
         } finally {
@@ -3229,6 +3850,12 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
             if (narrativeIssue) {
                 setValidationNotice(narrativeIssue);
                 jumpToDromicSection('dromic-section-situation-overview');
+                return;
+            }
+
+            if (requestedFniItems.length > 0 && requestedFniItems.some((row) => Number(row.requested_quantity || 0) < 1)) {
+                setValidationNotice('Every selected FNI need must have a quantity of 1 or more. These items can be encoded without ticking Include request.');
+                jumpToDromicSection('dromic-section-relief-request');
                 return;
             }
 
@@ -3340,7 +3967,7 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                 affected_families: totalsFromRows('affected_families') || data.affected_families,
                 affected_persons: totalsFromRows('affected_persons') || data.affected_persons,
                 narrative: data.narrative || generatedNarrative,
-                requested_fni_items: data.has_relief_request ? data.requested_fni_items : [],
+                requested_fni_items: data.requested_fni_items || [],
                 evacuation_center_rows: isSectionNotApplicable('inside_ec') ? [] : data.evacuation_center_rows,
                 assistance_rows: isSectionNotApplicable('assistance') ? [] : data.assistance_rows,
                 related_incident_rows: isSectionNotApplicable('related_incidents') ? [] : data.related_incident_rows,
@@ -3398,7 +4025,7 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                     syncPreviewInUrl(finalizedReportId, 'incident');
                 }
                 router.reload({
-                    only: ['requests', 'incidentGroups', 'monitoringSummary'],
+                    only: ['requests', 'incidentGroups', 'monitoringSummary', 'reliefRequestIncidentOptions'],
                     preserveScroll: true,
                     preserveState: true,
                 });
@@ -3428,22 +4055,27 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
         <AppLayout title="DROMIC / SitRep">
             <Head title={isProvince ? 'PLGU DROMIC Monitoring' : 'LGU DROMIC Reports'} />
             <div className="space-y-6">
-                <Card>
-                    <div className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                            <p className="text-xs font-black uppercase tracking-wide text-emerald-700">{isProvince ? 'PLGU Monitoring View' : 'LGU DROMIC / Situational Reporting'}</p>
+                <Card className="overflow-hidden">
+                    <div className="flex flex-col gap-4 bg-gradient-to-br from-slate-950 via-slate-900 to-teal-950 p-5 text-white lg:flex-row lg:items-start lg:justify-between">
+                        <div className="min-w-0 flex-1">
+                            <p className="text-xs font-black uppercase tracking-wide text-cyan-200">{isProvince ? 'PLGU Monitoring View' : 'LGU DROMIC / Situational Reporting'}</p>
                             <h1 className="mt-1 text-2xl font-black">{isProvince ? 'Monitor City / Municipal DROMIC / SitRep' : 'DROMIC / Situational Reports'}</h1>
-                            <p className="mt-1 text-sm text-slate-500">
+                            <p className="mt-1 text-sm text-cyan-100">
                                 {isProvince
                                     ? 'View consolidated and individual city/municipal reports in your province. Relief request processing details are intentionally kept out of this monitoring view.'
-                                    : 'Encode template-style incident facts. If you also need relief augmentation, tick the request option before submitting.'}
+                                    : 'Encode template-style incident facts. For one incident, tick Include request and encode FNI here. For several incidents, leave Include request unchecked, encode per-incident FNI needs if known, then create one lump request — DROMIS totals those needs.'}
                             </p>
-                            <p className="mt-2 text-sm font-bold text-slate-700 dark:text-zinc-200">Signed LGU: {lguProfile?.name || 'LGU account'} {lguProfile?.psgc_code ? `(${lguProfile.psgc_code})` : ''}</p>
+                            <p className="mt-2 text-sm font-bold text-white/80">Signed LGU: {lguProfile?.name || 'LGU account'} {lguProfile?.psgc_code ? `(${lguProfile.psgc_code})` : ''}</p>
                         </div>
                         {!isProvince && (
-                            <button type="button" onClick={openCreateReport} className="inline-flex items-center justify-center gap-2 rounded-md bg-emerald-600 px-4 py-2.5 text-sm font-black text-white shadow-sm hover:bg-emerald-700">
-                                <FilePlus2 className="h-4 w-4" /> Create Report
-                            </button>
+                            <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                                <button type="button" onClick={openConsolidatedRequest} className="inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-violet-300 bg-violet-50 px-4 text-sm font-black text-violet-800 shadow-sm hover:bg-violet-100">
+                                    <FilePlus2 className="h-4 w-4 shrink-0" /> Create Relief Request
+                                </button>
+                                <button type="button" onClick={openCreateReport} className="inline-flex h-10 items-center justify-center gap-2 whitespace-nowrap rounded-md bg-emerald-600 px-4 text-sm font-black text-white shadow-sm hover:bg-emerald-700">
+                                    <FilePlus2 className="h-4 w-4 shrink-0" /> Create Report
+                                </button>
+                            </div>
                         )}
                     </div>
                 </Card>
@@ -3572,13 +4204,40 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                             <td className="w-[430px] min-w-[380px] max-w-[430px] px-4 py-3">
                                 <p className="whitespace-normal break-words font-black leading-5">{activeReportTab === 'requests' ? row.lgu_relief_request_reference : row.report_title}</p>
                                 {row.lgu_correction_of_id && <span className="mt-1 inline-flex rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-black uppercase text-blue-700 ring-1 ring-blue-200">Current revision {Number(row.lgu_dromic_revision_number || 0)}</span>}
+                                {activeReportTab === 'reports' && row.lgu_amendment_request_status === 'requested' && amendmentTargetOf(row) !== 'request' && <span className="mt-1 inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-black uppercase text-amber-800 ring-1 ring-amber-200">Amendment requested</span>}
+                                {activeReportTab === 'reports' && row.lgu_amendment_request_status === 'approved' && amendmentTargetOf(row) !== 'request' && <span className="mt-1 inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black uppercase text-emerald-800 ring-1 ring-emerald-200">Amendment approved</span>}
+                                {activeReportTab === 'reports' && row.lgu_amendment_request_status === 'denied' && amendmentTargetOf(row) !== 'request' && <span className="mt-1 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black uppercase text-slate-700 ring-1 ring-slate-200">Amendment denied</span>}
+                                {activeReportTab === 'requests' && row.lgu_amendment_request_status === 'requested' && amendmentTargetOf(row) === 'request' && <span className="mt-1 inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-black uppercase text-amber-800 ring-1 ring-amber-200">Amendment requested</span>}
+                                {activeReportTab === 'requests' && row.lgu_amendment_request_status === 'approved' && amendmentTargetOf(row) === 'request' && <span className="mt-1 inline-flex rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-black uppercase text-emerald-800 ring-1 ring-emerald-200">Amendment approved</span>}
+                                {activeReportTab === 'requests' && row.lgu_amendment_request_status === 'denied' && amendmentTargetOf(row) === 'request' && <span className="mt-1 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-black uppercase text-slate-700 ring-1 ring-slate-200">Amendment denied</span>}
                                 {activeReportTab === 'requests' && <p className="mt-1 whitespace-normal break-words text-xs font-bold leading-4 text-slate-700 dark:text-zinc-200">{row.report_title}</p>}
                                 <p className="mt-1 whitespace-normal text-xs text-slate-500">{row.reference_number} · {formatDateTime(row.lgu_submitted_to_dswd_at || row.updated_at)}</p>
-                                <p className="mt-1 font-mono text-[11px] font-bold text-emerald-700">{row.incident_code}</p>
+                                {activeReportTab === 'requests' && isStandaloneReliefRequest(row) ? (
+                                    <LinkedIncidentsSummary
+                                        incidents={linkedIncidentsForRow(row)}
+                                        onViewAll={(incidents) => setConsolidatedLinkedViewer({ row, incidents })}
+                                    />
+                                ) : (
+                                    <p className="mt-1 font-mono text-[11px] font-bold text-emerald-700">{row.incident_code}</p>
+                                )}
                             </td>
                             {isProvince && <td className="w-[220px] max-w-[220px] px-4 py-3 font-bold">{lguAndProvince(row)}</td>}
                             <td className="whitespace-nowrap px-4 py-3">{formatDate(row.lgu_dromic_payload?.occurrence_started_at || row.incident?.incident_date)}</td>
-                            <td className="w-[280px] max-w-[280px] px-4 py-3"><p title={affectedAreaSummary(row, barangayOptions)} className="line-clamp-2 whitespace-normal">{affectedAreaSummary(row, barangayOptions)}</p></td>
+                            <td className="w-[280px] max-w-[280px] px-4 py-3">
+                                <AffectedAreasSummaryCell
+                                    areas={activeReportTab === 'requests' && isStandaloneReliefRequest(row)
+                                        ? linkedAffectedAreasForRow(row)
+                                        : null}
+                                    fallbackTitle={affectedAreaSummary(row, barangayOptions)}
+                                    onViewAll={(areas) => setConsolidatedAreasViewer({
+                                        incident_name: row.lgu_relief_request_reference || row.report_title,
+                                        municipality: row.municipality,
+                                        province: row.province,
+                                        incident_code: row.incident_code,
+                                        affected_barangays: areas,
+                                    })}
+                                />
+                            </td>
                             <td className="min-w-[170px] px-4 py-3 font-semibold">{row.series_summary?.last_reporter || row.requester || '-'}</td>
                             {activeReportTab === 'reports' && <td className="w-24 px-3 py-3 text-center"><DromicAdvanceCopyMark submissionStatus={row.lgu_report_status || row.status || 'draft'} /></td>}
                             <td className="w-24 px-3 py-3 text-center">{activeReportTab === 'requests'
@@ -3606,6 +4265,8 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                                 title: kind === 'advance' ? 'Advance Response Letter' : 'Signed Response Letter',
                                                 subtitle: letter?.reference_number || row.reference_number || row.request_code,
                                                 src,
+                                                kind: kind === 'signed' ? 'signed' : null,
+                                                zIndexClass: 'z-[100]',
                                             });
                                         }}
                                     />
@@ -3616,21 +4277,68 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                     <a title="Open report PDF" aria-label="Open report PDF" href={`/lgu/dromic-sitrep/${row.id}/pdf?inline=1`} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-brand-200 bg-brand-50 text-brand-700"><Download className="h-4 w-4" /></a>
                                 ) : (
                                     <div className="flex flex-wrap gap-2">
-                                        {(row.lgu_report_status || row.status) === 'draft' && row.series_summary?.is_terminal ? (
+                                        {(row.lgu_report_status || row.status) === 'draft' && row.series_summary?.is_terminal && !isStandaloneReliefRequest(row) ? (
                                             <span className="rounded-md bg-slate-100 px-2.5 py-1.5 text-xs font-black text-slate-600">Reporting closed</span>
                                         ) : (row.lgu_report_status || row.status) === 'draft' ? (
-                                            <button type="button" title="Continue and finish this draft report" aria-label="Continue and finish this draft report" onClick={() => openDraftReport(row)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200 bg-amber-50 text-amber-800"><Edit3 className="h-4 w-4" /></button>
+                                            <div className="flex flex-wrap gap-2">
+                                                {isStandaloneReliefRequest(row) ? (
+                                                    <button type="button" title="Continue editing this draft relief request" aria-label="Continue editing draft relief request" onClick={() => openConsolidatedEdit(row)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200 bg-amber-50 text-amber-800"><Edit3 className="h-4 w-4" /></button>
+                                                ) : (
+                                                    <button type="button" title="Continue and finish this draft report" aria-label="Continue and finish this draft report" onClick={() => openDraftReport(row)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200 bg-amber-50 text-amber-800"><Edit3 className="h-4 w-4" /></button>
+                                                )}
+                                                {activeReportTab === 'requests' && retainedSignedRequestFor(row) && (
+                                                    <button type="button" title="View signed request letter" aria-label="View signed request letter" onClick={() => openRetainedSignedRequestView(row)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-brand-200 bg-brand-50 text-brand-800"><Eye className="h-4 w-4" /></button>
+                                                )}
+                                                {activeReportTab === 'requests' && isStandaloneReliefRequest(row) && retainedSignedRequestFor(row) && (
+                                                    <button type="button" title="Finalize and submit this relief request to DSWD" aria-label="Finalize and submit relief request to DSWD" onClick={() => finalizeStandaloneReliefForSubmit(row)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-emerald-200 bg-emerald-50 text-emerald-800"><Send className="h-4 w-4" /></button>
+                                                )}
+                                            </div>
                                         ) : (
                                             <>
-                                                {(row.lgu_report_status || row.status) !== 'final'
-                                                    && (activeReportTab === 'requests' ? row.lgu_relief_validation_status : row.lgu_dromic_validation_status) !== 'needs_lgu_action'
-                                                    && (activeReportTab !== 'requests' || Boolean(row.lgu_signed_request_path))
-                                                    && <button type="button" title={activeReportTab === 'requests' ? 'View request letter' : 'Preview DROMIC / SitRep'} aria-label={activeReportTab === 'requests' ? 'View request letter' : 'Preview DROMIC / SitRep'} onClick={() => openDocumentPreview(row, activeReportTab === 'requests' ? 'request' : 'report')} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-brand-200 bg-brand-50 text-brand-800"><Eye className="h-4 w-4" /></button>}
+                                                {canReopenForRevision(row) && (
+                                                    <button
+                                                        type="button"
+                                                        title={isStandaloneReliefRequest(row) || activeReportTab === 'requests'
+                                                            ? 'Revise this finalized request before submitting to DSWD'
+                                                            : 'Revise this finalized report before submitting to DSWD'}
+                                                        aria-label="Revise before submit"
+                                                        disabled={reopenBusy}
+                                                        onClick={() => reopenForRevision(row)}
+                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200 bg-amber-50 text-amber-800 disabled:opacity-50"
+                                                    >
+                                                        <Edit3 className="h-4 w-4" />
+                                                    </button>
+                                                )}
+                                                {activeReportTab === 'requests' && retainedSignedRequestFor(row) && row.lgu_relief_validation_status !== 'needs_lgu_action' && (
+                                                    <button type="button" title="View signed request letter" aria-label="View signed request letter" onClick={() => openRetainedSignedRequestView(row)} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-brand-200 bg-brand-50 text-brand-800"><Eye className="h-4 w-4" /></button>
+                                                )}
+                                                {activeReportTab === 'reports'
+                                                    && (row.lgu_report_status || row.status) !== 'final'
+                                                    && (row.lgu_report_status || row.status) !== 'draft'
+                                                    && row.lgu_dromic_validation_status !== 'needs_lgu_action'
+                                                    && <button type="button" title="Preview DROMIC / SitRep" aria-label="Preview DROMIC / SitRep" onClick={() => openDocumentPreview(row, 'report')} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-brand-200 bg-brand-50 text-brand-800"><Eye className="h-4 w-4" /></button>}
                                                 {activeReportTab === 'requests' && row.lgu_relief_validation_status === 'needs_lgu_action' && <button type="button" title="Preview and correct this request letter" aria-label="Preview and correct request letter" onClick={() => openCorrectionWorkspace(row, 'request')} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-rose-200 bg-rose-50 text-rose-800"><Edit3 className="h-4 w-4" /></button>}
                                                 {activeReportTab === 'requests' && !row.lgu_signed_request_path && ['final', 'advance_submitted', 'submitted'].includes(row.lgu_report_status || row.status) && <button type="button" title="Upload the pending signed request-letter PDF" aria-label="Upload pending signed request letter" onClick={() => openCorrectionWorkspace(row, 'request')} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-violet-200 bg-violet-50 text-violet-800"><UploadCloud className="h-4 w-4" /></button>}
+                                                {activeReportTab === 'reports' && !row.lgu_signed_report_path && ['final', 'advance_submitted', 'submitted'].includes(row.lgu_report_status || row.status) && <button type="button" title="Upload the pending signed DROMIC report PDF" aria-label="Upload pending signed DROMIC report" onClick={() => openDocumentPreview(row, 'incident')} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-violet-200 bg-violet-50 text-violet-800"><UploadCloud className="h-4 w-4" /></button>}
                                                 {activeReportTab === 'reports' && row.lgu_dromic_validation_status === 'needs_lgu_action' && <button type="button" title="Preview and correct this DROMIC / SitRep" aria-label="Preview and correct DROMIC report" onClick={() => openCorrectionWorkspace(row, 'report')} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-rose-200 bg-rose-50 text-rose-800"><Edit3 className="h-4 w-4" /></button>}
+                                                {activeReportTab === 'reports' && canRequestAmendment(row, 'report') && <button type="button" title="Request DRIMS permission to amend this submitted report" aria-label="Request permission to amend report" onClick={() => openAmendmentRequest(row, 'report')} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200 bg-amber-50 text-amber-800"><Undo2 className="h-4 w-4" /></button>}
+                                                {activeReportTab === 'requests' && canRequestAmendment(row, 'request') && <button type="button" title="Request DRRS permission to amend this submitted relief request" aria-label="Request permission to amend relief request" onClick={() => openAmendmentRequest(row, 'request')} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-amber-200 bg-amber-50 text-amber-800"><Undo2 className="h-4 w-4" /></button>}
                                                 {(row.revision_history || []).length > 1 && <button type="button" title={`View ${activeReportTab === 'requests' ? 'request-letter' : 'report'} revision history`} aria-label="View revision history" onClick={() => setRevisionPreview({ row, kind: activeReportTab === 'requests' ? 'request' : 'report' })} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-indigo-200 bg-indigo-50 text-indigo-800"><History className="h-4 w-4" /></button>}
                                                 {(row.signed_document_versions || []).some((version) => version.kind === (activeReportTab === 'requests' ? 'request' : 'report')) && <button type="button" title={`View previous uploaded signed ${activeReportTab === 'requests' ? 'request letters' : 'reports'}`} aria-label="View previous uploaded signed documents" onClick={() => setHistoryPreview({ row, kind: activeReportTab === 'requests' ? 'request' : 'report' })} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-700"><Images className="h-4 w-4" /></button>}
+                                                {activeReportTab === 'requests' && (row.lgu_report_status || row.status) === 'final' && (
+                                                    <button
+                                                        type="button"
+                                                        title="Submit this relief request to DSWD"
+                                                        aria-label="Submit relief request to DSWD"
+                                                        disabled={submissionBusy}
+                                                        onClick={() => (isStandaloneReliefRequest(row)
+                                                            ? finalizeStandaloneReliefForSubmit(row)
+                                                            : openDocumentPreview(row, 'incident'))}
+                                                        className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-emerald-200 bg-emerald-50 text-emerald-800 disabled:opacity-50"
+                                                    >
+                                                        <Send className="h-4 w-4" />
+                                                    </button>
+                                                )}
                                                 {activeReportTab === 'reports' && (row.lgu_report_status || row.status) === 'final' && (
                                                     <button type="button" title="Finish and submit this finalized report" aria-label="Finish and submit this finalized report" onClick={() => openDocumentPreview(row, 'incident')} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-emerald-200 bg-emerald-50 text-emerald-800"><Send className="h-4 w-4" /></button>
                                                 )}
@@ -3661,6 +4369,281 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                     )}
                 </Card>
             </div>
+
+            {consolidatedRequestOpen && (
+                <div className="fixed inset-0 z-[230] flex items-start justify-center overflow-y-auto bg-slate-950/70 p-2 backdrop-blur-sm sm:p-5" role="dialog" aria-modal="true" aria-labelledby="consolidated-relief-title">
+                    <form onSubmit={submitConsolidatedRequest} className="my-auto flex max-h-[calc(100dvh-1rem)] w-full max-w-5xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-950 sm:max-h-[calc(100dvh-2.5rem)]">
+                        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-violet-200 bg-gradient-to-r from-violet-50 to-emerald-50 p-4 sm:p-5 dark:border-violet-900 dark:from-violet-950/40 dark:to-emerald-950/30">
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-wide text-violet-700">Standalone consolidated request</p>
+                                <h2 id="consolidated-relief-title" className="mt-1 text-xl font-black">
+                                    {editingConsolidatedId ? 'Revise Relief Augmentation Request' : 'Create Relief Augmentation Request'}
+                                </h2>
+                                <p className="mt-1 text-sm text-slate-600 dark:text-zinc-300">
+                                    {editingConsolidatedId
+                                        ? 'This request is pre-filled from the previous encoding. Add or remove incidents of the same type, adjust FNI quantities, and keep or replace the signed request letter before saving as final.'
+                                        : 'Select one or more existing incidents of the same type. FNI quantities encoded on those reports are totaled here; if none were encoded, add them in step 2 before submitting.'}
+                                </p>
+                            </div>
+                            <button type="button" onClick={closeConsolidatedRequestModal} className="shrink-0 rounded-md border bg-white p-2 text-slate-600" aria-label="Close consolidated request"><X className="h-5 w-5" /></button>
+                        </div>
+                        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4 sm:p-5">
+                            <section className="rounded-lg border border-slate-200 p-4 dark:border-zinc-800">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div>
+                                        <h3 className="font-black">1. Select incidents</h3>
+                                        <p className="text-xs text-slate-500">
+                                            {editingConsolidatedId
+                                                ? 'Previously linked incidents stay selected. You can remove them or add other eligible incidents of the same type.'
+                                                : 'Only finalized incidents with an uploaded signed DROMIC report and no existing relief request are listed. One lump request may include only one incident type.'}
+                                        </p>
+                                    </div>
+                                    {selectedConsolidatedType && <span className="rounded-full bg-violet-100 px-3 py-1 text-xs font-black text-violet-800">Locked type: {selectedConsolidatedType}</span>}
+                                </div>
+                                {selectedConsolidatedType && Object.keys(reliefOptionsByType).length > 1 && (
+                                    <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold leading-5 text-amber-950">
+                                        Other incident types are dimmed and cannot be mixed into this request. Clear the current selection to switch type.
+                                    </p>
+                                )}
+                                {consolidatedOptionsLoading ? (
+                                    <p className="mt-3 rounded-md bg-sky-50 p-4 text-sm font-bold text-sky-900">Refreshing eligible incidents…</p>
+                                ) : reliefRequestIncidentOptions.length ? (
+                                    <div className="mt-3 space-y-4">
+                                        {Object.entries(reliefOptionsByType).map(([type, incidents]) => {
+                                            const typeLockedOut = Boolean(selectedConsolidatedType)
+                                                && String(type).toLocaleLowerCase() !== String(selectedConsolidatedType).toLocaleLowerCase();
+                                            return (
+                                                <div key={type} className={typeLockedOut ? 'opacity-55' : ''}>
+                                                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                                                        <p className="text-xs font-black uppercase tracking-wide text-violet-700">{type}</p>
+                                                        {typeLockedOut && <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-600">Different type — unavailable</span>}
+                                                    </div>
+                                                    <div className="grid gap-2 md:grid-cols-2">
+                                                        {incidents.map((incident) => {
+                                                            const selected = consolidatedForm.data.incident_series_keys.includes(incident.series_key);
+                                                            const disabled = !selected && Boolean(selectedConsolidatedType)
+                                                                && String(incident.incident_type).toLocaleLowerCase() !== String(selectedConsolidatedType).toLocaleLowerCase();
+                                                            const areas = normalizeAffectedAreas(incident);
+                                                            const previewAreas = areas.slice(0, AFFECTED_AREA_PREVIEW_LIMIT);
+                                                            const hiddenAreaCount = Math.max(areas.length - previewAreas.length, 0);
+                                                            const fniCount = Number(incident.fni_item_count ?? (incident.requested_fni_items || []).length);
+                                                            const locationBits = [incident.municipality, incident.province].filter(Boolean).join(', ');
+                                                            return (
+                                                                <label
+                                                                    key={incident.series_key}
+                                                                    className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition ${selected ? 'border-violet-400 bg-violet-50 ring-2 ring-violet-100' : disabled ? 'cursor-not-allowed border-slate-100 bg-slate-50 opacity-45' : 'border-slate-200 hover:border-violet-300'}`}
+                                                                >
+                                                                    <input type="checkbox" className="mt-1" checked={selected} disabled={disabled} onChange={() => toggleConsolidatedIncident(incident)} />
+                                                                    <span className="min-w-0 flex-1">
+                                                                        <span className="block font-black">{incident.incident_name}</span>
+                                                                        <span className="mt-1 block text-xs font-bold text-violet-700">{incident.incident_type}</span>
+                                                                        <span className="mt-1 block text-xs text-slate-500">
+                                                                            {incident.incident_code} · {formatDate(incident.occurrence_started_at)} · {Number(incident.affected_families || 0).toLocaleString()} affected families
+                                                                            {locationBits ? ` · ${locationBits}` : ''}
+                                                                        </span>
+                                                                        <span className="mt-2 flex flex-wrap items-start gap-x-2 gap-y-1 text-xs text-slate-600">
+                                                                            <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-600" />
+                                                                            <span className="min-w-0">
+                                                                                <span className="font-bold text-slate-700">Affected area/s: </span>
+                                                                                {areas.length === 0
+                                                                                    ? <span className="text-slate-500">Not encoded</span>
+                                                                                    : (
+                                                                                        <>
+                                                                                            <span>{previewAreas.join(', ')}</span>
+                                                                                            {hiddenAreaCount > 0 && (
+                                                                                                <button
+                                                                                                    type="button"
+                                                                                                    className="ml-1 font-black text-violet-700 underline decoration-violet-300 underline-offset-2 hover:text-violet-900"
+                                                                                                    onClick={(event) => {
+                                                                                                        event.preventDefault();
+                                                                                                        event.stopPropagation();
+                                                                                                        setConsolidatedAreasViewer(incident);
+                                                                                                    }}
+                                                                                                >
+                                                                                                    View all {areas.length}
+                                                                                                </button>
+                                                                                            )}
+                                                                                        </>
+                                                                                    )}
+                                                                            </span>
+                                                                        </span>
+                                                                        <span className={`mt-2 inline-flex rounded-full px-2 py-0.5 text-[11px] font-black ${fniCount > 0 ? 'bg-emerald-50 text-emerald-800' : 'bg-amber-50 text-amber-900'}`}>
+                                                                            {fniCount > 0 ? `${fniCount} FNI item${fniCount === 1 ? '' : 's'} encoded` : 'No FNI encoded — add in step 2'}
+                                                                        </span>
+                                                                    </span>
+                                                                </label>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                ) : <p className="mt-3 rounded-md bg-amber-50 p-4 text-sm font-bold text-amber-800">No finalized incident with an uploaded signed report is currently available.</p>}
+                                {consolidatedForm.errors.incident_series_keys && <p className="mt-2 text-sm font-bold text-rose-700">{consolidatedForm.errors.incident_series_keys}</p>}
+                            </section>
+
+                            <section className={`rounded-lg border border-slate-200 p-4 dark:border-zinc-800 ${!hasConsolidatedIncidentChoices ? 'pointer-events-none opacity-45' : ''}`} aria-disabled={!hasConsolidatedIncidentChoices}>
+                                <h3 className="font-black">2. Requested relief items</h3>
+                                <p className="mt-1 text-xs text-slate-500">{!hasConsolidatedIncidentChoices
+                                    ? 'Select an eligible incident first. This section unlocks when at least one finalized incident with a signed DROMIC report is available.'
+                                    : !selectedConsolidatedIncidents.length
+                                        ? 'Select one or more incidents above. Encoded FNI totals will appear here when available.'
+                                        : selectedEncodedFniCount
+                                            ? 'These quantities were totaled from FNI encoded on the selected reports. Edit the combined totals if needed.'
+                                            : editingConsolidatedId
+                                                ? 'Adjust the pre-filled request items, or add more FNI before saving.'
+                                                : 'No FNI needs were encoded on the selected reports. Add the combined request items here before submitting.'}</p>
+                                {selectedMissingEncodedFni && !editingConsolidatedId && (
+                                    <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs font-semibold leading-5 text-amber-950">
+                                        <p className="font-black">Forgot to encode FNI on the SitRep?</p>
+                                        <p className="mt-1">You can still create this lump request. Use the FNI picker below to add items and quantities now. They will be stored with this relief augmentation request only and will not rewrite the signed DROMIC reports.</p>
+                                    </div>
+                                )}
+                                <div className="mt-3"><LookerMultiSelect label="Food and Non-Food Items (FNI)" options={requestedFniOptions} value={consolidatedRequestedIds} onApply={setConsolidatedFniSelection} placeholder="Search FNI item name..." allLabel="Select one or more FNI items" disabled={!hasConsolidatedIncidentChoices} /></div>
+                                {consolidatedForm.errors.requested_fni_items && <p className="mt-2 text-sm font-bold text-rose-700">{consolidatedForm.errors.requested_fni_items}</p>}
+                                {consolidatedRequestedItems.length > 0 && <div className="mt-3 divide-y overflow-hidden rounded-md border">
+                                    {consolidatedRequestedItems.map((row, index) => {
+                                        const item = fniLibraryItems.find((candidate) => String(candidate.id) === String(row.fni_library_item_id));
+                                        return <div key={row.fni_library_item_id} className="grid items-center gap-3 p-3 sm:grid-cols-[1fr_220px]"><div><p className="font-black">{item?.item_name}</p><p className="text-xs text-slate-500">{item?.unit_of_measure ? `Unit: ${item.unit_of_measure}` : item?.item_category}</p></div><div><input type="text" inputMode="numeric" pattern="[0-9]*" className="w-full" disabled={!hasConsolidatedIncidentChoices} value={wholeQuantityInputValue(row.requested_quantity)} onChange={(event) => setConsolidatedFniQuantity(row.fni_library_item_id, event.target.value)} placeholder="Requested quantity" />{consolidatedForm.errors[`requested_fni_items.${index}.requested_quantity`] && <p className="mt-1 text-xs font-bold text-rose-700">{consolidatedForm.errors[`requested_fni_items.${index}.requested_quantity`]}</p>}</div></div>;
+                                    })}
+                                </div>}
+                                {selectedConsolidatedIncidents.length > 0 && consolidatedRequestedItems.length === 0 && (
+                                    <p className="mt-3 text-xs font-bold text-rose-700">Add at least one FNI item with quantity to continue.</p>
+                                )}
+                            </section>
+
+                            <section className={`rounded-lg border border-slate-200 p-4 dark:border-zinc-800 ${!hasConsolidatedIncidentChoices ? 'pointer-events-none opacity-45' : ''}`} aria-disabled={!hasConsolidatedIncidentChoices}>
+                                <h3 className="font-black">3. Upload signed LGU request</h3>
+                                <p className="mt-1 text-sm text-slate-500">{!hasConsolidatedIncidentChoices
+                                    ? 'Select an eligible incident first. The signed request-letter upload unlocks with section 1.'
+                                    : editingConsolidatedId
+                                        ? (editingHasRetainedSignedRequest
+                                            ? 'The current signed request letter is kept. Replace it only if the PDF needs to change.'
+                                            : 'Attach the signed relief augmentation request letter covering the selected incidents. PDF only, up to 10 MB. Required when saving as final.')
+                                        : 'Attach the signed relief augmentation request letter covering all selected incidents. PDF only, up to 10 MB.'}</p>
+                                {editingConsolidatedId && editingRetainedSignedRequest && (
+                                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 dark:border-emerald-900 dark:bg-emerald-950/30">
+                                        <div className="min-w-0">
+                                            <p className="text-xs font-black uppercase tracking-wide text-emerald-800">Current signed letter</p>
+                                            <p className="mt-1 truncate text-sm font-bold text-emerald-950 dark:text-emerald-100">{editingRetainedSignedRequest.name}</p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => openSignedRequestPdfPreview(editingRetainedSignedRequest, {
+                                                title: 'Signed request letter',
+                                                zIndexClass: 'z-[250]',
+                                            })}
+                                            className="inline-flex items-center gap-1.5 rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-black text-emerald-800"
+                                        >
+                                            <Eye className="h-3.5 w-3.5" /> View
+                                        </button>
+                                    </div>
+                                )}
+                                <label className={`mt-3 flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-violet-300 bg-violet-50 px-4 py-7 text-center transition dark:border-violet-800 dark:bg-violet-950/30 ${hasConsolidatedIncidentChoices ? 'cursor-pointer hover:bg-violet-100' : 'cursor-not-allowed'}`}>
+                                    <UploadCloud className="h-8 w-8 text-violet-700" />
+                                    <span className="mt-2 font-black text-violet-900 dark:text-violet-100">{consolidatedForm.data.signed_request?.name || (editingHasRetainedSignedRequest ? 'Replace signed request-letter PDF (optional)' : 'Choose signed request-letter PDF')}</span>
+                                    <span className="mt-1 text-xs text-violet-700 dark:text-violet-300">
+                                        {editingHasRetainedSignedRequest
+                                            ? 'Leave unchanged to keep the current signed letter.'
+                                            : 'The document will be stored with this consolidated request.'}
+                                    </span>
+                                    <input type="file" accept="application/pdf,.pdf" className="sr-only" disabled={!hasConsolidatedIncidentChoices} onChange={(event) => consolidatedForm.setData('signed_request', event.target.files?.[0] || null)} />
+                                </label>
+                                {consolidatedForm.errors.signed_request && <p className="mt-2 text-sm font-bold text-rose-700">{consolidatedForm.errors.signed_request}</p>}
+                            </section>
+                        </div>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-3 border-t bg-slate-50 p-4 dark:bg-zinc-900">
+                            <button type="button" onClick={closeConsolidatedRequestModal} className="rounded-md border bg-white px-4 py-2 text-sm font-black">Cancel</button>
+                            {editingConsolidatedId ? (
+                                <>
+                                    <button
+                                        type="submit"
+                                        data-save-mode="final"
+                                        disabled={consolidatedForm.processing || !canSubmitConsolidatedUpdate}
+                                        onClick={() => { consolidatedSaveModeRef.current = 'final'; }}
+                                        className="rounded-md bg-violet-700 px-5 py-2 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        {consolidatedForm.processing && consolidatedSaveModeRef.current === 'final' ? 'Saving...' : 'Update Request'}
+                                    </button>
+                                    <button
+                                        type="submit"
+                                        data-save-mode="draft"
+                                        disabled={consolidatedForm.processing || !consolidatedForm.data.incident_series_keys.length || !consolidatedRequestedItems.length}
+                                        onClick={() => { consolidatedSaveModeRef.current = 'draft'; }}
+                                        className="rounded-md border border-amber-300 bg-amber-50 px-5 py-2 text-sm font-black text-amber-900 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                        {consolidatedForm.processing && consolidatedSaveModeRef.current === 'draft' ? 'Saving...' : 'Save draft'}
+                                    </button>
+                                </>
+                            ) : (
+                                <button type="submit" disabled={consolidatedForm.processing || !consolidatedForm.data.incident_series_keys.length || !consolidatedRequestedItems.length || !consolidatedForm.data.signed_request} className="rounded-md bg-violet-700 px-5 py-2 text-sm font-black text-white disabled:cursor-not-allowed disabled:opacity-50">{consolidatedForm.processing ? 'Creating...' : 'Create Request'}</button>
+                            )}
+                        </div>
+                    </form>
+                </div>
+            )}
+
+            {consolidatedAreasViewer && (
+                <div className="fixed inset-0 z-[240] flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="consolidated-areas-title">
+                    <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-2xl dark:bg-zinc-900">
+                        <div className="flex items-start justify-between gap-3">
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-wide text-violet-700">Affected area/s</p>
+                                <h3 id="consolidated-areas-title" className="mt-1 text-lg font-black">{consolidatedAreasViewer.incident_name || 'Selected incident'}</h3>
+                                <p className="mt-1 text-xs text-slate-500">
+                                    {[consolidatedAreasViewer.municipality, consolidatedAreasViewer.province].filter(Boolean).join(', ') || consolidatedAreasViewer.incident_code}
+                                </p>
+                            </div>
+                            <button type="button" onClick={() => setConsolidatedAreasViewer(null)} className="rounded-md border p-2" aria-label="Close affected areas"><X className="h-4 w-4" /></button>
+                        </div>
+                        <ul className="mt-4 max-h-72 space-y-2 overflow-y-auto">
+                            {normalizeAffectedAreas(consolidatedAreasViewer).map((area) => (
+                                <li key={area} className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-semibold text-slate-800 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100">
+                                    <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-violet-600" />
+                                    <span>{area}</span>
+                                </li>
+                            ))}
+                        </ul>
+                        <button type="button" onClick={() => setConsolidatedAreasViewer(null)} className="mt-4 w-full rounded-md bg-violet-700 px-4 py-2 text-sm font-black text-white">Close</button>
+                    </div>
+                </div>
+            )}
+
+            {consolidatedLinkedViewer && (
+                <div className="fixed inset-0 z-[240] flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="consolidated-linked-title">
+                    <div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-2xl dark:bg-zinc-900">
+                        <div className="flex items-start justify-between gap-3">
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-wide text-violet-700">Linked incidents</p>
+                                <h3 id="consolidated-linked-title" className="mt-1 text-lg font-black">
+                                    {consolidatedLinkedViewer.row?.lgu_relief_request_reference || 'Consolidated request'}
+                                </h3>
+                                <p className="mt-1 text-xs text-slate-500">
+                                    {consolidatedLinkedViewer.incidents.length} incident{consolidatedLinkedViewer.incidents.length === 1 ? '' : 's'} covered by this relief request
+                                </p>
+                            </div>
+                            <button type="button" onClick={() => setConsolidatedLinkedViewer(null)} className="rounded-md border p-2" aria-label="Close linked incidents"><X className="h-4 w-4" /></button>
+                        </div>
+                        <ul className="mt-4 max-h-80 space-y-2 overflow-y-auto">
+                            {consolidatedLinkedViewer.incidents.map((incident) => {
+                                const areas = normalizeAffectedAreas(incident);
+                                return (
+                                    <li key={incident.series_key || incident.incident_code} className="rounded-md border border-slate-200 bg-slate-50 p-3 dark:border-zinc-700 dark:bg-zinc-950">
+                                        <p className="font-black text-slate-900 dark:text-zinc-100">{incident.incident_name || incident.incident_type || 'Incident'}</p>
+                                        <p className="mt-1 font-mono text-[11px] font-bold text-emerald-700">{incident.incident_code}</p>
+                                        <p className="mt-1 text-xs text-slate-500">
+                                            {areas.length ? areas.join(', ') : 'No affected areas encoded'}
+                                            {incident.affected_families != null ? ` · ${Number(incident.affected_families || 0).toLocaleString()} families` : ''}
+                                        </p>
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                        <button type="button" onClick={() => setConsolidatedLinkedViewer(null)} className="mt-4 w-full rounded-md bg-violet-700 px-4 py-2 text-sm font-black text-white">Close</button>
+                    </div>
+                </div>
+            )}
 
             {open && (
                 <div className="fixed inset-0 z-[80] flex overflow-hidden bg-slate-950/60 backdrop-blur-sm">
@@ -4249,30 +5232,20 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                 />
 
                                 <DromicSectionCard id="dromic-section-relief-request">
-                                    <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                                        <div className="min-w-0">
-                                            <p className="text-lg font-black uppercase tracking-wide text-emerald-700">Request Letter (Relief Augmentation)</p>
-                                            <p className="mt-1 text-sm text-slate-500 dark:text-zinc-400">
-                                                Leave this unchecked if you only need to submit a DROMIC report for monitoring and verification. Check it only when you are formally requesting FNI or other relief augmentation from DRMD.
-                                            </p>
-                                        </div>
-                                        <label className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-black text-slate-800 hover:bg-slate-100 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100">
-                                            <input
-                                                type="checkbox"
-                                                className="h-4 w-4 rounded border-slate-300 text-emerald-700 focus:ring-emerald-600"
-                                                checked={withReliefRequest}
-                                                onChange={(event) => form.setData('has_relief_request', event.target.checked)}
-                                            />
-                                            Include request
-                                        </label>
+                                    <div className="min-w-0">
+                                        <p className="text-lg font-black uppercase tracking-wide text-emerald-700">FNI needs for this incident</p>
+                                        <p className="mt-1 text-sm text-slate-500 dark:text-zinc-400">
+                                            Encode the Food and Non-Food Items this incident needs for its affected families. You can do this without filing a request letter. If you later create a lump request, these quantities are totaled automatically.
+                                        </p>
                                     </div>
-                                    {withReliefRequest && (
-                                        <div className="mt-4 space-y-4">
+                                    <div className="mt-4 space-y-4">
                                             <div className="rounded-md border border-sky-200 bg-sky-50 px-4 py-3 text-sm font-semibold leading-6 text-sky-900 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-100">
-                                                The selected items and quantities will serve as advance information so DSWD can prepare while awaiting the LGU&apos;s signed request letter. Final processing remains subject to the assigned social worker&apos;s assessment, the signed request, and the prescribed approval workflow.
+                                                {Number(totalAffectedFamilies || 0) > 0
+                                                    ? `New item quantities start from ${Number(totalAffectedFamilies).toLocaleString()} affected families. Change a quantity if this incident needs more or less.`
+                                                    : 'Encode affected families first if you want quantities to start from that count. You can still select items and type quantities now.'}
                                             </div>
                                             <LookerMultiSelect
-                                                label="Requested Food and Non-Food Items (FNI)"
+                                                label="Food and Non-Food Items (FNI) needed"
                                                 options={requestedFniOptions}
                                                 value={requestedFniIds}
                                                 onApply={setRequestedFniSelection}
@@ -4284,7 +5257,7 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                                 <div className="overflow-hidden rounded-md border border-slate-200 dark:border-zinc-800">
                                                     <div className="grid grid-cols-[minmax(0,1fr)_minmax(150px,220px)] gap-3 bg-slate-50 px-4 py-2 text-xs font-black uppercase tracking-wide text-slate-600 dark:bg-zinc-900 dark:text-zinc-300">
                                                         <span>Selected FNI item</span>
-                                                        <span>Requested quantity</span>
+                                                        <span>Needed quantity</span>
                                                     </div>
                                                     <div className="divide-y divide-slate-200 dark:divide-zinc-800">
                                                         {requestedFniItems.map((row, index) => {
@@ -4316,8 +5289,28 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                                     </div>
                                                 </div>
                                             )}
+                                        <div className="rounded-md border border-slate-200 bg-slate-50 p-4 dark:border-zinc-800 dark:bg-zinc-950">
+                                            <label className="flex cursor-pointer items-start gap-3 text-sm font-black text-slate-800 dark:text-zinc-100">
+                                                <input
+                                                    type="checkbox"
+                                                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-emerald-700 focus:ring-emerald-600"
+                                                    checked={withReliefRequest}
+                                                    onChange={(event) => form.setData('has_relief_request', event.target.checked)}
+                                                />
+                                                <span>
+                                                    File a single-incident request with this report
+                                                    <span className="mt-1 block text-sm font-semibold text-slate-500 dark:text-zinc-400">
+                                                        Leave this off for DROMIC encoding and for later lump requests. Tick it only if you will submit a formal request letter to DRMD for this incident only.
+                                                    </span>
+                                                </span>
+                                            </label>
+                                            {withReliefRequest && (
+                                                <p className="mt-3 text-sm font-semibold leading-6 text-sky-900 dark:text-sky-100">
+                                                    This incident will not appear in Create Relief Request. Upload a signed request letter with this report after finalizing.
+                                                </p>
+                                            )}
                                         </div>
-                                    )}
+                                    </div>
                                 </DromicSectionCard>
 
                                 <OfficialAdvisorySection
@@ -4382,10 +5375,11 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                 type="button"
                                 onClick={() => {
                                     setDraftPreviewZoom(1);
+                                    setDraftPreviewTab('narrative');
                                     setDraftPreviewOpen(true);
                                 }}
                                 className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-black text-slate-700"
-                                title="Preview encoded DROMIC / SitRep from the values currently in this form"
+                                title="Preview the LGU narrative report from the values currently in this form"
                             >
                                 <Eye className="h-4 w-4" /> Preview Report
                             </button>
@@ -4475,26 +5469,49 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                         zIndexClass="z-[195]"
                         eyebrow="Document preview"
                         badge="Draft / local preview"
-                        title="DROMIC / Situational Report"
-                        subtitle="Paper preview · live values from this encoding form (not a signed PDF)"
-                        notice="Draft preview only — finalize and generate the PDF to print or download the official advance copy."
+                        title="LGU Narrative Report"
+                        subtitle={draftPreviewTab === 'encoded'
+                            ? 'Encoded worksheet structure from live form values'
+                            : 'Official DomPDF layout of the LGU DROMIC / Situational Report (not a signed PDF)'}
+                        notice={draftPreviewTab === 'encoded'
+                            ? 'Encoded data view only — switch to Narrative Report for the official PDF layout.'
+                            : 'Draft PDF preview only — finalize to generate the official advance PDF.'}
+                        tabs={[
+                            { id: 'narrative', label: 'Narrative Report', icon: FileCheck2 },
+                            { id: 'encoded', label: 'Encoded Data', icon: ListChecks },
+                        ]}
+                        activeTab={draftPreviewTab}
+                        onTabChange={setDraftPreviewTab}
                         zoom={draftPreviewZoom}
                         onZoomChange={setDraftPreviewZoom}
                         paperWidth="210mm"
+                        usePaperCanvas={draftPreviewTab === 'encoded'}
                     >
-                        <DromicEncodedReportBody
-                            report={{
-                                reference_number: editingReport?.reference_number || 'Draft DROMIC / SitRep',
-                                requesting_agency: form.data.requesting_lgu || lguProfile?.name,
-                                municipality: form.data.municipality || lguProfile?.name,
-                                province: form.data.province || lguProfile?.province,
-                                requester: form.data.requester_name || form.data.dromic_reporter,
-                                affected_families: form.data.affected_families,
-                                affected_persons: form.data.affected_persons,
-                                lgu_dromic_report_number: editingReport?.lgu_dromic_report_number || 1,
-                                lgu_dromic_payload: form.data,
-                            }}
-                        />
+                        {draftPreviewTab === 'encoded' ? (
+                            <DromicEncodedReportBody
+                                report={{
+                                    reference_number: editingReport?.reference_number || 'Draft DROMIC / SitRep',
+                                    requesting_agency: form.data.requesting_lgu || lguProfile?.name,
+                                    municipality: form.data.municipality || lguProfile?.name,
+                                    province: form.data.province || lguProfile?.province,
+                                    requester: form.data.requester_name || form.data.dromic_reporter,
+                                    affected_families: form.data.affected_families,
+                                    affected_persons: form.data.affected_persons,
+                                    lgu_dromic_report_number: editingReport?.lgu_dromic_report_number || 1,
+                                    lgu_dromic_payload: form.data,
+                                }}
+                            />
+                        ) : draftPreviewBusy ? (
+                            <div className="flex min-h-[60vh] items-center justify-center p-8 text-sm font-bold text-slate-600">Building narrative report PDF…</div>
+                        ) : draftPreviewError ? (
+                            <div className="flex min-h-[60vh] items-center justify-center p-8 text-center text-sm font-bold text-rose-700">{draftPreviewError}</div>
+                        ) : draftPreviewUrl ? (
+                            <iframe
+                                title="LGU narrative report PDF preview"
+                                src={`${draftPreviewUrl}#toolbar=1&navpanes=0`}
+                                className="h-full min-h-[60vh] w-full bg-slate-200"
+                            />
+                        ) : null}
                     </DocumentPreviewModal>
                 </div>
             )}
@@ -4587,14 +5604,14 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                     <div className="mx-auto flex h-full w-full max-w-7xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-900">
                         <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4">
                             <div>
-                                <p className="text-xs font-black uppercase tracking-wide text-emerald-700">{previewMode === 'request' ? 'Request Letter Preview' : previewMode === 'incident' && bothDocumentsValidated ? 'Combined Incident Documents Preview' : previewMode === 'incident' ? 'Incident Document Preview' : 'DROMIC / SitRep Preview'}</p>
-                                <h3 className="font-black">{previewMode === 'request' ? (previewReport?.lgu_relief_request_reference || 'Request Letter') : previewReport?.reference_number || 'DROMIC / Situational Report'}</h3>
+                                <p className="text-xs font-black uppercase tracking-wide text-emerald-700">{previewMode === 'request' && previewIncludesRequestLetter ? 'Request Letter Preview' : previewMode === 'incident' && bothDocumentsValidated ? 'Combined Incident Documents Preview' : previewMode === 'incident' ? 'Incident Document Preview' : 'DROMIC / SitRep Preview'}</p>
+                                <h3 className="font-black">{previewMode === 'request' && previewIncludesRequestLetter ? (previewReport?.lgu_relief_request_reference || 'Request Letter') : previewReport?.reference_number || 'DROMIC / Situational Report'}</h3>
                             </div>
                             <div className="flex flex-wrap items-center gap-2">
                                 {previewDocumentKind === 'report' && <button type="button" title={previewControlsCollapsed ? 'Show preview controls' : 'Collapse preview controls for more document space'} aria-label={previewControlsCollapsed ? 'Show preview controls' : 'Collapse preview controls'} onClick={() => setPreviewControlsCollapsed((value) => !value)} className="rounded-md border p-2 text-slate-700">{previewControlsCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}</button>}
-                                {previewMode === 'incident' && !isProvince && <button type="button" title={previewSidebarCollapsed ? 'Show submission and validation panel' : 'Collapse side panel for a wider document view'} aria-label={previewSidebarCollapsed ? 'Show side panel' : 'Collapse side panel'} onClick={() => setPreviewSidebarCollapsed((value) => !value)} className="rounded-md border p-2 text-slate-700">{previewSidebarCollapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</button>}
+                                {showSignedCopiesPanel && <button type="button" title={previewSidebarCollapsed ? 'Show submission and validation panel' : 'Collapse side panel for a wider document view'} aria-label={previewSidebarCollapsed ? 'Show side panel' : 'Collapse side panel'} onClick={() => setPreviewSidebarCollapsed((value) => !value)} className="rounded-md border p-2 text-slate-700">{previewSidebarCollapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</button>}
                                 {previewCanExport && previewDocumentKind === 'report' && <button type="button" onClick={printReport} className="inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs font-black"><Printer className="h-4 w-4" /> Print</button>}
-                                {previewCanExport && <a href={(previewMode === 'request' || (previewMode === 'incident' && combinedPreviewTab === 'request'))
+                                {previewCanExport && <a href={(previewMode === 'request' || (previewMode === 'incident' && combinedPreviewTab === 'request')) && previewIncludesRequestLetter
                                     ? `/lgu/dromic-sitrep/${previewReportId}/signed-copy/request`
                                     : reportCopyTab === 'signed' && previewReport?.lgu_signed_report_path
                                         ? `/lgu/dromic-sitrep/${previewReportId}/signed-copy/report`
@@ -4617,10 +5634,10 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                 ]}
                             />
                         </div>}
-                        <div className={`grid min-h-0 flex-1 ${previewMode === 'incident' && !previewSidebarCollapsed ? 'lg:grid-cols-[1fr_360px]' : previewMode === 'request' || (previewMode !== 'incident' && previewValidationNote) ? 'lg:grid-cols-[1fr_320px]' : 'grid-cols-1'}`}>
+                        <div className={`grid min-h-0 flex-1 ${showSignedCopiesPanel && !previewSidebarCollapsed ? 'lg:grid-cols-[1fr_360px]' : previewMode === 'request' || (previewMode !== 'incident' && previewMode !== 'report' && previewValidationNote) ? 'lg:grid-cols-[1fr_320px]' : 'grid-cols-1'}`}>
                             {previewDocumentKind === 'report' && previewContentTab === 'encoded' ? (
                                 <ReadonlyDromicReportModal report={previewReport} embedded />
-                            ) : previewMode === 'request' ? (
+                            ) : previewMode === 'request' && previewIncludesRequestLetter ? (
                                 previewReport?.lgu_signed_request_path ? (
                                     <SignedPdfPreview
                                         src={`/lgu/dromic-sitrep/${previewReportId}/signed-copy/request`}
@@ -4628,7 +5645,7 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                         title="Signed request letter preview"
                                     />
                                 ) : <div className="flex min-h-[60vh] items-center justify-center p-8 text-center"><div><UploadCloud className="mx-auto h-10 w-10 text-amber-500" /><p className="mt-3 font-black">Signed request letter not yet uploaded</p><p className="mt-1 text-sm text-slate-500">Upload it from the incident preview before opening the request document.</p></div></div>
-                            ) : previewMode === 'incident' && !bothDocumentsValidated && combinedPreviewTab === 'request' ? (
+                            ) : previewMode === 'incident' && previewIncludesRequestLetter && !bothDocumentsValidated && combinedPreviewTab === 'request' ? (
                                 previewReport?.lgu_signed_request_path
                                     ? <SignedPdfPreview
                                         src={`/lgu/dromic-sitrep/${previewReportId}/signed-copy/request`}
@@ -4660,9 +5677,9 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                             ? <SignedPdfPreview
                                                 src={`/lgu/dromic-sitrep/${previewReportId}/signed-copy/report`}
                                                 filename={previewReport?.lgu_signed_report_name || previewReport?.reference_number || 'Signed DROMIC report.pdf'}
-                                                title="Validated DROMIC report preview"
+                                                title="Signed DROMIC report preview"
                                             />
-                                            : <iframe title="Validated DROMIC report preview" src={`/lgu/dromic-sitrep/${previewReportId}/pdf?inline=1`} className="h-full min-h-[60vh] w-full flex-1 bg-slate-100" />}
+                                            : <iframe title="Advance DROMIC report preview" src={`/lgu/dromic-sitrep/${previewReportId}/pdf?inline=1`} className="h-full min-h-[60vh] w-full flex-1" />}
                                 </div>
                             ) : <div className="flex min-h-0 flex-col bg-slate-100">
                                 {previewReport?.lgu_report_status === 'submitted' && previewReport?.lgu_signed_report_path && !previewControlsCollapsed && (
@@ -4688,50 +5705,100 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                     />
                                     : <iframe title="Advance DROMIC report preview" src={`/lgu/dromic-sitrep/${previewReportId}/pdf?inline=1`} className="h-full min-h-[60vh] w-full flex-1" />}
                             </div>}
-                            {previewMode === 'incident' && !isProvince && previewReport && !previewSidebarCollapsed && (
+                            {showSignedCopiesPanel && !previewSidebarCollapsed && (
                                 <aside className="overflow-y-auto border-l p-4">
                                     <StatusBadge row={previewReport} />
                                     <ValidationNoteCard row={previewReport} kind={previewDocumentKind} />
                                     {previewDocumentKind === 'report' && previewReport.lgu_dromic_validation_status === 'needs_lgu_action' && ['encoding', 'both'].includes(previewReport.lgu_dromic_correction_scope) && <button type="button" onClick={() => startCorrectionDraft(previewReport, 'report')} className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md bg-rose-700 px-3 py-2 text-xs font-black text-white"><Edit3 className="h-4 w-4" /> Correct Encoded Report Entries</button>}
                                     {previewDocumentKind === 'request' && previewReport.lgu_relief_validation_status === 'needs_lgu_action' && ['encoding', 'both'].includes(previewReport.lgu_relief_correction_scope) && <button type="button" onClick={() => startCorrectionDraft(previewReport, 'request')} className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md bg-rose-700 px-3 py-2 text-xs font-black text-white"><Edit3 className="h-4 w-4" /> Correct Encoded Request Entries</button>}
+                                    {canReopenForRevision(previewReport) && (
+                                        <button type="button" disabled={reopenBusy} onClick={() => reopenForRevision(previewReport)} className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-black text-amber-900 disabled:opacity-50">
+                                            <Edit3 className="h-4 w-4" /> Revise before submit
+                                        </button>
+                                    )}
+                                    {canRequestAmendment(previewReport, previewDocumentKind === 'request' ? 'request' : 'report') && (
+                                        <button type="button" onClick={() => openAmendmentRequest(previewReport, previewDocumentKind === 'request' ? 'request' : 'report')} className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-black text-amber-900">
+                                            <Undo2 className="h-4 w-4" /> Request permission to amend
+                                        </button>
+                                    )}
+                                    {previewReport.lgu_amendment_request_status === 'requested' && amendmentTargetOf(previewReport) === (previewDocumentKind === 'request' ? 'request' : 'report') && (
+                                        <p className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs font-semibold leading-5 text-amber-950">
+                                            Amendment request is pending {previewDocumentKind === 'request' ? 'DRRS' : 'DRIMS'} review. Encoding stays locked until approved.
+                                        </p>
+                                    )}
+                                    {previewReport.lgu_amendment_request_status === 'denied' && amendmentTargetOf(previewReport) === (previewDocumentKind === 'request' ? 'request' : 'report') && (
+                                        <p className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs font-semibold leading-5 text-slate-700">Amendment request was denied{previewReport.lgu_amendment_review_note ? `: ${previewReport.lgu_amendment_review_note}` : '.'}</p>
+                                    )}
                                     <h4 className="mt-5 font-black">Signed copies</h4>
                                     <p className="mt-1 text-xs leading-5 text-slate-500">
-                                        {previewReport.lgu_dromic_payload?.has_relief_request
-                                            ? 'A signed report and a signed LGU relief augmentation request letter are both required for a complete submission.'
-                                            : 'A signed report is required for a complete submission.'}
+                                        {previewIsStandaloneRelief
+                                            ? 'This consolidated relief request only requires the signed LGU relief augmentation request letter.'
+                                            : previewIncludesRequestLetter
+                                                ? 'A signed report and a signed LGU relief augmentation request letter are both required for a complete submission.'
+                                                : 'A signed report is required for a complete submission. Encoding FNI needs alone does not require a signed request letter.'}
                                     </p>
-                                    <label className="mt-4 block text-xs font-black">DROMIC signed report (PDF only)</label>
-                                    {signedReportLocked
-                                        ? <p className="mt-1 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs font-bold text-emerald-800"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5" />Locked after signed PDF validation — no findings</p>
-                                        : reportReplacementAllowed
-                                            ? <input type="file" accept="application/pdf,.pdf" onChange={(event) => setSignedReport(event.target.files?.[0] || null)} className="mt-1 block w-full text-xs" />
-                                            : <p className="mt-1 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs font-bold text-slate-600">Replacement becomes available only if DSWD marks this report as Needs LGU Action.</p>}
-                                    {previewReport.lgu_signed_report_name && <a target="_blank" rel="noreferrer" href={`/lgu/dromic-sitrep/${previewReport.id}/signed-copy/report`} className="mt-1 block text-xs font-bold text-emerald-700 underline">Uploaded: {previewReport.lgu_signed_report_name}</a>}
-                                    {previewReport.lgu_dromic_payload?.has_relief_request && (
+                                    {signedUploadNotice && (
+                                        <p className={`mt-3 rounded-md border px-3 py-2 text-xs font-bold leading-5 ${
+                                            signedUploadNotice.type === 'success'
+                                                ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                                                : signedUploadNotice.type === 'info'
+                                                    ? 'border-sky-200 bg-sky-50 text-sky-950'
+                                                    : 'border-rose-200 bg-rose-50 text-rose-900'
+                                        }`}>
+                                            {signedUploadNotice.message}
+                                        </p>
+                                    )}
+                                    {!previewIsStandaloneRelief && (
                                         <>
-                                            <label className="mt-4 block text-xs font-black">Request Letter (Relief Augmentation) — PDF only</label>
+                                            <label className="mt-4 block text-xs font-black">DROMIC signed report (PDF only)</label>
+                                            {signedReportLocked
+                                                ? <p className="mt-1 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs font-bold text-emerald-800"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5" />Locked after signed PDF validation — no findings</p>
+                                                : reportReplacementAllowed
+                                                    ? <input ref={signedReportInputRef} type="file" accept="application/pdf,.pdf" onChange={(event) => { setSignedUploadErrors((prev) => ({ ...prev, signed_report: undefined })); setSignedUploadNotice(null); setSignedReport(event.target.files?.[0] || null); }} className="mt-1 block w-full text-xs" />
+                                                    : <p className="mt-1 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs font-bold text-slate-600">Replacement becomes available only if DSWD marks this report as Needs LGU Action.</p>}
+                                            {signedUploadErrors.signed_report && <p className="mt-1 text-xs font-bold text-rose-700">{Array.isArray(signedUploadErrors.signed_report) ? signedUploadErrors.signed_report[0] : signedUploadErrors.signed_report}</p>}
+                                            {previewReport.lgu_signed_report_name && <a target="_blank" rel="noreferrer" href={`/lgu/dromic-sitrep/${previewReport.id}/signed-copy/report`} className="mt-1 block text-xs font-bold text-emerald-700 underline">Uploaded: {previewReport.lgu_signed_report_name}</a>}
+                                        </>
+                                    )}
+                                    {previewIncludesRequestLetter && (
+                                        <>
+                                            <label className="mt-4 block text-xs font-black">Request for Relief Augmentation — PDF only</label>
                                             {signedRequestLocked
                                                 ? <p className="mt-1 rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs font-bold text-emerald-800"><CheckCircle2 className="mr-1 inline h-3.5 w-3.5" />Locked after DRRS validation — no findings</p>
                                                 : requestReplacementAllowed
-                                                    ? <input type="file" accept="application/pdf,.pdf" onChange={(event) => setSignedRequest(event.target.files?.[0] || null)} className="mt-1 block w-full text-xs" />
+                                                    ? <input ref={signedRequestInputRef} type="file" accept="application/pdf,.pdf" onChange={(event) => { setSignedUploadErrors((prev) => ({ ...prev, signed_request: undefined })); setSignedUploadNotice(null); setSignedRequest(event.target.files?.[0] || null); }} className="mt-1 block w-full text-xs" />
                                                     : <p className="mt-1 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs font-bold text-slate-600">Replacement becomes available only if DRRS marks this request letter as Needs LGU Action.</p>}
+                                            {signedUploadErrors.signed_request && <p className="mt-1 text-xs font-bold text-rose-700">{Array.isArray(signedUploadErrors.signed_request) ? signedUploadErrors.signed_request[0] : signedUploadErrors.signed_request}</p>}
                                             {previewReport.lgu_signed_request_name && <a target="_blank" rel="noreferrer" href={`/lgu/dromic-sitrep/${previewReport.id}/signed-copy/request`} className="mt-1 block text-xs font-bold text-emerald-700 underline">Uploaded: {previewReport.lgu_signed_request_name}</a>}
                                         </>
                                     )}
-                                    <button type="button" disabled={submissionBusy || (!signedReport && !signedRequest) || (signedReportLocked && Boolean(signedReport)) || (signedRequestLocked && Boolean(signedRequest))} onClick={uploadSignedCopies} className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-800 disabled:opacity-50"><UploadCloud className="h-4 w-4" /> Upload Selected PDF</button>
+                                    <button
+                                        type="button"
+                                        disabled={submissionBusy || (previewIsStandaloneRelief ? !signedRequest : (!signedReport && !(previewIncludesRequestLetter && signedRequest))) || (signedReportLocked && Boolean(signedReport)) || (signedRequestLocked && Boolean(signedRequest))}
+                                        onClick={uploadSignedCopies}
+                                        className={`mt-4 inline-flex w-full items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-black disabled:cursor-not-allowed disabled:opacity-50 ${
+                                            !submissionBusy && (previewIsStandaloneRelief ? Boolean(signedRequest) : (signedReport || (previewIncludesRequestLetter && signedRequest)))
+                                                ? 'bg-emerald-700 text-white hover:bg-emerald-800'
+                                                : 'border border-emerald-200 bg-emerald-50 text-emerald-800'
+                                        }`}
+                                    >
+                                        <UploadCloud className="h-4 w-4" /> {submissionBusy ? 'Uploading…' : 'Upload Selected PDF'}
+                                    </button>
                                     {previewReport.lgu_report_status === 'final' && (
                                         <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-3">
                                             <p className="text-xs leading-5 text-amber-900">
-                                                You may submit now. If required signed copies are missing, DSWD will receive an advance copy and the system will continue reminding the LGU until the signed requirements are complete.
+                                                {previewIsStandaloneRelief
+                                                    ? 'You may submit this consolidated relief request to DSWD now. The signed request letter is already attached.'
+                                                    : 'You may submit now. If required signed copies are missing, DSWD will receive an advance copy and the system will continue reminding the LGU until the signed requirements are complete.'}
                                             </p>
-                                            <button type="button" disabled={submissionBusy} onClick={submitReportToDswd} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-emerald-700 px-3 py-2 text-xs font-black text-white disabled:opacity-50"><Send className="h-4 w-4" /> Submit to DSWD</button>
+                                            <button type="button" disabled={submissionBusy || (previewIsStandaloneRelief && !previewReport.lgu_signed_request_path)} onClick={submitReportToDswd} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-emerald-700 px-3 py-2 text-xs font-black text-white disabled:opacity-50"><Send className="h-4 w-4" /> Submit to DSWD</button>
                                         </div>
                                     )}
                                     {previewReport.lgu_report_status === 'advance_submitted' && (
                                         <div className="mt-6 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sky-950">
                                             <p className="text-xs font-black uppercase tracking-wide">Advance copy already sent</p>
                                             <p className="mt-1 text-xs leading-5">
-                                                This report has already been received by DSWD and OCD Caraga for advance reporting. Upload the remaining signed {previewReport.lgu_dromic_payload?.has_relief_request ? 'report and request letter' : 'report'} above. DROMIS will automatically mark the submission complete when all required signed copies are attached.
+                                                This report has already been received by DSWD and OCD Caraga for advance reporting. Upload the remaining signed {previewIncludesRequestLetter ? 'report and request letter' : 'report'} above. DROMIS will automatically mark the submission complete when all required signed copies are attached.
                                             </p>
                                         </div>
                                     )}
@@ -4743,20 +5810,66 @@ export default function Index({ lguProfile, defaultIncidentDate, requests, corre
                                     )}
                                 </aside>
                             )}
-                            {previewMode === 'request' && previewReport && <RequestedFniPanel rows={previewReport.lgu_dromic_payload?.requested_fni_items} row={previewReport} />}
-                            {previewMode === 'report' && previewReport && previewValidationNote && <aside className="overflow-y-auto border-l bg-white p-4 dark:bg-zinc-900"><ValidationNoteCard row={previewReport} kind="report" /></aside>}
+                            {previewMode === 'request' && previewIncludesRequestLetter && previewReport && <RequestedFniPanel rows={previewReport.lgu_dromic_payload?.requested_fni_items} row={previewReport} />}
+                            {previewMode === 'report' && !showSignedCopiesPanel && previewReport && previewValidationNote && <aside className="overflow-y-auto border-l bg-white p-4 dark:bg-zinc-900"><ValidationNoteCard row={previewReport} kind="report" /></aside>}
                         </div>
                     </div>
                 </div>
             )}
             {historyPreview && <SignedDocumentHistoryModal row={historyPreview.row} kind={historyPreview.kind} onClose={() => setHistoryPreview(null)} />}
             {revisionPreview && <RevisionHistoryModal row={revisionPreview.row} kind={revisionPreview.kind} onClose={() => setRevisionPreview(null)} />}
+            {amendmentRequestRow && (
+                <div className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/70 p-4">
+                    <form onSubmit={submitAmendmentRequest} className="w-full max-w-lg rounded-xl bg-white p-6 shadow-2xl dark:bg-zinc-900">
+                        <div className="flex items-start justify-between gap-3">
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-wide text-amber-700">
+                                    {amendmentRequestTarget === 'request' ? 'Same request letter' : 'Same report number'}
+                                </p>
+                                <h3 className="mt-1 text-lg font-black">Request permission to amend</h3>
+                                <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-zinc-300">
+                                    {amendmentRequestTarget === 'request'
+                                        ? `Ask DRRS to allow updates on ${amendmentRequestRow.lgu_relief_request_reference || amendmentRequestRow.reference_number || 'this relief request'} after it was already submitted to DSWD. Use this when omitted FNI or request details need revision and DRRS has not already returned the request for correction.`
+                                        : `Ask DRIMS to allow encoding updates on ${amendmentRequestRow.reference_number || amendmentRequestRow.report_title} after it was already submitted to DSWD, without creating the next SitRep.`}
+                                </p>
+                            </div>
+                            <button type="button" onClick={() => { setAmendmentRequestRow(null); setAmendmentRequestTarget('report'); }} className="rounded-md border p-2" aria-label="Close amendment request"><X className="h-4 w-4" /></button>
+                        </div>
+                        <label className="mt-4 block text-sm font-black">
+                            Reason
+                            <textarea
+                                required
+                                minLength={20}
+                                maxLength={2000}
+                                rows={5}
+                                value={amendmentReason}
+                                onChange={(event) => setAmendmentReason(event.target.value)}
+                                className="mt-1 w-full rounded-md border-slate-300 text-sm"
+                                placeholder={amendmentRequestTarget === 'request'
+                                    ? 'Describe the omitted request/FNI details and why a new relief request is not appropriate.'
+                                    : 'Describe the omitted data and why creating the next report is not reasonable.'}
+                            />
+                        </label>
+                        <p className="mt-2 text-xs text-slate-500">
+                            Minimum 20 characters. {amendmentRequestTarget === 'request' ? 'DRRS' : 'DRIMS'} will approve or deny this request.
+                        </p>
+                        <div className="mt-5 flex justify-end gap-2">
+                            <button type="button" onClick={() => { setAmendmentRequestRow(null); setAmendmentRequestTarget('report'); }} className="rounded-md border px-4 py-2 text-sm font-bold">Cancel</button>
+                            <button type="submit" disabled={amendmentBusy || amendmentReason.trim().length < 20} className="rounded-md bg-amber-700 px-4 py-2 text-sm font-black text-white disabled:opacity-50">
+                                {amendmentBusy ? 'Sending...' : (amendmentRequestTarget === 'request' ? 'Send to DRRS' : 'Send to DRIMS')}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            )}
             <PdfPreviewModal
                 open={responseLetterPreview.open}
                 title={responseLetterPreview.title}
                 subtitle={responseLetterPreview.subtitle}
                 src={responseLetterPreview.src}
-                onClose={() => setResponseLetterPreview({ open: false, title: '', subtitle: null, src: null })}
+                kind={responseLetterPreview.kind}
+                zIndexClass={responseLetterPreview.zIndexClass || 'z-[100]'}
+                onClose={closePdfPreview}
             />
         </AppLayout>
     );
@@ -5337,6 +6450,62 @@ function SummaryCard({ title, value }) {
                 </div>
             </div>
         </Card>
+    );
+}
+
+function LinkedIncidentsSummary({ incidents = [], onViewAll }) {
+    const rows = Array.isArray(incidents) ? incidents : [];
+    if (!rows.length) {
+        return <p className="mt-1 text-xs font-bold text-slate-500">No linked incidents</p>;
+    }
+    const preview = rows.slice(0, 2);
+    const hidden = Math.max(rows.length - preview.length, 0);
+    return (
+        <div className="mt-1 space-y-1">
+            {preview.map((incident) => (
+                <p key={incident.series_key || incident.incident_code} className="font-mono text-[11px] font-bold text-emerald-700">
+                    {incident.incident_code}
+                    {incident.incident_name ? <span className="font-sans font-semibold text-slate-500"> · {incident.incident_name}</span> : null}
+                </p>
+            ))}
+            {hidden > 0 && (
+                <button
+                    type="button"
+                    onClick={() => onViewAll?.(rows)}
+                    className="text-[11px] font-black text-violet-700 underline decoration-violet-300 underline-offset-2 hover:text-violet-900"
+                >
+                    View all {rows.length} linked incidents
+                </button>
+            )}
+            {rows.length > 1 && hidden === 0 && (
+                <p className="text-[11px] font-bold text-slate-500">{rows.length} incidents linked</p>
+            )}
+        </div>
+    );
+}
+
+function AffectedAreasSummaryCell({ areas = null, fallbackTitle = '-', onViewAll }) {
+    if (!Array.isArray(areas)) {
+        return <p title={fallbackTitle} className="line-clamp-2 whitespace-normal">{fallbackTitle}</p>;
+    }
+    if (!areas.length) {
+        return <p className="text-sm text-slate-500">Not encoded</p>;
+    }
+    const preview = areas.slice(0, AFFECTED_AREA_PREVIEW_LIMIT);
+    const hidden = Math.max(areas.length - preview.length, 0);
+    return (
+        <div>
+            <p title={areas.join(', ')} className="line-clamp-2 whitespace-normal">{preview.join(', ')}</p>
+            {hidden > 0 && (
+                <button
+                    type="button"
+                    onClick={() => onViewAll?.(areas)}
+                    className="mt-1 text-[11px] font-black text-violet-700 underline decoration-violet-300 underline-offset-2 hover:text-violet-900"
+                >
+                    View all {areas.length} areas
+                </button>
+            )}
+        </div>
     );
 }
 
@@ -8374,7 +9543,7 @@ function BarangayAssistanceProvidedTable({ rows, areaRows = [], addRow, updateRo
                     </select>
                 </td>
                 <td className="dromic-control-cell border border-slate-300 p-1 align-top">
-                    <FriendlyInput value={row.particular} onChange={(value) => updateRow(index, 'particular', value)} placeholder="Example: Family food pack" required />
+                    {String(row.item_type || '').toLowerCase() === 'financial assistance' ? <select value={row.particular ?? ''} onChange={(event) => updateRow(index, 'particular', event.target.value)} className="w-full rounded-md border-2 border-emerald-300 bg-emerald-50 px-2 py-2 text-xs font-black text-slate-900 focus:border-emerald-600 focus:ring-2 focus:ring-emerald-300" required><option value="">Select program</option>{['AICS', 'AKAP', 'ECT', 'CFW', 'SLP'].map((program) => <option key={program} value={program}>{program}</option>)}</select> : <FriendlyInput value={row.particular} onChange={(value) => updateRow(index, 'particular', value)} placeholder="Example: Family food pack" required />}
                 </td>
                 <td className="dromic-control-cell border border-slate-300 p-1 align-top">
                     <FriendlyInput type="number" value={row.cost_per_unit} onChange={(value) => updateRow(index, 'cost_per_unit', value)} placeholder="0.00" required />
@@ -8558,7 +9727,7 @@ function AssistanceProvidedTable({ rows, updateRow, requestRemoveRow, totalAffec
                                     </select>
                                 </td>
                                 <td className="dromic-control-cell border border-slate-300 p-1 align-top">
-                                    <FriendlyInput value={row.particular} onChange={(value) => updateRow(index, 'particular', value)} placeholder="Example: 5-kilo rice" required />
+                                    {String(row.item_type || '').toLowerCase() === 'financial assistance' ? <select value={row.particular ?? ''} onChange={(event) => updateRow(index, 'particular', event.target.value)} className="w-full rounded-md border-2 border-emerald-300 bg-emerald-50 px-2 py-2 text-xs font-black text-slate-900 focus:border-emerald-600 focus:ring-2 focus:ring-emerald-300" required><option value="">Select program</option>{['AICS', 'AKAP', 'ECT', 'CFW', 'SLP'].map((program) => <option key={program} value={program}>{program}</option>)}</select> : <FriendlyInput value={row.particular} onChange={(value) => updateRow(index, 'particular', value)} placeholder="Example: 5-kilo rice" required />}
                                 </td>
                                 <td className="dromic-control-cell border border-slate-300 p-1 align-top">
                                     <FriendlyInput type="number" value={row.cost_per_unit} onChange={(value) => updateRow(index, 'cost_per_unit', value)} placeholder="₱0.00" required />

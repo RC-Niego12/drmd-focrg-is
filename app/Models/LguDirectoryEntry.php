@@ -36,6 +36,11 @@ class LguDirectoryEntry extends Model
         return $this->hasMany(LguDirectoryLswdoAlternate::class)->orderBy('sort_order');
     }
 
+    public function staffMembers(): HasMany
+    {
+        return $this->hasMany(LguDirectoryStaffMember::class)->orderBy('sort_order');
+    }
+
     public function getLogoUrlAttribute(): ?string
     {
         return $this->publicUrl($this->lgu_logo_path);

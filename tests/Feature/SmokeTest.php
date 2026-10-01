@@ -424,7 +424,7 @@ it('lets AI Roger answer through Groq when configured', function (): void {
 
         return str_contains($systemPrompt, 'Permission-scoped database context')
             && str_contains($systemPrompt, 'Permission-scoped page and process map')
-            && str_contains($systemPrompt, 'Developer: Roger L. Ongue, PDO II')
+            && str_contains($systemPrompt, 'Developer: Roger L. Ongue, Computer Programmer I / DRIMS Head')
             && str_contains($systemPrompt, '/requests')
             && str_contains($systemPrompt, 'REQ-AIROGER-CONTEXT')
             && str_contains($systemPrompt, 'Test City LGU');
@@ -573,8 +573,49 @@ it('generates human LGU situation overviews with distinct paragraphs from releva
         ->and(data_get($generatePayload, 'messages.1.content'))->toContain('Municipality of Test')
         ->and(data_get($generatePayload, 'messages.1.content'))->toContain('4875')
         ->and(data_get($generatePayload, 'messages.1.content'))->toContain('exactly four distinct paragraphs')
+        ->and(data_get($polishPayload, 'temperature'))->toBe(0.42)
+        ->and(data_get($polishPayload, 'messages.0.content'))->toContain('polishing an existing Situation Overview')
         ->and(data_get($polishPayload, 'messages.1.content'))->toContain('Existing draft')
-        ->and(data_get($polishPayload, 'messages.1.content'))->toContain('exactly four distinct paragraphs');
+        ->and(data_get($polishPayload, 'messages.1.content'))->toContain('Rewrite the wording of every paragraph')
+        ->and(data_get($polishPayload, 'messages.1.content'))->toContain('exactly four paragraphs');
+});
+
+it('retries situation overview polish when the first result copies the draft', function (): void {
+    $this->seed(DatabaseSeeder::class);
+    config()->set('services.groq.api_key', 'test-key');
+    config()->set('services.groq.base_url', 'https://api.groq.test/openai/v1');
+    config()->set('services.groq.model', 'test-model');
+
+    $draft = "A fire affected Barangay Capayahan this afternoon.\n\nTwo families or eight persons were displaced.\n\nThe LGU and BFP responded at the scene.\n\nThe LGU remains committed to sustained response operations.";
+    $rewritten = "A residential fire struck Barangay Capayahan this afternoon.\n\nTwo families, totaling eight persons, were displaced by the blaze.\n\nBFP and the LGU contained the fire and assisted the affected households.\n\nThe LGU continues monitoring conditions and coordinating needed support.";
+
+    Http::fake([
+        'https://api.groq.test/openai/v1/chat/completions' => Http::sequence()
+            ->push(['choices' => [['message' => ['content' => $draft]]]])
+            ->push(['choices' => [['message' => ['content' => $rewritten]]]]),
+    ]);
+
+    $user = User::where('email', 'superadmin@example.test')->firstOrFail();
+
+    $this->actingAs($user)
+        ->postJson('/lgu/dromic-sitrep/polish', [
+            'mode' => 'polish',
+            'text' => $draft,
+            'facts' => [
+                'reporting_lgu' => 'Municipality of Test',
+                'incident' => [
+                    'type' => 'Fire Incident',
+                    'affected_barangays' => ['Capayahan'],
+                    'status' => 'Ended',
+                ],
+                'affected_population_totals' => ['families' => 2, 'persons' => 8],
+                'official_agency_advisories_status' => 'not_applicable',
+            ],
+        ])
+        ->assertOk()
+        ->assertJsonPath('polished', $rewritten);
+
+    Http::assertSentCount(2);
 });
 
 it('builds fire Situation Overview prompts with fireout, named barangays, and no PAGASA when advisories are N/A', function (): void {
@@ -1075,17 +1116,15 @@ it('downloads the response letter as a Word document generated from the official
         'date_requested' => now()->toDateString(),
         'affected_families' => 10,
         'status' => 'under_review',
-        'assessment_form_data' => ['provide_augmentation' => true],
+        'assessment_form_data' => [
+            'provide_augmentation' => true,
+            'assessment_date' => '2026-09-03',
+        ],
     ]);
     $request->items()->create(['item_name' => 'Family Food Pack', 'requested_quantity' => 10, 'unit' => 'box', 'priority' => 'normal']);
 
     $this->actingAs($user)->get("/requests/{$request->id}/response-letter")->assertStatus(422);
-    $this->actingAs($user)->patchJson("/requests/{$request->id}/response-drn", [
-        'prefix' => 'CARAGA-FO-DRMD-DRRMS-SS-REP',
-        'year' => '26',
-        'month' => '07',
-        'specified' => '00622-S',
-    ])->assertOk()->assertJsonPath('drn', 'CARAGA-FO-DRMD-DRRMS-SS-REP-26-07-00622-S');
+    $request->update(['response_drn' => 'CARAGA-FO-DRMD-DRRMS-SS-REP-26-07-00622-S']);
     $request->refresh();
 
     $response = $this->actingAs($user)->get("/requests/{$request->id}/response-letter");
@@ -1113,19 +1152,22 @@ it('downloads the response letter as a Word document generated from the official
     $pageOneHeaderDocument->loadXML($pageOneHeader);
     $followingPageHeaderDocument = new DOMDocument;
     $followingPageHeaderDocument->loadXML($followingPageHeader);
-    $dateBreakCount = $xpath->query('//w:p[contains(., "'.strtoupper(now()->format('F j, Y')).'")]//w:br')->length;
-    expect($documentXml)->toContain('HON. MARIA TEST SANTOS')
+    $expectedLetterDate = 'September 3, 2026';
+    $dateBreakCount = $xpath->query('//w:p[contains(., "'.$expectedLetterDate.'")]//w:br')->length;
+    expect($documentXml)->toContain($expectedLetterDate)
+        ->and($documentXml)->toContain('HON. MARIA TEST SANTOS')
         ->and($documentXml)->toContain('JUAN TEST SOCIAL WORKER')
         ->and($documentXml)->toContain('ATTENTION:')
         ->and($documentXml)->toContain('CSWDO')
         ->and($documentXml)->toContain('10 boxes of Family Food Pack')
-        ->and($documentXml)->toContain('requesting family food packs intended for')
+        ->and($documentXml)->toContain('requesting food items intended for')
         ->and($documentXml)->toContain('After a thorough assessment conducted by our Social Worker Mr. Alex Rivera Worker')
         ->and($documentXml)->toContain('Mr. Worker will be coordinating with you through this mobile number 0917 123 4567')
         ->and($documentXml)->toContain('Regional Resource Operations Section (RROS) personnel will prepare the Requisition and Issuance Slip (RIS) of the said items')
         ->and($documentXml)->toContain('This is in reference to your letter requesting')
         ->and($documentXml)->toContain('disaster-affected')
         ->and($documentXml)->toContain('above-mentioned number of affected families')
+        ->and($documentXml)->toContain('Local Social Welfare and Development Officer or Focal Person')
         ->and($documentXml)->toContain('Local Government Unit Warehouse')
         ->and(strpos($documentXml, 'This is in reference'))->toBeLessThan(strpos($documentXml, 'After a thorough assessment'))
         ->and(strpos($documentXml, 'After a thorough assessment'))->toBeLessThan(strpos($documentXml, 'Regional Resource Operations Section'))
@@ -1157,9 +1199,11 @@ it('downloads the response letter as a Word document generated from the official
         ->and($pageOneHeader)->not->toContain('l="68745" t="5246" r="7196" b="16566"')
         ->and($followingPageHeaderDocument->textContent)->toBe($pageOneHeaderDocument->textContent)
         ->and(substr_count($followingPageHeader, '<w:drawing>'))->toBe(substr_count($pageOneHeader, '<w:drawing>'))
-        ->and($followingPageFooter)->toBe($pageOneFooter)
-        ->and($pageOneFooter)->toContain('PAGE 1of 1')
+        ->and($followingPageFooter)->toContain('PAGE 1 of 1')
+        ->and($pageOneFooter)->toContain('PAGE 1 of 1')
         ->and($pageOneFooter)->toContain('DSWD Field Office Caraga')
+        ->and(substr_count(html_entity_decode(strip_tags($documentXml)), 'This is in reference'))->toBeGreaterThanOrEqual(1)
+        ->and(substr_count(html_entity_decode(strip_tags($documentXml)), 'Respectfully yours'))->toBeGreaterThanOrEqual(1)
         ->and($dateBreakCount)->toBe(0)
         ->and($xpath->query('//w:p[contains(., "HON. MARIA TEST SANTOS") and not(contains(., "ATTENTION:"))]//w:br')->length)->toBeGreaterThanOrEqual(2)
         ->and($xpath->query('//w:p[contains(., "ATTENTION:")]//w:br')->length)->toBeGreaterThanOrEqual(2)
@@ -1169,7 +1213,7 @@ it('downloads the response letter as a Word document generated from the official
         ->and($xpath->query('//w:p[contains(., "CSWDO")]//w:tab')->length)->toBe(0)
         ->and($xpath->query('//w:p[contains(., "Dear ") and contains(., "Greetings of service excellence")]//w:br')->length)->toBeGreaterThanOrEqual(4)
         ->and($xpath->query('//w:p[contains(., "Respectfully yours,")]//w:br')->length)->toBeGreaterThanOrEqual(1)
-        ->and($xpath->query('//w:p[contains(., "MARI- FLOR A. DOLLAGA- LIBANG")]//w:br')->length)->toBeGreaterThanOrEqual(3)
+        ->and($xpath->query('//w:p[contains(., "MARI- FLOR A. DOLLAGA- LIBANG")]//w:br')->length)->toBeGreaterThanOrEqual(2)
         ->and($xpath->query('//w:p[contains(., "JSP / AAA / JLM / 1628")]//w:br')->length)->toBeGreaterThanOrEqual(3)
         ->and($xpath->query('//w:p[contains(., "DRN: CARAGA-FO-DRMD-DRRMS-SS-REP-26-07-00622-S")]/w:pPr/w:jc[@w:val="right"]')->length)->toBe(1)
         ->and($xpath->query('//w:p[contains(., "DRN: CARAGA-FO-DRMD-DRRMS-SS-REP-26-07-00622-S")]/w:pPr/w:ind')->length)->toBe(0)

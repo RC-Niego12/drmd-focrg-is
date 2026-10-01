@@ -3,6 +3,7 @@ import { Boxes, CalendarDays, Eye, Filter, PackageCheck, Search, Truck, UsersRou
 import { useMemo, useState } from 'react';
 import AppLayout, { Card, DataTable, ExportableCard, TableActionButton } from '@/Layouts/AppLayout';
 import LookerMultiSelect from '@/Components/LookerMultiSelect';
+import { formatExpiryMonth } from '@/Utils/dateFormat';
 
 const colors = ['#3b82f6', '#f97316', '#a855f7', '#9fbd4b', '#31b7c2', '#ef4444', '#14b8a6', '#f59e0b'];
 const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -384,7 +385,7 @@ function renderLedgerRow(row, setDetailRow) {
             <td className="whitespace-nowrap px-4 py-3 text-right font-black">{formatNumber(row.quantity)}</td>
             <td className="whitespace-nowrap px-4 py-3 text-right font-semibold">{formatCurrency(row.unit_cost)}</td>
             <td className="whitespace-nowrap px-4 py-3 text-right font-black">{formatCurrency(row.cost)}</td>
-            <td className="whitespace-nowrap px-4 py-3 text-sm">{row.expiry_month}</td>
+            <td className="whitespace-nowrap px-4 py-3 text-sm">{formatExpiryMonth(row.expiry_month)}</td>
             <td className="max-w-44 px-4 py-3 text-sm">{row.recipient}</td>
             <td className="max-w-52 px-4 py-3 text-sm">{row.delivery_site}</td>
             <td className="whitespace-nowrap px-4 py-3 text-sm">{row.expected_delivery_date}</td>
@@ -443,7 +444,7 @@ function IssuanceDetailModal({ row, onClose }) {
         ['Recipient', row.recipient],
         ['Delivery Site', row.delivery_site],
         ['Expected Delivery Date', row.expected_delivery_date],
-        ['Expiry Month', row.expiry_month],
+        ['Expiry Month', formatExpiryMonth(row.expiry_month)],
         ['Issuance', formatNumber(row.quantity)],
         ['Unit Cost', formatCurrency(row.unit_cost)],
         ['Cost', formatCurrency(row.cost)],

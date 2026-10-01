@@ -49,6 +49,9 @@ class AssistanceRequest extends Model
         'lgu_relief_validation_status', 'lgu_relief_reviewed_by', 'lgu_relief_reviewed_at', 'lgu_relief_review_note', 'lgu_relief_review_screenshots', 'lgu_relief_review_history',
         'lgu_relief_correction_scope', 'lgu_relief_correction_resolved_at',
         'lgu_correction_of_id', 'lgu_correction_target',
+        'lgu_amendment_request_status', 'lgu_amendment_request_target', 'lgu_amendment_request_reason',
+        'lgu_amendment_requested_by', 'lgu_amendment_requested_at',
+        'lgu_amendment_reviewed_by', 'lgu_amendment_reviewed_at', 'lgu_amendment_review_note',
         'lgu_relief_seen_at', 'lgu_relief_seen_by',
         'lgu_relief_acked_at', 'lgu_relief_acked_by',
         'lgu_dromic_series_key', 'lgu_dromic_report_number', 'lgu_dromic_revision_number',
@@ -96,6 +99,8 @@ class AssistanceRequest extends Model
             'lgu_relief_review_screenshots' => 'array',
             'lgu_relief_review_history' => 'array',
             'lgu_relief_correction_resolved_at' => 'datetime',
+            'lgu_amendment_requested_at' => 'datetime',
+            'lgu_amendment_reviewed_at' => 'datetime',
             'lgu_relief_seen_at' => 'datetime',
             'lgu_relief_acked_at' => 'datetime',
             'lgu_signed_report_uploaded_at' => 'datetime',
@@ -185,6 +190,16 @@ class AssistanceRequest extends Model
         return $this->belongsTo(User::class, 'lgu_relief_reviewed_by');
     }
 
+    public function lguAmendmentRequester(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_amendment_requested_by');
+    }
+
+    public function lguAmendmentReviewer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'lgu_amendment_reviewed_by');
+    }
+
     public function lguDromicViewer(): BelongsTo
     {
         return $this->belongsTo(User::class, 'lgu_dromic_seen_by');
@@ -265,11 +280,17 @@ class AssistanceRequest extends Model
 
         $areaTotal = collect((array) data_get($payload, 'area_rows', []))
             ->sum(fn ($row): int => (int) data_get($row, 'affected_persons', 0));
+        $linkedTotal = collect((array) data_get($payload, 'linked_incidents', []))
+            ->sum(fn ($row): int => (int) data_get($row, 'affected_persons', 0));
+        $incidentRowsTotal = collect((array) data_get($meta, 'incidents', []))
+            ->sum(fn ($row): int => (int) data_get($row, 'affected_persons', 0));
 
         foreach ([
             data_get($meta, 'affected_persons'),
             data_get($meta, 'source_lgu_snapshot.affected_persons'),
             data_get($payload, 'affected_persons'),
+            $linkedTotal > 0 ? $linkedTotal : null,
+            $incidentRowsTotal > 0 ? $incidentRowsTotal : null,
             $areaTotal > 0 ? $areaTotal : null,
         ] as $candidate) {
             if ($candidate === null || $candidate === '') {

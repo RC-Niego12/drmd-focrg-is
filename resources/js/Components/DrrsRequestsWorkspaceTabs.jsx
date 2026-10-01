@@ -23,8 +23,9 @@ export default function DrrsRequestsWorkspaceTabs({ active, onChange, mode }) {
                 { id: 'fni', label: 'RIS/DR', icon: ClipboardList, href: '/rros/requests' },
                 { id: 'stf', label: 'STF', icon: FileSpreadsheet, href: '/rros/requests?section=stf' },
             ] : [
-                { id: 'fni', label: 'FNI Requests', icon: ClipboardList, href: '/requests' },
-                { id: 'lgu', label: 'LGU Reports & Requests', icon: FileCheck2, href: '/dromic/lgu-reports' },
+                // Request letters first — FNI assessments unlock only after Validated — No Findings.
+                { id: 'lgu', label: 'Request letters', icon: FileCheck2, href: '/dromic/lgu-reports?tab=requests' },
+                { id: 'fni', label: 'FNI assessments', icon: ClipboardList, href: '/requests' },
             ]}
         />
     );

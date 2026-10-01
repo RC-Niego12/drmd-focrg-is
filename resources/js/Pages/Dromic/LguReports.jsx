@@ -1,5 +1,5 @@
 import { Head, Link, router, useForm } from '@inertiajs/react';
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleHelp, ClipboardCheck, ClipboardPaste, Clock3, Eye, FileCheck2, FilePlus2, History, ImagePlus, Images, ListChecks, Search, Send, Trash2, UploadCloud, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronUp, CircleHelp, ClipboardCheck, ClipboardPaste, Clock3, Eye, FileCheck2, FilePlus2, History, ImagePlus, Images, ListChecks, Maximize2, Minimize2, Search, Send, Trash2, Undo2, UploadCloud, X } from 'lucide-react';
 import { useState } from 'react';
 import AppLayout, { Card, DataTable } from '@/Layouts/AppLayout';
 import ReadonlyDromicReportModal from '@/Components/ReadonlyDromicReportModal';
@@ -9,13 +9,14 @@ import { formatDate, formatDateTime } from '@/Utils/dateFormat';
 import DrrsRequestsWorkspaceTabs from '@/Components/DrrsRequestsWorkspaceTabs';
 import SectionTabs from '@/Components/SectionTabs';
 import ReliefAssessmentGateBanner from '@/Components/ReliefAssessmentGateBanner';
+import SupportingDromicSitrepPanel from '@/Components/SupportingDromicSitrepPanel';
 
 export default function LguReports({ reports, incidentGroups = [], activeTab = 'incidents', filters = {}, reportDashboard = {}, requestDashboard = {}, canReviewDromic = false, canReviewRelief = false, reliefAssessmentGate = null }) {
     const rows = reports?.data ?? [];
     const [reviewReport, setReviewReport] = useState(null);
     const [historyPreview, setHistoryPreview] = useState(null);
     const [search, setSearch] = useState(filters.search || '');
-    const summaryFiltersActive = Boolean(filters.search || filters.validation || filters.status || filters.classification || filters.series_key);
+    const summaryFiltersActive = Boolean(filters.search || filters.validation || filters.status || filters.classification || filters.series_key || filters.amendment);
     const openTab = (tab, overrides = {}) => router.get('/dromic/lgu-reports', {
         tab,
         search: overrides.search ?? (tab === activeTab ? search : ''),
@@ -23,6 +24,7 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
         status: overrides.status ?? (tab === activeTab ? filters.status : ''),
         classification: overrides.classification ?? (tab === activeTab ? filters.classification : ''),
         series_key: overrides.series_key ?? (tab === activeTab ? filters.series_key : ''),
+        amendment: overrides.amendment ?? (tab === activeTab ? filters.amendment : ''),
     }, { preserveScroll: true, preserveState: true, replace: true });
     const openReview = async (report, kind) => {
         const documentKind = kind === 'relief' ? 'request' : 'report';
@@ -58,13 +60,21 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
                 />
             )}
             <Card className="rounded-t-none border-t-0 p-0 shadow-none">
-                <div className="px-5 pt-5">
-                    <p className="text-xs font-black uppercase tracking-wide text-emerald-700">Received LGU Reports</p>
-                    <h1 className="mt-1 text-2xl font-black">LGU DROMIC / Situational Reports</h1>
-                    <p className="mt-1 text-sm text-slate-500">Review DROMIC / SitRep completeness separately from the Request Letter (Relief Augmentation).</p>
+                <div className="rounded-t-lg bg-gradient-to-br from-slate-950 via-slate-900 to-teal-950 px-5 py-5 text-white">
+                    <p className="text-xs font-black uppercase tracking-wide text-cyan-200">
+                        {activeTab === 'requests' ? 'DRRS request-letter validation' : 'Received LGU Reports'}
+                    </p>
+                    <h1 className="mt-1 text-2xl font-black">
+                        {activeTab === 'requests' ? 'LGU Request Letters' : 'LGU DROMIC / Situational Reports'}
+                    </h1>
+                    <p className="mt-1 text-sm text-cyan-100">
+                        {activeTab === 'requests'
+                            ? 'Validate signed relief augmentation request letters here first. After Validated — No Findings, the case unlocks under FNI assessments for Create Assessment.'
+                            : 'Review DROMIC / SitRep completeness separately from the Request for Relief Augmentation.'}
+                    </p>
                 </div>
                 <SectionTabs
-                    label="LGU Report Views"
+                    label="LGU document views"
                     appearance="framed"
                     className="mt-4"
                     contentClassName="px-5"
@@ -72,9 +82,9 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
                     onChange={(tab) => openTab(tab)}
                     ariaLabel="LGU DROMIC report views"
                     tabs={[
-                        { id: 'incidents', label: 'All Incidents', icon: ListChecks },
+                        { id: 'requests', label: 'Request letters', icon: FilePlus2 },
                         { id: 'reports', label: 'Reports', icon: FileCheck2 },
-                        { id: 'requests', label: 'Requests', icon: FilePlus2 },
+                        { id: 'incidents', label: 'All Incidents', icon: ListChecks },
                     ]}
                 />
                 {summaryFiltersActive && <div className="flex items-center gap-2 border-b border-blue-200 bg-blue-50 px-4 py-2.5 text-xs font-bold text-blue-900"><Search className="h-4 w-4 shrink-0" />Filters are active. Summary cards reflect only the filtered table results.</div>}
@@ -82,19 +92,20 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
                     {(activeTab === 'incidents' ? [
                         [ListChecks, 'Incidents reported', reportDashboard.incident_count, 'indigo'],
                         [Send, 'Submitted reports', reportDashboard.submitted, 'blue', [['Advance', Number(reportDashboard.submitted || 0) - Number(reportDashboard.signed_submitted || 0)], ['Signed', reportDashboard.signed_submitted]]],
-                        [FilePlus2, 'Submitted requests', requestDashboard.submitted_total, 'violet', [['Advance', Number(requestDashboard.submitted_total || 0) - Number(requestDashboard.signed || 0)], ['Signed', requestDashboard.signed]]],
                         [AlertTriangle, 'Needs LGU Action', Number(reportDashboard.with_findings || 0) + Number(requestDashboard.with_findings || 0), 'rose', [['Reports', reportDashboard.with_findings], ['Requests', requestDashboard.with_findings]]],
                         [UploadCloud, 'Pending signed copies', Number(reportDashboard.pending_signed_copies || 0) + Number(requestDashboard.pending_signed_copies || 0), 'amber', [['Reports', reportDashboard.pending_signed_copies], ['Requests', requestDashboard.pending_signed_copies]]],
                     ] : activeTab === 'reports' ? [
                         [Send, 'Received reports', reportDashboard.submitted, 'blue'],
                         [UploadCloud, 'Pending signed copies', reportDashboard.pending_signed_copies, 'amber'],
                         [Clock3, 'Awaiting review', reportDashboard.awaiting_review, 'indigo'],
+                        [Undo2, 'Amendment requested', reportDashboard.amendment_requested, 'amber'],
                         [CheckCircle2, 'Validated — no findings', reportDashboard.validated_no_findings, 'emerald'],
                         [AlertTriangle, 'Needs LGU Action', reportDashboard.with_findings, 'rose'],
                     ] : [
                         [FilePlus2, 'Request letters', requestDashboard.total, 'violet'],
                         [UploadCloud, 'Pending signed copy', requestDashboard.pending_signed_copies, 'amber'],
                         [Clock3, 'Awaiting DRRS review', requestDashboard.awaiting_review, 'blue'],
+                        [Undo2, 'Amendment requested', requestDashboard.amendment_requested, 'amber'],
                         [CheckCircle2, 'Validated — no findings', requestDashboard.validated_no_findings, 'emerald'],
                         [AlertTriangle, 'Needs LGU Action', requestDashboard.with_findings, 'rose'],
                         [Send, 'Routed to DRRS', requestDashboard.routed, 'indigo'],
@@ -124,9 +135,13 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
                         <option value="needs_lgu_action">Needs LGU Action</option>
                         <option value="validated_no_findings">Validated — no findings</option>
                     </select>}
+                    {['reports', 'requests'].includes(activeTab) && <select value={filters.amendment || ''} onChange={(event) => openTab(activeTab, { amendment: event.target.value })} className="h-10 min-w-[210px] font-bold">
+                        <option value="">All amendment requests</option>
+                        <option value="requested">Pending amendment request</option>
+                    </select>}
                     <div className="flex shrink-0 gap-2">
                         <button type="submit" title={`Search ${activeTab}`} aria-label={`Search ${activeTab}`} className="inline-flex h-10 w-10 items-center justify-center rounded-md bg-emerald-700 text-white"><Search className="h-4 w-4" /></button>
-                        <button type="button" title="Clear filters" aria-label="Clear filters" onClick={() => { setSearch(''); openTab(activeTab, { search: '', validation: '', status: '', classification: '' }); }} className="inline-flex h-10 w-10 items-center justify-center rounded-md border bg-white dark:bg-zinc-900"><X className="h-4 w-4" /></button>
+                        <button type="button" title="Clear filters" aria-label="Clear filters" onClick={() => { setSearch(''); openTab(activeTab, { search: '', validation: '', status: '', classification: '', amendment: '' }); }} className="inline-flex h-10 w-10 items-center justify-center rounded-md border bg-white dark:bg-zinc-900"><X className="h-4 w-4" /></button>
                         {filters.series_key && <button type="button" onClick={() => openTab(activeTab, { series_key: '' })} className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-black text-emerald-800">Show all incidents</button>}
                     </div>
                 </form>
@@ -158,8 +173,10 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
                             <td className="w-[430px] min-w-[380px] max-w-[430px] px-4 py-3">
                                 <p className="whitespace-normal break-words font-black leading-5">{activeTab === 'requests' ? report.request_reference : report.report_title || '-'}</p>
                                 {report.correction_of_id && <span className="mt-1 inline-flex rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-black uppercase text-blue-700 ring-1 ring-blue-200">Current revision {Number(report.lgu_dromic_revision_number || 0)}</span>}
+                                {activeTab === 'reports' && report.amendment_request_status === 'requested' && (report.amendment_request_target || 'report') !== 'request' && <span className="mt-1 inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-black uppercase text-amber-800 ring-1 ring-amber-200">Amendment requested</span>}
+                                {activeTab === 'requests' && report.amendment_request_status === 'requested' && report.amendment_request_target === 'request' && <span className="mt-1 inline-flex rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-black uppercase text-amber-800 ring-1 ring-amber-200">Amendment requested</span>}
                                 {activeTab === 'requests' && <p className="mt-1 whitespace-normal break-words text-xs font-bold leading-4 text-slate-700 dark:text-zinc-200">{report.report_title || '-'}</p>}
-                                <p className="mt-1 whitespace-normal text-xs text-slate-500">{report.reference_number} · {formatDateTime(report.lgu_submitted_to_dswd_at)}</p>
+                                <p className="mt-1 whitespace-normal text-xs text-slate-500">{report.reference_number} · {formatDateTime(report.lgu_submitted_to_dswd_at || report.amendment_requested_at)}</p>
                                 <p className="mt-1 font-mono text-[11px] font-bold text-emerald-700">{report.incident_code}</p>
                             </td>
                             <td className="w-[220px] max-w-[220px] px-4 py-3"><p title={lguDisplayName(report)} className="whitespace-normal font-bold leading-5">{lguDisplayName(report)}</p></td>
@@ -181,7 +198,7 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
                             <td className="min-w-[180px] px-4 py-3">
                                 <div className="flex flex-wrap items-center gap-2">
                                     {activeTab === 'reports' && canReviewDromic && <button type="button" title="Preview the narrative and encoded data, compare signed copies, and record validation" aria-label="Preview and review DROMIC report" onClick={() => openReview(report, 'dromic')} className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-emerald-700 text-white"><ClipboardCheck className="h-4 w-4" /></button>}
-                                    {activeTab === 'requests' && canReviewRelief && <button type="button" title="Preview the request letter and record DRRS validation" aria-label="Preview and review request letter" disabled={!report.lgu_signed_request_path} onClick={() => openReview(report, 'relief')} className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-violet-700 text-white disabled:cursor-not-allowed disabled:opacity-40"><FileCheck2 className="h-4 w-4" /></button>}
+                                    {activeTab === 'requests' && canReviewRelief && <button type="button" title="Preview the request letter and record DRRS validation" aria-label="Preview and review request letter" disabled={!report.lgu_signed_request_path && !(report.amendment_request_status === 'requested' && report.amendment_request_target === 'request')} onClick={() => openReview(report, 'relief')} className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-violet-700 text-white disabled:cursor-not-allowed disabled:opacity-40"><FileCheck2 className="h-4 w-4" /></button>}
                                     {activeTab === 'reports' && report.can_acknowledge_report && !report.acked_at && (
                                         <button type="button" title="Acknowledge receipt of this DROMIC report (AOR)" aria-label="Acknowledge DROMIC report receipt" onClick={() => acknowledgeReceipt(report, 'report')} className="inline-flex h-8 items-center gap-1 rounded-md border border-sky-300 bg-sky-50 px-2 text-[11px] font-black text-sky-900">
                                             <Eye className="h-3.5 w-3.5" /> Ack
@@ -201,7 +218,30 @@ export default function LguReports({ reports, incidentGroups = [], activeTab = '
                         </tr>
                     ))}
                 />}
-                {(activeTab === 'incidents' ? incidentGroups.length === 0 : rows.length === 0) && <div className="p-10 text-center text-sm text-slate-500">{activeTab === 'incidents' ? 'No incident reporting history is available yet.' : 'No LGU DROMIC / Situational Report has been submitted yet.'}</div>}
+                {(activeTab === 'incidents' ? incidentGroups.length === 0 : rows.length === 0) && (
+                    <div className="space-y-3 p-10 text-center text-sm text-slate-500">
+                        {activeTab === 'incidents' && (Number(reportDashboard.pending_lump_requests || 0) > 0 || Number(reliefAssessmentGate?.awaiting_validation || 0) > 0) ? (
+                            <>
+                                <p className="font-semibold text-slate-700 dark:text-zinc-200">
+                                    No incident SitReps are queued here yet. Consolidated relief request letters are under Request letters.
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={() => openTab('requests', { validation: 'pending_review' })}
+                                    className="inline-flex items-center justify-center rounded-md bg-violet-700 px-4 py-2 text-xs font-black text-white"
+                                >
+                                    Open request letters awaiting validation
+                                </button>
+                            </>
+                        ) : activeTab === 'incidents' ? (
+                            <p>No incident reporting history is available yet.</p>
+                        ) : activeTab === 'requests' ? (
+                            <p>No LGU request letters have been submitted for DRRS review yet.</p>
+                        ) : (
+                            <p>No LGU DROMIC / Situational Report has been submitted yet.</p>
+                        )}
+                    </div>
+                )}
                 {activeTab !== 'incidents' && reports?.links?.length > 3 && (
                     <div className="flex flex-wrap gap-1 border-t border-slate-200 p-4 dark:border-zinc-800">
                         {reports.links.map((link, index) => link.url
@@ -321,6 +361,9 @@ function documentRowClass(report, activeTab) {
         ? report.relief_validation_status
         : report.validation_status;
 
+    if (activeTab === 'reports' && report.amendment_request_status === 'requested') {
+        return 'bg-amber-50 dark:bg-amber-950/20';
+    }
     if (validationStatus === 'needs_lgu_action') {
         return 'bg-rose-50 dark:bg-rose-950/20';
     }
@@ -342,26 +385,77 @@ function StaffSignedHistoryModal({ report, kind, onClose }) {
     return <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/75 p-3 backdrop-blur-sm"><div className="flex h-[calc(100vh-1.5rem)] w-full max-w-6xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-900"><div className="flex items-start justify-between border-b p-4"><div><p className="text-xs font-black uppercase tracking-wide text-slate-500">Read-only signed document history</p><h2 className="mt-1 font-black">{kind === 'request' ? report.request_reference : report.reference_number}</h2><p className="mt-1 text-xs text-slate-500">Previous signed versions keep the PDF viewer header for navigation, download, and print.</p></div><button type="button" title="Close document history" aria-label="Close document history" onClick={onClose} className="rounded-md border p-2"><X className="h-4 w-4" /></button></div><div className="grid min-h-0 flex-1 lg:grid-cols-[280px_1fr]"><aside className="overflow-y-auto border-r p-3">{versions.map((version, index) => <button key={version.id} type="button" onClick={() => setSelectedId(version.id)} className={`mb-2 w-full rounded-lg border p-3 text-left ${Number(selectedId) === Number(version.id) ? 'border-emerald-300 bg-emerald-50 text-emerald-900' : 'border-slate-200 bg-white text-slate-700'}`}><p className="text-xs font-black">Previous version {versions.length - index}</p><p className="mt-1 break-all text-[11px]">{version.original_name || `${kind}.pdf`}</p><p className="mt-1 text-[10px] text-slate-500">{formatDateTime(version.uploaded_at || version.created_at)}</p></button>)}</aside><div className="min-h-0 bg-slate-100">{selected ? <SignedPdfPreview src={`/lgu/dromic-sitrep/signed-history/${selected.id}`} filename={selected.original_name || `${kind}.pdf`} title="Historical signed document preview" iframeClassName="h-full min-h-[70vh] w-full flex-1 bg-slate-200" /> : <div className="flex h-full items-center justify-center text-sm text-slate-500">No previous signed versions are available.</div>}</div></div></div></div>;
 }
 
-function RequestedFniSummary({ rows = [] }) {
+function RequestedFniSummary({ rows = [], linkedIncidents = [], standalone = false, asNeeds = false }) {
     const items = Array.isArray(rows) ? rows : [];
-    return <aside className="overflow-y-auto border-l bg-white p-4 dark:bg-zinc-900"><p className="text-xs font-black uppercase tracking-wide text-violet-700">Requested FNIs</p><h3 className="mt-1 font-black">LGU Request Summary</h3><div className="mt-4 space-y-2">{items.length ? items.map((item, index) => <div key={`${item.fni_library_item_id || item.item_name}-${index}`} className="rounded-lg border border-violet-100 bg-violet-50 p-3 dark:border-violet-900 dark:bg-violet-950/20"><p className="font-black">{item.item_name || item.name || 'Requested FNI'}</p>{item.brand_description && <p className="mt-1 text-xs text-slate-500">{item.brand_description}</p>}<p className="mt-2 text-sm font-black text-violet-800">{Number(item.requested_quantity || 0).toLocaleString()} {item.unit_of_measure || item.unit || ''}</p></div>) : <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-500">No requested FNI line items were encoded.</p>}</div></aside>;
+    const incidents = Array.isArray(linkedIncidents) ? linkedIncidents : [];
+    return <aside className="overflow-y-auto border-l bg-white p-4 dark:bg-zinc-900">
+        <p className="text-xs font-black uppercase tracking-wide text-violet-700">{asNeeds ? 'Encoded FNI needs' : 'Requested FNIs'}</p>
+        <h3 className="mt-1 font-black">{asNeeds ? 'Incident FNI Needs' : 'LGU Request Summary'}</h3>
+        {standalone && incidents.length > 0 && (
+            <div className="mt-3 rounded-lg border border-violet-100 bg-violet-50 p-3 dark:border-violet-900 dark:bg-violet-950/20">
+                <p className="text-[11px] font-black uppercase tracking-wide text-violet-700">Lump request covers</p>
+                <ul className="mt-2 space-y-1.5 text-xs font-semibold text-slate-700 dark:text-zinc-200">
+                    {incidents.map((incident) => (
+                        <li key={incident.series_key || incident.incident_code}>
+                            {incident.incident_name || incident.incident_code || 'Linked incident'}
+                            {Array.isArray(incident.affected_barangays) && incident.affected_barangays.length
+                                ? ` · ${incident.affected_barangays.join(', ')}`
+                                : ''}
+                            {incident.incident_code ? ` · ${incident.incident_code}` : ''}
+                            {incident.affected_families != null ? ` · ${Number(incident.affected_families).toLocaleString()} families` : ''}
+                        </li>
+                    ))}
+                </ul>
+            </div>
+        )}
+        <div className="mt-4 space-y-2">{items.length ? items.map((item, index) => <div key={`${item.fni_library_item_id || item.item_name}-${index}`} className="rounded-lg border border-violet-100 bg-violet-50 p-3 dark:border-violet-900 dark:bg-violet-950/20"><p className="font-black">{item.item_name || item.name || 'Requested FNI'}</p>{item.brand_description && <p className="mt-1 text-xs text-slate-500">{item.brand_description}</p>}<p className="mt-2 text-sm font-black text-violet-800">{Number(item.requested_quantity || 0).toLocaleString()} {item.unit_of_measure || item.unit || ''}</p></div>) : <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-500">No requested FNI line items were encoded.</p>}</div>
+    </aside>;
 }
 
 function ReviewOutcomeModal({ report, kind, onClose }) {
     const isRelief = kind === 'relief';
+    const linkedIncidentReports = Array.isArray(report.linked_incident_reports) ? report.linked_incident_reports : [];
     const [reviewPanelCollapsed, setReviewPanelCollapsed] = useState(false);
     const [reviewContentTab, setReviewContentTab] = useState('narrative');
     const [reviewCopyTab, setReviewCopyTab] = useState('advance');
+    const [reviewDocTab, setReviewDocTab] = useState('request');
     const [reviewControlsCollapsed, setReviewControlsCollapsed] = useState(false);
     const [screenshotInputMessage, setScreenshotInputMessage] = useState('');
+    const [amendmentNote, setAmendmentNote] = useState('');
+    const [amendmentBusy, setAmendmentBusy] = useState(false);
     const awaitingSignedReview = !isRelief && report.signed_review_pending;
     const hasSignedComparison = !isRelief && report.lgu_report_status === 'submitted' && Boolean(report.lgu_signed_report_path);
+    const reliefDocumentTabs = [
+        { id: 'request', label: 'Request Letter', icon: FilePlus2, title: 'Signed LGU relief augmentation request letter' },
+        ...(linkedIncidentReports.length > 0
+            ? [{ id: 'report', label: 'Supporting DROMIC / SitRep', icon: FileCheck2, title: 'Advance and signed LGU DROMIC reports for linked incidents', count: linkedIncidentReports.length }]
+            : []),
+    ];
+    const pendingAmendment = isRelief
+        ? report.amendment_request_status === 'requested' && report.amendment_request_target === 'request'
+        : report.amendment_request_status === 'requested' && (report.amendment_request_target || 'report') !== 'request';
     const currentValidationStatus = isRelief
         ? (report.relief_validation_status || 'pending_review')
         : (report.validation_status || 'pending_review');
     const initialValidationStatus = ['under_review', 'needs_lgu_action', 'validated_no_findings'].includes(currentValidationStatus)
         ? currentValidationStatus
         : 'under_review';
+    const decideAmendment = (decision) => {
+        if (amendmentBusy) return;
+        if (decision === 'deny' && amendmentNote.trim().length < 10) {
+            window.alert('Add a denial note of at least 10 characters.');
+            return;
+        }
+        setAmendmentBusy(true);
+        router.post(`/dromic/lgu-reports/${report.id}/amendment-request`, {
+            decision,
+            review_note: amendmentNote.trim() || null,
+        }, {
+            preserveScroll: true,
+            onSuccess: onClose,
+            onFinish: () => setAmendmentBusy(false),
+        });
+    };
     const correctionOptions = [
         {
             value: 'document',
@@ -439,20 +533,55 @@ function ReviewOutcomeModal({ report, kind, onClose }) {
         });
     };
 
+    const enterWideDocumentView = () => {
+        setReviewPanelCollapsed(true);
+        setReviewControlsCollapsed(true);
+    };
+    const exitWideDocumentView = () => {
+        setReviewPanelCollapsed(false);
+        setReviewControlsCollapsed(false);
+    };
+    const wideDocumentView = reviewPanelCollapsed;
+
     return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/70 p-3 backdrop-blur-sm">
-            <div className="flex h-[calc(100vh-1.5rem)] w-[96vw] max-w-[1800px] flex-col overflow-hidden rounded-xl bg-white shadow-2xl dark:bg-zinc-900">
-                <div className="flex items-start justify-between border-b border-slate-200 p-5 dark:border-zinc-700">
-                    <div>
+        <div className={`fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/70 backdrop-blur-sm ${wideDocumentView ? 'p-0' : 'p-3'}`}>
+            <div className={`relative flex flex-col overflow-hidden bg-white shadow-2xl dark:bg-zinc-900 ${wideDocumentView ? 'h-screen w-screen max-w-none rounded-none' : 'h-[calc(100vh-1.5rem)] w-[96vw] max-w-[1800px] rounded-xl'}`}>
+                <div className={`flex items-start justify-between border-b border-slate-200 dark:border-zinc-700 ${wideDocumentView ? 'px-4 py-3' : 'p-5'}`}>
+                    <div className="min-w-0">
                         <p className={`text-xs font-black uppercase tracking-wide ${isRelief ? 'text-violet-700' : 'text-emerald-700'}`}>{isRelief ? 'DRRS Request Letter Validation' : 'DROMIC / SitRep Validation'}</p>
-                        <h2 className="mt-1 text-xl font-black">{isRelief ? report.request_reference : report.reference_number}</h2>
-                        {isRelief && <p className="text-xs text-slate-500">Attached to {report.reference_number}</p>}
-                        <p className="mt-1 text-sm text-slate-500">{report.requesting_agency || report.municipality || 'Reporting LGU'}</p>
+                        <h2 className={`mt-1 font-black ${wideDocumentView ? 'truncate text-lg' : 'text-xl'}`}>{isRelief ? report.request_reference : report.reference_number}</h2>
+                        {!wideDocumentView && (
+                            <>
+                                {isRelief && <p className="text-xs text-slate-500">Attached to {report.reference_number}</p>}
+                                <p className="mt-1 text-sm text-slate-500">{report.requesting_agency || report.municipality || 'Reporting LGU'}</p>
+                            </>
+                        )}
                     </div>
-                    <div className="flex items-center gap-2">{!isRelief && <button type="button" title={reviewControlsCollapsed ? 'Show document controls' : 'Collapse document controls for more viewing space'} aria-label={reviewControlsCollapsed ? 'Show document controls' : 'Collapse document controls'} onClick={() => setReviewControlsCollapsed((value) => !value)} className="rounded-md border p-2">{reviewControlsCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}</button>}<button type="button" title={reviewPanelCollapsed ? 'Show validation panel' : 'Collapse validation panel for a wider document view'} aria-label={reviewPanelCollapsed ? 'Show validation panel' : 'Collapse validation panel'} onClick={() => setReviewPanelCollapsed((value) => !value)} className="rounded-md border p-2">{reviewPanelCollapsed ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</button><button type="button" onClick={onClose} className="rounded-md border p-2"><X className="h-4 w-4" /></button></div>
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                        <button
+                            type="button"
+                            title={reviewControlsCollapsed ? 'Show document tabs' : 'Hide document tabs for more viewing space'}
+                            aria-label={reviewControlsCollapsed ? 'Show document tabs' : 'Hide document tabs'}
+                            onClick={() => setReviewControlsCollapsed((value) => !value)}
+                            className="rounded-md border p-2"
+                        >
+                            {reviewControlsCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+                        </button>
+                        <button
+                            type="button"
+                            title={wideDocumentView ? 'Restore validation panel' : 'Widen document view — hide validation panel and use the full screen'}
+                            aria-label={wideDocumentView ? 'Restore validation panel' : 'Widen document view'}
+                            onClick={() => (wideDocumentView ? exitWideDocumentView() : enterWideDocumentView())}
+                            className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs font-black uppercase tracking-wide ${wideDocumentView ? 'border-slate-300 bg-white text-slate-700' : (isRelief ? 'border-violet-300 bg-violet-50 text-violet-800' : 'border-emerald-300 bg-emerald-50 text-emerald-800')}`}
+                        >
+                            {wideDocumentView ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                            {wideDocumentView ? 'Show panel' : 'Widen view'}
+                        </button>
+                        <button type="button" onClick={onClose} className="rounded-md border p-2" title="Close" aria-label="Close"><X className="h-4 w-4" /></button>
+                    </div>
                 </div>
-                <div className={`grid min-h-0 flex-1 ${reviewPanelCollapsed ? 'grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_460px]'}`}>
-                    <div className="flex min-h-[45vh] min-w-0 flex-col bg-slate-100 dark:bg-zinc-950">
+                <div className={`grid min-h-0 flex-1 ${reviewPanelCollapsed ? 'grid-cols-1' : 'lg:grid-cols-[minmax(0,1fr)_360px]'}`}>
+                    <div className="relative flex min-h-[45vh] min-w-0 flex-col bg-slate-100 dark:bg-zinc-950">
                         {!isRelief && !reviewControlsCollapsed && <div className="shrink-0 border-b bg-white p-3 dark:bg-zinc-900">
                             <SectionTabs
                                 appearance="plain"
@@ -468,9 +597,52 @@ function ReviewOutcomeModal({ report, kind, onClose }) {
                                 ]}
                             />
                         </div>}
-                        {!isRelief && reviewContentTab === 'encoded'
-                            ? <ReadonlyDromicReportModal report={report} embedded />
-                            : <>
+                        {isRelief && reliefDocumentTabs.length > 1 && !reviewControlsCollapsed && (
+                            <div className="shrink-0 border-b bg-white p-3 dark:bg-zinc-900">
+                                <SectionTabs
+                                    appearance="plain"
+                                    value={reviewDocTab}
+                                    onChange={setReviewDocTab}
+                                    ariaLabel="Request documents"
+                                    tabs={reliefDocumentTabs}
+                                />
+                            </div>
+                        )}
+                        {isRelief && reviewControlsCollapsed && reliefDocumentTabs.length > 1 && (
+                            <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-white px-3 py-2 dark:bg-zinc-900">
+                                <p className="text-[10px] font-black uppercase tracking-wide text-slate-500">Viewing</p>
+                                <p className="text-xs font-semibold text-slate-700">
+                                    {reviewDocTab === 'request' ? 'Request Letter' : 'Supporting DROMIC / SitRep'}
+                                </p>
+                                <button type="button" onClick={() => setReviewControlsCollapsed(false)} className="ml-auto text-xs font-black uppercase tracking-wide text-violet-700 hover:underline">
+                                    Switch document
+                                </button>
+                            </div>
+                        )}
+                        {isRelief ? (
+                            reviewDocTab === 'report' ? (
+                                <SupportingDromicSitrepPanel
+                                    reports={linkedIncidentReports}
+                                    showCopyTabs={!reviewControlsCollapsed}
+                                    defaultCopyTab="advance"
+                                    hideSelectors={reviewControlsCollapsed}
+                                />
+                            ) : report.lgu_signed_request_path ? (
+                                <SignedPdfPreview
+                                    src={`/lgu/dromic-sitrep/${report.id}/signed-copy/request`}
+                                    filename={report.request_reference || report.lgu_signed_request_name || 'Signed request letter.pdf'}
+                                    title="Signed request letter under review"
+                                    iframeClassName="min-h-0 w-full flex-1 bg-slate-100"
+                                />
+                            ) : (
+                                <div className="flex h-full min-h-[55vh] items-center justify-center bg-slate-100 p-6 text-center text-sm font-semibold text-slate-600">
+                                    No signed request letter is attached yet. You can still approve or deny the LGU amendment request from the panel.
+                                </div>
+                            )
+                        ) : reviewContentTab === 'encoded' ? (
+                            <ReadonlyDromicReportModal report={report} embedded />
+                        ) : (
+                            <>
                                 {hasSignedComparison && !reviewControlsCollapsed && (
                                     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-white p-3 dark:bg-zinc-900">
                                         <SectionTabs
@@ -486,15 +658,11 @@ function ReviewOutcomeModal({ report, kind, onClose }) {
                                         />
                                     </div>
                                 )}
-                                {isRelief || (reviewCopyTab === 'signed' && report.lgu_signed_report_path) ? (
+                                {(reviewCopyTab === 'signed' && report.lgu_signed_report_path) ? (
                                     <SignedPdfPreview
-                                        src={isRelief
-                                            ? `/lgu/dromic-sitrep/${report.id}/signed-copy/request`
-                                            : `/lgu/dromic-sitrep/${report.id}/signed-copy/report`}
-                                        filename={isRelief
-                                            ? (report.request_reference || report.lgu_signed_request_name || 'Signed request letter.pdf')
-                                            : (report.reference_number || report.lgu_signed_report_name || 'Signed DROMIC report.pdf')}
-                                        title={isRelief ? 'Signed request letter under review' : 'Signed DROMIC report under review'}
+                                        src={`/lgu/dromic-sitrep/${report.id}/signed-copy/report`}
+                                        filename={report.reference_number || report.lgu_signed_report_name || 'Signed DROMIC report.pdf'}
+                                        title="Signed DROMIC report under review"
                                     />
                                 ) : (
                                     <iframe
@@ -503,10 +671,50 @@ function ReviewOutcomeModal({ report, kind, onClose }) {
                                         className="h-full min-h-[55vh] w-full flex-1"
                                     />
                                 )}
-                            </>}
+                            </>
+                        )}
+                        {reviewPanelCollapsed && (
+                            <button
+                                type="button"
+                                onClick={exitWideDocumentView}
+                                className={`absolute bottom-4 right-4 z-10 inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs font-black uppercase tracking-wide shadow-lg ${isRelief ? 'border-violet-300 bg-violet-700 text-white hover:bg-violet-800' : 'border-emerald-300 bg-emerald-700 text-white hover:bg-emerald-800'}`}
+                                title="Restore validation panel"
+                                aria-label="Restore validation panel"
+                            >
+                                <ChevronLeft className="h-4 w-4" />
+                                Show validation
+                            </button>
+                        )}
                     </div>
                 {!reviewPanelCollapsed && <form onSubmit={submitReview} onPaste={pasteScreenshots} className="space-y-4 overflow-y-auto border-l border-slate-200 p-5 dark:border-zinc-700">
-                    {isRelief && <RequestedFniSummary rows={report.lgu_dromic_payload?.requested_fni_items} />}
+                    {pendingAmendment && (
+                        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-amber-950">
+                            <p className="text-xs font-black uppercase tracking-wide text-amber-800">LGU amendment request</p>
+                            <p className="mt-2 text-sm font-semibold leading-6">{report.amendment_request_reason || 'No reason provided.'}</p>
+                            <p className="mt-2 text-xs text-amber-800">
+                                Requested {formatDateTime(report.amendment_requested_at)}{report.amendment_requester ? ` by ${report.amendment_requester}` : ''}.
+                                {isRelief
+                                    ? ' Approving opens a correction draft so the LGU can update request/FNI entries on the same request letter.'
+                                    : ' Approving opens a same-report-number correction draft for the LGU.'}
+                            </p>
+                            <label className="mt-3 block text-xs font-black">
+                                Decision note {pendingAmendment ? '(required to deny)' : ''}
+                                <textarea value={amendmentNote} onChange={(event) => setAmendmentNote(event.target.value)} rows={3} className="mt-1 w-full rounded-md border-amber-200 text-sm" placeholder="Optional on approve. Required when denying." />
+                            </label>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                                <button type="button" disabled={amendmentBusy} onClick={() => decideAmendment('approve')} className="rounded-md bg-emerald-700 px-3 py-2 text-xs font-black text-white disabled:opacity-50">Approve amendment</button>
+                                <button type="button" disabled={amendmentBusy} onClick={() => decideAmendment('deny')} className="rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-xs font-black text-rose-800 disabled:opacity-50">Deny</button>
+                            </div>
+                        </div>
+                    )}
+                    {(isRelief || (report.lgu_dromic_payload?.requested_fni_items || []).length > 0) && (
+                        <RequestedFniSummary
+                            rows={report.lgu_dromic_payload?.requested_fni_items}
+                            linkedIncidents={report.linked_incidents || report.lgu_dromic_payload?.linked_incidents || []}
+                            standalone={Boolean(report.standalone_relief_request || report.lgu_dromic_payload?.standalone_relief_request)}
+                            asNeeds={!isRelief && !report.has_relief_request}
+                        />
+                    )}
                     <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs leading-5 text-blue-950">
                         {isRelief
                             ? 'This outcome covers only the signed relief augmentation request document. Only DRRS personnel can set it, and it is separate from processing or approving assistance.'

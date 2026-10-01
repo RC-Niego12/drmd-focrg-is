@@ -5,6 +5,9 @@ namespace App\Services;
 use App\Models\AssistanceRequest;
 use App\Models\FniLibraryItem;
 use App\Models\RequestParty;
+use App\Support\AffectedAreaList;
+use App\Support\IncidentOccurrenceDisplay;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -26,14 +29,48 @@ final class LguReliefRequestHandoffService
             $incidentType = trim((string) data_get($payload, 'incident_type', ''));
             $incidentName = trim((string) data_get($payload, 'incident_name', ''));
             $incidentSpecificDetails = trim((string) data_get($payload, 'incident_specific_details', ''));
+            $isStandalone = (bool) data_get($payload, 'standalone_relief_request');
+            $linkedIncidents = collect(data_get($payload, 'linked_incidents', []))
+                ->filter(fn ($row): bool => is_array($row))
+                ->values();
+            $assessmentIncidents = $this->assessmentIncidentsFromLinked($linkedIncidents, $incidentType, $report);
+            $affectedAreas = collect(data_get($payload, 'affected_barangays', []))
+                ->merge($linkedIncidents->flatMap(fn (array $row): array => array_values((array) ($row['affected_barangays'] ?? []))))
+                ->map(fn ($value): string => trim((string) $value))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+            $areaDetails = AffectedAreaList::format($affectedAreas);
+            if ($areaDetails !== '') {
+                $incidentSpecificDetails = $areaDetails;
+            }
+            $occurrenceDates = $linkedIncidents
+                ->map(fn (array $row): string => Str::substr((string) ($row['occurrence_started_at'] ?? ''), 0, 10))
+                ->filter(fn (string $value): bool => (bool) preg_match('/^\d{4}-\d{2}-\d{2}$/', $value))
+                ->unique()
+                ->sort()
+                ->values();
+            $occurrenceStart = $occurrenceDates->first()
+                ?: Str::substr((string) (data_get($payload, 'occurrence_started_at') ?: data_get($payload, 'incident_date') ?: ''), 0, 10);
+            $occurrenceEnd = $occurrenceDates->last() ?: $occurrenceStart;
+            $affectedPersons = max(
+                (int) data_get($payload, 'affected_persons', 0),
+                (int) $linkedIncidents->sum(fn (array $row): int => (int) ($row['affected_persons'] ?? 0)),
+                (int) collect((array) data_get($payload, 'area_rows', []))
+                    ->sum(fn ($row): int => (int) data_get($row, 'affected_persons', 0)),
+            );
             $requestPartyId = RequestParty::query()
                 ->where('is_active', true)
                 ->whereHas('lguDirectoryEntry', fn ($query) => $query->where('psgc_code', $report->lgu_psgc_code))
                 ->value('id');
 
             if (
-                Str::lower($incidentSpecificDetails) === Str::lower($incidentType)
-                || Str::lower($incidentSpecificDetails) === Str::lower($incidentName)
+                $areaDetails === ''
+                && (
+                    Str::lower($incidentSpecificDetails) === Str::lower($incidentType)
+                    || Str::lower($incidentSpecificDetails) === Str::lower($incidentName)
+                )
             ) {
                 $incidentSpecificDetails = '';
             }
@@ -61,35 +98,49 @@ final class LguReliefRequestHandoffService
                     ?: data_get($payload, 'narrative')
                     ?: $this->itemSummary($payload),
                 'incident_details' => $incidentSpecificDetails,
-                'incident_count' => 1,
+                'incident_count' => max(1, $assessmentIncidents !== [] ? count($assessmentIncidents) : 1),
                 'assessment_form_data' => [
                     'request_type' => 'Disaster',
                     'response_purpose' => 'Relief Augmentation',
                     'requested_fni_items' => data_get($payload, 'requested_fni_items', []),
-                    'affected_persons' => (int) data_get($payload, 'affected_persons', 0),
-                    'affected_areas' => array_values((array) data_get($payload, 'affected_barangays', [])),
+                    'affected_persons' => $affectedPersons > 0 ? $affectedPersons : '',
+                    'affected_areas' => $affectedAreas,
                     'information_source' => $report->requesting_agency ?: $report->lgu ?: $report->municipality,
                     'information_date' => $receivedAt->toDateString(),
                     'incident_type' => data_get($payload, 'incident_type'),
                     'incident_specific_details' => $incidentSpecificDetails,
-                    'occurrence_started_at' => data_get($payload, 'occurrence_started_at') ?: data_get($payload, 'incident_date'),
+                    'occurrence_started_at' => $occurrenceStart ?: (data_get($payload, 'occurrence_started_at') ?: data_get($payload, 'incident_date')),
+                    'occurrence_ended_span' => $occurrenceEnd,
+                    'incident_occurrence_display' => IncidentOccurrenceDisplay::format($occurrenceStart, $occurrenceEnd),
                     'incident_status' => data_get($payload, 'incident_status'),
                     'incident_ended_at' => data_get($payload, 'incident_ended_at'),
                     'identified_needs' => data_get($payload, 'needs'),
                     'lgu_report_remarks' => data_get($payload, 'remarks'),
+                    'standalone_relief_request' => $isStandalone,
+                    'request_mode' => data_get($payload, 'request_mode'),
+                    'linked_incident_series_keys' => array_values((array) data_get($payload, 'linked_incident_series_keys', [])),
+                    'linked_incidents' => $linkedIncidents->all(),
+                    ...(
+                        $assessmentIncidents !== []
+                            ? ['incidents' => $assessmentIncidents]
+                            : []
+                    ),
                     'source_lgu_snapshot' => [
                         'report_reference' => $report->reference_number,
                         'request_reference' => $report->lgu_relief_request_reference,
+                        'standalone_relief_request' => $isStandalone,
                         'affected_families' => (int) data_get($payload, 'affected_families', 0),
-                        'affected_persons' => (int) data_get($payload, 'affected_persons', 0),
-                        'affected_barangays' => array_values((array) data_get($payload, 'affected_barangays', [])),
+                        'affected_persons' => $affectedPersons,
+                        'affected_barangays' => $affectedAreas,
                         'requested_fni_items' => data_get($payload, 'requested_fni_items', []),
+                        'linked_incidents' => $linkedIncidents->all(),
                     ],
                     'source_lgu_dromic_reference' => $report->reference_number,
                     'source_lgu_request_reference' => $report->lgu_relief_request_reference,
                     'source_incident_code' => 'DIS-INC-'.Str::upper(Str::substr($report->lgu_dromic_series_key ?: 'REQ-'.$report->id, 0, 12)),
                 ],
-                'affected_families' => $report->affected_families,
+                'affected_families' => $report->affected_families
+                    ?? ($linkedIncidents->sum(fn (array $row): int => (int) ($row['affected_families'] ?? 0)) ?: null),
                 'endorsed_to_drrs' => true,
                 'date_endorsed_to_drrs' => now()->toDateString(),
                 'status' => $operational?->status ?: 'endorsed',
@@ -124,6 +175,35 @@ final class LguReliefRequestHandoffService
 
             return $operational->fresh(['items', 'sourceLguDromicReport']);
         });
+    }
+
+    private function assessmentIncidentsFromLinked(Collection $linkedIncidents, string $incidentType, AssistanceRequest $report): array
+    {
+        if ($linkedIncidents->isEmpty()) {
+            return [];
+        }
+
+        return $linkedIncidents
+            ->map(function (array $incident) use ($incidentType, $report): array {
+                $barangays = array_values(array_filter((array) ($incident['affected_barangays'] ?? [])));
+
+                return [
+                    'incident_type' => trim((string) ($incident['incident_type'] ?? $incidentType)) ?: $incidentType,
+                    'incident_details' => trim((string) ($incident['incident_name'] ?? '')),
+                    'occurrence_at' => Str::substr((string) ($incident['occurrence_started_at'] ?? ''), 0, 16),
+                    'city_municipality' => $incident['municipality'] ?? $report->municipality,
+                    'barangay' => $barangays !== [] ? implode(', ', $barangays) : ($incident['barangay'] ?? ''),
+                    'affected_families' => (int) ($incident['affected_families'] ?? 0),
+                    'affected_persons' => (int) ($incident['affected_persons'] ?? 0),
+                    'description' => trim(
+                        ($incident['incident_name'] ?? '').
+                        (filled($incident['incident_code'] ?? null) ? ' ('.$incident['incident_code'].')' : '')
+                    ),
+                    'source_reference' => $incident['incident_code'] ?? $report->reference_number,
+                    'series_key' => $incident['series_key'] ?? null,
+                ];
+            })
+            ->all();
     }
 
     private function uniqueOperationalReference(string $preferred, ?int $ignoreId = null): string

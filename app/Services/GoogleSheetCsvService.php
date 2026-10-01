@@ -9,12 +9,29 @@ use RuntimeException;
 
 class GoogleSheetCsvService
 {
+    public function fetchWorksheet(string $sheetId, string $worksheet): string
+    {
+        $worksheet = trim($worksheet);
+        if ($worksheet === '') {
+            throw new RuntimeException('Google Sheets worksheet name is not configured.');
+        }
+
+        return $this->fetchUrls([
+            "https://docs.google.com/spreadsheets/d/{$sheetId}/gviz/tq?tqx=out:csv&sheet=".rawurlencode($worksheet),
+            "https://docs.google.com/spreadsheets/d/{$sheetId}/export?format=csv&sheet=".rawurlencode($worksheet),
+        ]);
+    }
+
     public function fetch(string $sheetId, string $gid): string
     {
-        $urls = [
+        return $this->fetchUrls([
             "https://docs.google.com/spreadsheets/d/{$sheetId}/gviz/tq?tqx=out:csv&gid={$gid}",
             "https://docs.google.com/spreadsheets/d/{$sheetId}/export?format=csv&gid={$gid}",
-        ];
+        ]);
+    }
+
+    private function fetchUrls(array $urls): string
+    {
         $lastError = null;
 
         foreach ($urls as $url) {

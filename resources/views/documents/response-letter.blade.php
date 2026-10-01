@@ -36,14 +36,60 @@ p { margin: 0 0 11pt; text-align: justify; }
     $meta = $request->assessment_form_data ?? [];
     $areas = collect($meta['affected_areas'] ?? [])->filter();
     $areaText = $areas->isEmpty() ? '' : ($areas->count() <= 5 ? ' affecting '.$areas->implode(', ') : ' affecting '.$areas->count().' identified areas');
-    $incidentRows = collect($meta['incidents'] ?? [])->filter(fn ($row) => is_array($row) && filled($row['incident_type'] ?? null))->values();
-    $incidentText = $incidentRows->count() > 1
-        ? $incidentRows->map(function ($row, $index) {
-            $date = filled($row['occurrence_at'] ?? null) ? date('F j, Y', strtotime($row['occurrence_at'])) : null;
-            $place = collect([$row['barangay'] ?? null, $row['city_municipality'] ?? null])->filter()->implode(', ');
-            return ($index + 1).') '.($row['incident_type'] ?? 'incident').collect([$place, $date ? 'on '.$date : null])->filter()->prepend(' in')->implode(' ');
-        })->implode('; ')
-        : null;
+    $incidentRows = collect($meta['incidents'] ?? [])
+        ->filter(fn ($row) => is_array($row) && filled($row['incident_type'] ?? null))
+        ->sortBy(fn ($row) => \Illuminate\Support\Str::substr((string) ($row['occurrence_at'] ?? '9999-12-31'), 0, 10))
+        ->values();
+    $shortMonth = function (?string $iso): string {
+        if (! is_string($iso) || ! preg_match('/^(\d{4})-(\d{2})-(\d{2})/', $iso, $match)) {
+            return '';
+        }
+        $months = [1 => 'Jan.', 2 => 'Feb.', 3 => 'Mar.', 4 => 'Apr.', 5 => 'May', 6 => 'Jun.', 7 => 'Jul.', 8 => 'Aug.', 9 => 'Sep.', 10 => 'Oct.', 11 => 'Nov.', 12 => 'Dec.'];
+
+        return ($months[(int) $match[2]] ?? '').' '.(int) $match[3].', '.$match[1];
+    };
+    $barangayLabel = function (string $barangay): string {
+        $barangay = trim($barangay);
+        if ($barangay === '') {
+            return '';
+        }
+        if (preg_match('/^(brgy\.?|barangay)\b/i', $barangay)) {
+            return preg_replace('/^(brgy\.?|barangay)\s*/i', 'Brgy. ', $barangay) ?: $barangay;
+        }
+
+        return 'Brgy. '.$barangay;
+    };
+    $typeLabel = function (string $type): string {
+        $type = trim(mb_strtolower($type));
+        $type = preg_replace('/\s+incidents?$/i', '', $type) ?? $type;
+
+        return trim($type);
+    };
+    $incidentText = null;
+    $singleIncidentText = null;
+    if ($incidentRows->count() > 1) {
+        $types = $incidentRows->map(fn ($row) => $typeLabel((string) ($row['incident_type'] ?? 'incident')))->filter()->unique()->values();
+        $sharedType = $types->count() === 1 ? $types->first() : null;
+        $parts = $incidentRows->values()->map(function ($row, $index) use ($shortMonth, $barangayLabel, $typeLabel, $sharedType) {
+            $barangay = $barangayLabel((string) ($row['barangay'] ?? ''));
+            $date = $shortMonth(\Illuminate\Support\Str::substr((string) ($row['occurrence_at'] ?? ''), 0, 10));
+            $label = $barangay !== '' ? $barangay : 'the affected area';
+            if ($sharedType === null) {
+                $type = $typeLabel((string) ($row['incident_type'] ?? 'incident'));
+                $label .= $type !== '' ? ' ('.$type.')' : '';
+            }
+
+            return ($index + 1).') '.$label.($date !== '' ? ' on '.$date : '');
+        });
+        $last = $parts->pop();
+        $list = $parts->isEmpty() ? $last : $parts->implode('; ').'; and '.$last;
+        $incidentText = ($sharedType !== null ? 'multiple separate '.$sharedType.' incidents in: ' : 'multiple separate incidents in: ').$list;
+    } elseif ($incidentRows->count() === 1) {
+        $row = $incidentRows->first();
+        $barangay = $barangayLabel((string) ($row['barangay'] ?? ''));
+        $place = $barangay !== '' ? $barangay : collect([$row['barangay'] ?? null, $row['city_municipality'] ?? null])->filter()->implode(', ');
+        $singleIncidentText = ($row['incident_type'] ?? 'incident').($place !== '' ? ' in '.$place : '');
+    }
     $approvedStatus = in_array($request->status, ['approved', 'partially_approved']);
     $request->loadMissing(['items.fniLibraryItem', 'items.inventoryItem']);
     $requestedGoodsTypes = RequestedGoodsTypeSummary::summarize(
@@ -55,6 +101,10 @@ p { margin: 0 0 11pt; text-align: justify; }
     $responseApproverSuffix = trim((string) data_get($responseApprover?->metadata, 'suffix'));
     $responseApproverName = $responseApproverEmployeeName !== '' ? $responseApproverEmployeeName.($responseApproverSuffix !== '' ? ', '.$responseApproverSuffix : '') : trim((string) $responseApproverName);
     $responseApproverDesignation = trim((string) (data_get($responseApprover?->metadata, 'designation') ?: data_get($responseApprover?->metadata, 'position') ?: $responseApproverDesignation));
+    $bodyOverrides = (array) data_get($meta, 'response_letter_body', []);
+    $openingOverride = trim((string) ($bodyOverrides['opening'] ?? ''));
+    $assessmentOverride = trim((string) ($bodyOverrides['assessment'] ?? ''));
+    $closingOverride = trim((string) ($bodyOverrides['closing'] ?? ''));
 @endphp
 <table class="form">
     <tr>
@@ -77,13 +127,21 @@ p { margin: 0 0 11pt; text-align: justify; }
 @elseif(!$approvedStatus)
 <div class="draft">DRAFT — FOR REVIEW AND APPROVAL</div>
 @endif
-<div class="date">{{ now()->format('F j, Y') }}<br>DRN: {{ $request->response_drn ?: '' }}</div>
+<div class="date">{{ filled($meta['assessment_date'] ?? null) ? \Illuminate\Support\Carbon::parse($meta['assessment_date'])->format('F j, Y') : (filled($meta['prepared_at'] ?? null) ? \Illuminate\Support\Carbon::parse($meta['prepared_at'])->format('F j, Y') : now()->format('F j, Y')) }}<br>DRN: {{ $request->response_drn ?: '' }}</div>
 <div class="recipient"><b>{{ $request->requester ?: $request->requesting_agency }}</b><br>{{ $request->requester_position ?: $request->office_agency_details }}<br>{{ $request->requester_address ?: collect([$request->municipality, $request->province])->filter()->implode(', ') }}</div>
 <p><b>ATTENTION:</b>&nbsp;&nbsp;&nbsp;{{ $request->office_agency_details ?: $request->requesting_agency }}</p>
 <p>Dear Sir/Madam:</p>
 <p>Greetings of service excellence and resilience!</p>
-<p>This is in reference to your consolidated request for {{ $requestedGoodsTypes }} intended for <b>{{ number_format((int) ($request->affected_families ?? 0)) }}</b> disaster-affected families due to @if($incidentText)<b>multiple separate incidents:</b> {{ $incidentText }}@else<b>{{ $request->incident?->name ?: 'the reported incident' }}</b>{{ $request->incident?->incident_date ? ', which occurred on '.$request->incident->incident_date->format('F j, Y') : '' }}{{ $areaText }}@endif.</p>
+@if($openingOverride !== '')
+<p>{{ $openingOverride }}</p>
+@else
+<p>This is in reference to your consolidated request for {{ $requestedGoodsTypes }} intended for <b>{{ number_format((int) ($request->affected_families ?? 0)) }}</b> disaster-affected families due to @if($incidentText)<b>{{ $incidentText }}</b>@elseif($singleIncidentText)<b>{{ $singleIncidentText }}</b>{{ $areaText }}@else<b>{{ $request->incident?->name ?: 'the reported incident' }}</b>{{ $request->incident?->incident_date ? ', which occurred on '.$request->incident->incident_date->format('F j, Y') : '' }}{{ $areaText }}@endif.</p>
+@endif
+@if($assessmentOverride !== '')
+<p>{{ $assessmentOverride }}</p>
+@else
 <p>After assessment and validation of the submitted information, the requested augmentation is documented as follows:</p>
+@endif
 <table class="items">
     <tr><th>Food and Non-Food Item</th><th class="qty">Quantity</th><th class="unit">Unit</th></tr>
     @foreach($request->items as $item)
@@ -91,7 +149,11 @@ p { margin: 0 0 11pt; text-align: justify; }
         @if((float) $quantity > 0)<tr><td>{{ $item->item_name }}</td><td class="qty">{{ number_format((int) $quantity, 0) }}</td><td class="unit">{{ $item->unit }}</td></tr>@endif
     @endforeach
 </table>
+@if($closingOverride !== '')
+<p>{{ $closingOverride }}</p>
+@else
 <p>{{ $approvedStatus ? 'The Regional Resource Operations Section (RROS) will prepare the necessary Requisition and Issuance Slip and coordinate with the requesting party once the documents are complete and the goods are ready for delivery or pick-up.' : 'The requested assistance remains subject to final review, approval, and the completion of the required issuance documents.' }}</p>
+@endif
 <p>For your information. Thank you.</p>
 <div class="signature">Very truly yours,<div class="signature-name">{{ $responseApproverName }}</div><div>{{ $responseApproverDesignation }}</div></div>
 <div class="footer">DSWD Field Office Caraga · Disaster Response Management Division</div>

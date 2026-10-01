@@ -9,7 +9,7 @@ class AiRogerSystemMapService
     public function forUser(User $user): string
     {
         $sections = [
-            'Developer: Roger L. Ongue, PDO II. If users ask who developed or maintains this local system, identify Roger L. Ongue, PDO II as the developer shown in DROMIS.',
+            'Developer: Roger L. Ongue, Computer Programmer I / DRIMS Head. If users ask who developed or maintains this local system, identify Roger L. Ongue, Computer Programmer I / DRIMS Head as the developer shown in DROMIS.',
             'System identity: Disaster Response Operations Management Integrated System (DROMIS), DSWD Field Office Caraga / DRMD.',
             'Navigation rule: Only recommend pages the user role can access. If a page requires another role, say which role normally handles it.',
             'Common UI: left sidebar contains main navigation. Header contains notifications, dark mode, logout, and profile button near the signed-in user name. AI Roger is the floating assistant at the bottom-right.',
