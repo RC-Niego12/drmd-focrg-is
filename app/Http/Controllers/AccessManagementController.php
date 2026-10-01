@@ -134,7 +134,7 @@ class AccessManagementController extends Controller
 
         $removingSuperAdmin = $user->hasRole('Super Admin')
             && ($validated['role'] !== 'Super Admin' || $validated['access_status'] !== 'approved' || ! $validated['is_active']);
-        if ($removingSuperAdmin && User::role('Super Admin')->whereKeyNot($user->id)->count() === 0) {
+        if ($removingSuperAdmin && $this->activeSuperAdminCountExcluding($user) === 0) {
             throw ValidationException::withMessages([
                 'role' => 'Assign another active Super Admin before changing the last Super Admin account.',
             ]);

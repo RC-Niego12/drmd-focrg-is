@@ -154,7 +154,7 @@ class DashboardController extends Controller
         ]);
     }
 
-    public function rros(InventoryBalanceService $inventoryBalanceService): Response
+    public function rros(InventoryBalanceService $inventoryBalanceService, StandbyStockpileSummaryService $stockpileSummary): Response
     {
         $user = request()->user();
         abort_unless($user->hasAnyRole([
@@ -171,7 +171,7 @@ class DashboardController extends Controller
         ]), 403);
         request()->attributes->set('dashboard_role_override', 'RROS');
 
-        return $this($inventoryBalanceService);
+        return $this($inventoryBalanceService, $stockpileSummary);
     }
 
     private function dashboardRole(User $user): string

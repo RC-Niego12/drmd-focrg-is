@@ -102,13 +102,28 @@ class SSOController extends Controller
                 throw ValidationException::withMessages(['sso' => 'Provider did not return a subject (sub).']);
             }
 
-            $locator = filled($username) ? ['username' => $username] : ['sso_sub' => $sub];
-            $existingUser = User::query()->where($locator)->first();
+            $existingUser = User::query()->where('sso_sub', $sub)->first();
+
+            if (! $existingUser && filled($username)) {
+                $usernameMatch = User::query()->where('username', $username)->first();
+
+                if ($usernameMatch && (filled($usernameMatch->sso_sub) || filled($usernameMatch->lgu_psgc_code))) {
+                    Log::warning('Caraga Connect login refused: username belongs to another account.', [
+                        'username' => $username,
+                        'user_id' => $usernameMatch->id,
+                    ]);
+
+                    throw ValidationException::withMessages(['sso' => 'This Caraga Connect username is already linked to a different DROMIS account. Please contact the Super Admin.']);
+                }
+
+                $existingUser = $usernameMatch;
+            }
+
             $wasCreated = ! $existingUser;
             $existingProfilePayload = is_array($existingUser?->sso_profile_payload) ? $existingUser->sso_profile_payload : [];
 
-            $user = User::updateOrCreate(
-                $locator,
+            $user = $existingUser ?? new User;
+            $user->fill(
                 [
                     'sso_sub' => $sub,
                     'name' => $name ?: 'SSO User',
@@ -132,7 +147,7 @@ class SSOController extends Controller
                     'email_verified_at' => now(),
                     'is_active' => true,
                 ]
-            );
+            )->save();
 
             $this->syncMyPortalProfileAfterSso($user, $ssoLookupProfile, [
                 'username' => $username,
