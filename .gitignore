@@ -7,7 +7,8 @@
 /.env
 /.phpunit.cache
 /storage/*.key
-/storage/app/private
+/storage/app/*
+!/storage/app/templates/
 /storage/framework/cache/data
 /storage/framework/*
 /storage/framework/sessions/*
