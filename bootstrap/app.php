@@ -14,6 +14,8 @@ use App\Http\Middleware\HandleInertiaRequests;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Spatie\Permission\Middleware\PermissionMiddleware;
 use Spatie\Permission\Middleware\RoleMiddleware;
 use Spatie\Permission\Middleware\RoleOrPermissionMiddleware;
@@ -51,5 +53,18 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        //
+        $exceptions->respond(function (Response $response, Throwable $exception, Request $request) {
+            if ($response->getStatusCode() !== 419) {
+                return $response;
+            }
+
+            $referer = $request->headers->get('referer');
+            $target = route('login');
+            $refererHost = is_string($referer) ? parse_url($referer, PHP_URL_HOST) : null;
+            if (is_string($refererHost) && strcasecmp($refererHost, $request->getHost()) === 0) {
+                $target = $referer;
+            }
+
+            return redirect()->to($target)->with('error', 'This page expired. Please try again.');
+        });
     })->create();
