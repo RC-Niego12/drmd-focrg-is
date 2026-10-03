@@ -12,6 +12,7 @@ class OperationalLibraryValue extends Model
         'transaction_purpose' => 'Transaction Purpose',
         'supplier_sender' => 'Supplier and Sender',
         'recipient_requesting_party' => 'Recipient and Requesting Party',
+        'sotex_recipient' => 'SoTEx Recipients (Offices & Agencies)',
         'delivery_site' => 'Delivery Site',
         'transportation_mode' => 'Transportation Mode',
         'vehicle_type' => 'Vehicle Type',

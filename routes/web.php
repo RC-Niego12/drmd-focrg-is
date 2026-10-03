@@ -189,8 +189,12 @@ Route::middleware('auth')->group(function (): void {
             Route::post('/inventory/releases', [InventoryController::class, 'release'])->name('inventory.releases')->middleware('role_or_permission:Super Admin|RROS|RROS AA|manage inventory');
             Route::put('/inventory/{inventory}', [InventoryController::class, 'update'])->name('inventory.update')->middleware('role_or_permission:Super Admin|RROS|RROS AA|manage inventory')->whereNumber('inventory');
             Route::get('/inventory/batches', [InventoryController::class, 'batches'])->name('inventory.batches')->middleware('role_or_permission:Super Admin|RROS|RROS AA|DRRS|manage inventory|manage near expiry');
-            Route::get('/near-expiry', [DistributionPlanController::class, 'index'])->name('near-expiry.index')->middleware('role_or_permission:Super Admin|RROS|RROS AA|DRRS|manage near expiry');
-            Route::post('/near-expiry/plans', [DistributionPlanController::class, 'store'])->name('near-expiry.store')->middleware('role_or_permission:Super Admin|RROS|RROS AA|DRRS|manage near expiry');
+            Route::get('/near-expiry', [DistributionPlanController::class, 'index'])->name('near-expiry.index')->middleware('role_or_permission:Super Admin|RROS|RROS AA|DRRS|DRIMS|manage near expiry');
+            Route::post('/near-expiry/plans', [DistributionPlanController::class, 'store'])->name('near-expiry.store')->middleware('role:DRRS');
+            Route::get('/near-expiry/recipients', [DistributionPlanController::class, 'recipientOptions'])->name('near-expiry.recipients.index')->middleware('role:DRRS');
+            Route::post('/near-expiry/recipients', [DistributionPlanController::class, 'storeRecipient'])->name('near-expiry.recipients.store')->middleware('role:DRRS');
+            Route::patch('/near-expiry/plans/{distributionPlan}', [DistributionPlanController::class, 'update'])->name('near-expiry.update')->middleware('role:DRRS');
+            Route::delete('/near-expiry/plans/{distributionPlan}', [DistributionPlanController::class, 'destroy'])->name('near-expiry.destroy')->middleware('role:DRRS');
             Route::get('/fni-issuances', FniIssuanceController::class)->name('fni-issuances.index')->middleware('role_or_permission:Super Admin|RROS|RROS AA|DRRS|DRRS AA|DRIMS|DRMD Chief|DRMD Financial Analyst|manage inventory|view dashboards');
 
             // Role fallback matches sidebar/RROS inventory access when Spatie permission cache/pivots drift.

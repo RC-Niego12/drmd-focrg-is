@@ -103,7 +103,7 @@ const dashboardViewRoles = [
 ];
 
 const inventoryManageRoles = ["Super Admin", "RROS", "RROS AA"];
-const nearExpiryRoles = ["Super Admin", "RROS", "RROS AA", "DRRS"];
+const nearExpiryRoles = ["Super Admin", "RROS", "RROS AA", "DRRS", "DRIMS"];
 const dispatchRoles = ["Super Admin", "RROS", "RROS AA"];
 const deliveryMonitoringRoles = [
   "Super Admin", "RROS", "RROS AA", "DRRS", "DRRS AA", "DRIMS", "DRMD AA",
@@ -418,6 +418,7 @@ const superAdminAccessGroups = [
       "/preparedness-for-response",
       "/delivery-monitoring",
       "/delivery-escort",
+      "/near-expiry",
       "/dromic/lgu-reports",
       "/dromic",
     ],
@@ -533,7 +534,8 @@ const pageTrees = {
     { id: "near-expiry-item-breakdown", label: "Item Breakdown" },
     { id: "near-expiry-warehouse-breakdown", label: "Warehouse Breakdown" },
     { id: "near-expiry-stock", label: "Monitoring Table" },
-    { id: "near-expiry-plans", label: "Distribution Plans" },
+    { id: "near-expiry-plans", label: "Distribution Plan" },
+    { id: "near-expiry-register", label: "Allocation Register" },
   ],
   "/lgu/near-expiry": [
     { id: "near-expiry-overview", label: "Expiry & Ageing Overview" },
@@ -1819,6 +1821,12 @@ export default function AppLayout({ title, children }) {
         detail: { pageKey: sectionId },
       }));
       return;
+    }
+
+    if (href === "/near-expiry") {
+      window.dispatchEvent(new CustomEvent("near-expiry:navigate", {
+        detail: { sectionId },
+      }));
     }
 
     const scroll = (attempt = 0) => {

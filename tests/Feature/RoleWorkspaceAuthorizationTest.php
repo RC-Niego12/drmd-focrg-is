@@ -103,6 +103,27 @@ it('denies RROS from access management', function (): void {
         ->assertForbidden();
 });
 
+it('lets DRIMS open the RROS near-expiry workspace', function (): void {
+    $user = User::where('email', 'drims@example.test')->firstOrFail();
+
+    $this->actingAs($user)
+        ->get('/near-expiry')
+        ->assertOk()
+        ->assertInertia(fn ($page) => $page
+            ->component('Inventory/NearExpiry')
+            ->where('workspace', 'rros')
+            ->has('monitoring.expiryRows'));
+
+    $this->actingAs($user)
+        ->post('/near-expiry/plans', [
+            'location' => 'Butuan City',
+            'quantity' => 1,
+            'priority' => 'normal',
+            'status' => 'for_distribution',
+        ])
+        ->assertForbidden();
+});
+
 it('lets DRIMS open DROMIC reports via role fallback', function (): void {
     $user = User::where('email', 'drims@example.test')->firstOrFail();
 

@@ -30,12 +30,15 @@ export default function SearchableSelect({
     multiple = false,
     creatable = false,
     createLabel = 'Add new…',
+    createInline = false,
     onCreate,
     creating = false,
     compact = false,
 }) {
     const [open, setOpen] = useState(false);
     const [query, setQuery] = useState('');
+    const [naming, setNaming] = useState(false);
+    const [createDraft, setCreateDraft] = useState('');
     const [dropdownStyle, setDropdownStyle] = useState(null);
     const wrapperRef = useRef(null);
     const dropdownRef = useRef(null);
@@ -86,6 +89,8 @@ export default function SearchableSelect({
     const closeMenu = ({ restoreFocus = false } = {}) => {
         openRef.current = false;
         setOpen(false);
+        setNaming(false);
+        setCreateDraft('');
         if (!multiple) {
             setQuery(selectedLabelRef.current);
         } else {
@@ -176,7 +181,7 @@ export default function SearchableSelect({
                 left: `${rect.left}px`,
                 width: `${Math.max(rect.width, 160)}px`,
                 maxHeight: `${height}px`,
-                zIndex: 300,
+                zIndex: 1300,
                 ...(openAbove
                     ? { bottom: `${viewportHeight - rect.top + gap}px`, top: 'auto' }
                     : { top: `${rect.bottom + gap}px`, bottom: 'auto' }),
@@ -210,9 +215,9 @@ export default function SearchableSelect({
         onCreate(String(suggestedName || '').trim());
     };
 
-    // Portaled menu chrome must not steal clicks meant for fields underneath.
-    // Interactive children re-enable pointer events; option mousedown is canceled so
-    // the trigger does not blur before the option click handler runs.
+    // Option mousedown is canceled so the trigger does not blur before the click handler runs.
+    // The menu itself must receive the click: a pointer-events-none shell lets the click
+    // fall through onto a modal backdrop and dismiss the dialog instead of selecting.
     const keepOptionPointer = {
         onMouseDown: (event) => {
             event.preventDefault();
@@ -240,8 +245,16 @@ export default function SearchableSelect({
         <div
             ref={dropdownRef}
             style={dropdownStyle}
-            className={`pointer-events-none overflow-y-auto rounded-md border border-slate-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 ${compact ? 'text-xs' : 'text-sm'}`}
+            className={`pointer-events-auto overflow-y-auto rounded-md border border-slate-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 ${compact ? 'text-xs' : 'text-sm'}`}
             role="listbox"
+            onMouseDown={(event) => {
+                const tag = event.target?.tagName;
+                event.stopPropagation();
+                if (tag === 'INPUT' || tag === 'TEXTAREA') {
+                    return;
+                }
+                event.preventDefault();
+            }}
         >
             {multiple && (
                 <div className="pointer-events-auto sticky top-0 z-10 border-b border-slate-100 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-900">
@@ -330,16 +343,68 @@ export default function SearchableSelect({
             </div>
             {creatable && !multiple && typeof onCreate === 'function' && (
                 <div className="sticky bottom-0 z-10 border-t border-slate-100 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-                    <button
-                        type="button"
-                        disabled={creating}
-                        className="pointer-events-auto flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-black uppercase tracking-wide text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
-                        {...keepOptionPointer}
-                        onClick={() => triggerCreate(trimmedQuery && !exactMatch ? trimmedQuery : '')}
-                    >
-                        <Plus className="h-3.5 w-3.5 shrink-0" />
-                        {creating ? 'Adding…' : createLabel}
-                    </button>
+                    {createInline && naming ? (
+                        <div className="pointer-events-auto flex items-center gap-2 p-2">
+                            <input
+                                className="form-input min-w-0 flex-1"
+                                value={createDraft}
+                                autoFocus
+                                placeholder="Type the recipient name"
+                                onChange={(event) => setCreateDraft(event.target.value)}
+                                onKeyDown={(event) => {
+                                    if (event.key !== 'Enter') {
+                                        return;
+                                    }
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    const name = createDraft.trim();
+                                    if (!name) {
+                                        return;
+                                    }
+                                    setCreateDraft('');
+                                    setNaming(false);
+                                    triggerCreate(name);
+                                }}
+                            />
+                            <button
+                                type="button"
+                                disabled={creating || createDraft.trim() === ''}
+                                className="rounded-md bg-emerald-700 px-2.5 py-1.5 text-[11px] font-black text-white disabled:opacity-50"
+                                onClick={() => {
+                                    const name = createDraft.trim();
+                                    if (!name) {
+                                        return;
+                                    }
+                                    setCreateDraft('');
+                                    setNaming(false);
+                                    triggerCreate(name);
+                                }}
+                            >
+                                Add
+                            </button>
+                        </div>
+                    ) : (
+                        <button
+                            type="button"
+                            disabled={creating}
+                            className="pointer-events-auto flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-black uppercase tracking-wide text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
+                            {...keepOptionPointer}
+                            onClick={() => {
+                                if (trimmedQuery && !exactMatch) {
+                                    triggerCreate(trimmedQuery);
+                                    return;
+                                }
+                                if (createInline) {
+                                    setNaming(true);
+                                    return;
+                                }
+                                triggerCreate('');
+                            }}
+                        >
+                            <Plus className="h-3.5 w-3.5 shrink-0" />
+                            {creating ? 'Adding…' : createLabel}
+                        </button>
+                    )}
                 </div>
             )}
             {multiple && selectedValues.length > 0 && (
@@ -408,6 +473,9 @@ export default function SearchableSelect({
                     type="button"
                     disabled={disabled}
                     className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-md text-slate-400 transition hover:text-slate-700 dark:text-zinc-500 dark:hover:text-zinc-200"
+                    onMouseDown={(event) => {
+                        event.preventDefault();
+                    }}
                     onClick={() => {
                         if (disabled) {
                             return;

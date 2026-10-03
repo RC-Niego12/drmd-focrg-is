@@ -171,6 +171,45 @@ class InventoryBalanceService
             ->values();
     }
 
+    /**
+     * Near-expiry stock on hand, netted the way the WIT / RROS dashboard does.
+     *
+     * Balance rows stay split by unit cost so valuation lines remain distinct.
+     * An issuance is often posted at a rounded unit cost that does not match
+     * its receipt, which leaves a positive receipt beside a separate negative
+     * issuance. Keeping only the positive side shows stock WIT has already
+     * issued. Net by warehouse, item, brand, and expiry month before display.
+     */
+    public function netExpiryBalances(Collection $rows): Collection
+    {
+        return $rows
+            ->filter(fn (array $row): bool => $this->hasRecordedExpiry($row['expiry'] ?? null))
+            ->groupBy(fn (array $row): string => implode('|', [
+                (string) ($row['warehouse_id'] ?? ''),
+                $this->itemKey($row['category'] ?? ''),
+                $this->itemKey($row['item'] ?? ''),
+                $this->itemKey($row['brand_description'] ?? ''),
+                $this->itemKey(trim(explode(',', (string) ($row['expiry'] ?? ''))[0])),
+            ]))
+            ->map(function (Collection $group): array {
+                $first = $group
+                    ->sortByDesc(fn (array $row): float => (float) ($row['current_balance'] ?? 0))
+                    ->first();
+                $quantity = round($group->sum(fn (array $row): float => (float) ($row['current_balance'] ?? 0)), 4);
+                $reserved = (float) $group->max(fn (array $row): float => (float) ($row['reserved_quantity'] ?? 0));
+
+                return [
+                    ...$first,
+                    'current_balance' => $quantity,
+                    'reserved_quantity' => $reserved,
+                    'available_balance' => max(0, $quantity - $reserved),
+                    'cost' => round($group->sum(fn (array $row): float => (float) ($row['cost'] ?? 0)), 2),
+                ];
+            })
+            ->filter(fn (array $row): bool => (float) $row['current_balance'] > 0)
+            ->values();
+    }
+
     public function summary(?Collection $rows = null): array
     {
         $rows ??= $this->balanceRows();
@@ -329,6 +368,13 @@ class InventoryBalanceService
         $amount = (float) ($transaction->total_cost ?? ((float) $transaction->quantity * (float) $transaction->unit_cost));
 
         return $transaction->type === 'release' ? -1 * $amount : $amount;
+    }
+
+    private function hasRecordedExpiry(?string $expiry): bool
+    {
+        $expiry = trim((string) $expiry);
+
+        return $expiry !== '' && strtoupper($expiry) !== 'N/A';
     }
 
     private function importExpiryLabel(WarehouseSheetImport $import): string

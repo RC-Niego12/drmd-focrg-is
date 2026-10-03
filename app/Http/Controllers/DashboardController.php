@@ -116,7 +116,7 @@ class DashboardController extends Controller
             'warehouseInventory' => $canViewInventoryDashboard ? $warehouseBalances : [],
             'familyFoodPackMap' => $canViewInventoryDashboard ? $this->familyFoodPackMap($inventoryBalanceRows) : [],
             'familyFoodPackDashboard' => $canViewInventoryDashboard ? $this->familyFoodPackDashboard($inventoryBalanceRows) : null,
-            'nearExpirySummary' => $isRros || $isDrrs || $isSuperAdmin ? $this->nearExpirySummary($inventoryBalanceRows) : [],
+            'nearExpirySummary' => $isRros || $isDrrs || $isSuperAdmin ? $this->nearExpirySummary($inventoryBalanceService, $inventoryBalanceRows) : [],
             'standbyStockpileSummary' => $canViewInventoryDashboard ? $stockpileSummary->current() : null,
             'foodItemSummaries' => $canViewInventoryDashboard ? [
                 'rtef' => $this->foodItemWarehouseSummary($inventoryBalanceRows, 'rtef'),
@@ -347,10 +347,9 @@ class DashboardController extends Controller
         ];
     }
 
-    private function nearExpirySummary($inventoryBalanceRows): array
+    private function nearExpirySummary(InventoryBalanceService $inventoryBalanceService, $inventoryBalanceRows): array
     {
-        return $inventoryBalanceRows
-            ->filter(fn (array $row): bool => (float) ($row['current_balance'] ?? 0) > 0 && $this->hasExpiry($row['expiry'] ?? null))
+        return $inventoryBalanceService->netExpiryBalances(collect($inventoryBalanceRows))
             ->map(function (array $row): array {
                 $expiryMonth = trim(explode(',', (string) ($row['expiry'] ?? ''))[0] ?? '');
 
@@ -375,13 +374,6 @@ class DashboardController extends Controller
             })
             ->values()
             ->all();
-    }
-
-    private function hasExpiry(?string $expiry): bool
-    {
-        $expiry = trim((string) $expiry);
-
-        return $expiry !== '' && strtoupper($expiry) !== 'N/A';
     }
 
     private function standbyStockpileSummary($inventoryBalanceRows): array

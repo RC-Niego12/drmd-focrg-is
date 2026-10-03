@@ -50,6 +50,7 @@ const operationalMeta = {
   transaction_purpose: [ClipboardCheck, "RROS References", "Inventory Transactions"],
   supplier_sender: [Send, "RROS References", "Parties & Locations"],
   recipient_requesting_party: [HandHeart, "RROS References", "Parties & Locations"],
+  sotex_recipient: [HandHeart, "RROS References", "Parties & Locations"],
   delivery_site: [MapPin, "RROS References", "Parties & Locations"],
   transportation_mode: [Route, "RROS References", "Transport & Delivery"],
   vehicle_type: [Truck, "RROS References", "Transport & Delivery"],
@@ -786,6 +787,11 @@ export default function FniLibrary({
                   "Office",
                   "Status",
                   { label: "Actions", align: "right", actionColumn: true },
+                ] : activeType === "sotex_recipient" ? [
+                  "Recipient",
+                  "Office / Agency Details",
+                  "Status",
+                  { label: "Actions", align: "right", actionColumn: true },
                 ] : [
                   "Reference Value",
                   "Context",
@@ -820,6 +826,10 @@ export default function FniLibrary({
                       row.value,
                       row.metadata?.id_number || "—",
                       row.metadata?.position || "—",
+                      row.metadata?.office || "—",
+                      row.is_active ? "Active" : "Inactive",
+                    ] : activeType === "sotex_recipient" ? [
+                      row.value,
                       row.metadata?.office || "—",
                       row.is_active ? "Active" : "Inactive",
                     ] : [
@@ -1136,6 +1146,19 @@ function LibraryModal({
                   onChange={(value) => form.setData("office", value)}
                   required={false}
                 />
+              </div> : form.data.library_type === "sotex_recipient" ? <div className="space-y-4">
+                <Input
+                  label="Recipient"
+                  value={form.data.value}
+                  onChange={(value) => form.setData("value", value)}
+                />
+                <Input
+                  label="Office / Agency Details"
+                  value={form.data.office}
+                  onChange={(value) => form.setData("office", value)}
+                  required={false}
+                />
+                <p className="text-xs font-semibold text-slate-500">LGUs are not listed here. The SoTEx planner reads them from the LGU Directory.</p>
               </div> : <Input
                 label="Reference Value"
                 value={form.data.value}

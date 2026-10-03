@@ -11,6 +11,7 @@ use App\Models\OperationalLibraryValue;
 use App\Models\User;
 use App\Models\WarehouseLibraryValue;
 use App\Models\WarehouseSheetImport;
+use App\Services\SotexRecipientLibrary;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -21,6 +22,8 @@ use Inertia\Response;
 
 class FniLibraryController extends Controller
 {
+    private const DRRS_OPERATIONAL_TYPES = ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials', SotexRecipientLibrary::LIBRARY_TYPE];
+
     public function legacyRedirect(): RedirectResponse
     {
         return redirect()->route('fni-library.index', status: 301);
@@ -40,7 +43,7 @@ class FniLibraryController extends Controller
             $operationalQuery->where('library_type', '!=', 'drims_signatory');
         }
         if (! $inventoryScope) {
-            $libraryTypesToInclude = ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials'];
+            $libraryTypesToInclude = self::DRRS_OPERATIONAL_TYPES;
             if ($isSuperAdmin) {
                 $libraryTypesToInclude[] = 'system_name';
                 $libraryTypesToInclude[] = 'drims_signatory';
@@ -49,6 +52,7 @@ class FniLibraryController extends Controller
         }
 
         OperationalLibraryValue::backfillMissingSignatoryOffices();
+        app(SotexRecipientLibrary::class)->seedFromRequestParties();
 
         return Inertia::render('Inventory/FniLibrary', [
             'items' => $inventoryScope ? FniLibraryItem::query()->orderBy('item_category')->orderBy('item_name')->orderBy('brand_description')->get() : [],
@@ -57,7 +61,7 @@ class FniLibraryController extends Controller
             'operationalLibraries' => $operationalQuery->orderBy('library_type')->orderBy('value')->get(),
             'operationalLibraryTypes' => $inventoryScope
                 ? collect(OperationalLibraryValue::TYPES)->when(! $isSuperAdmin, fn ($types) => $types->except('drims_signatory'))->all()
-                : collect(OperationalLibraryValue::TYPES)->only(array_filter(['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials', $isSuperAdmin ? 'system_name' : null, $isSuperAdmin ? 'drims_signatory' : null]))->all(),
+                : collect(OperationalLibraryValue::TYPES)->only(array_filter([...self::DRRS_OPERATIONAL_TYPES, $isSuperAdmin ? 'system_name' : null, $isSuperAdmin ? 'drims_signatory' : null]))->all(),
             'libraryScope' => $inventoryScope ? 'RROS' : ($isSuperAdmin ? 'Super Admin' : 'DRRS'),
             'lguDirectoryEntries' => $userAdminScope
                 ? LguDirectoryEntry::with(['officials', 'contacts', 'ldrrmoOfficers', 'lswdoAlternates'])
@@ -145,6 +149,7 @@ class FniLibraryController extends Controller
     {
         $value = OperationalLibraryValue::create($this->validatedOperationalValue($request));
         $this->activateExclusiveSystemName($value);
+        $this->announceSotexRecipientChange($value);
 
         return back()->with('success', 'Operational library value added.');
     }
@@ -298,7 +303,7 @@ class FniLibraryController extends Controller
     public function updateOperationalValue(Request $request, OperationalLibraryValue $operationalLibraryValue): RedirectResponse
     {
         $isSuperAdmin = $request->user()?->hasRole('Super Admin') ?? false;
-        $allowedTypes = ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials'];
+        $allowedTypes = self::DRRS_OPERATIONAL_TYPES;
         if ($isSuperAdmin) {
             $allowedTypes[] = 'system_name';
             $allowedTypes[] = 'drims_signatory';
@@ -309,6 +314,7 @@ class FniLibraryController extends Controller
         $validated = $this->validatedOperationalValue($request, $operationalLibraryValue);
         $operationalLibraryValue->update($validated);
         $this->activateExclusiveSystemName($operationalLibraryValue);
+        $this->announceSotexRecipientChange($operationalLibraryValue);
 
         if (in_array($operationalLibraryValue->library_type, OperationalLibraryValue::signatoryLibraryTypes(), true)) {
             $metadata = $operationalLibraryValue->metadata ?? [];
@@ -332,15 +338,23 @@ class FniLibraryController extends Controller
     public function destroyOperationalValue(OperationalLibraryValue $operationalLibraryValue): RedirectResponse
     {
         $isSuperAdmin = request()->user()?->hasRole('Super Admin') ?? false;
-        $allowedTypes = ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials'];
+        $allowedTypes = self::DRRS_OPERATIONAL_TYPES;
         if ($isSuperAdmin) {
             $allowedTypes[] = 'system_name';
             $allowedTypes[] = 'drims_signatory';
         }
         abort_if(! $this->canManageInventory(request()->user()) && ! in_array($operationalLibraryValue->library_type, $allowedTypes, true), 403);
         $operationalLibraryValue->delete();
+        $this->announceSotexRecipientChange($operationalLibraryValue);
 
         return back()->with('success', 'Operational library value removed.');
+    }
+
+    private function announceSotexRecipientChange(OperationalLibraryValue $value): void
+    {
+        if ($value->library_type === SotexRecipientLibrary::LIBRARY_TYPE) {
+            app(SotexRecipientLibrary::class)->announceChanged($value->value);
+        }
     }
 
     private function validatedOperationalValue(Request $request, ?OperationalLibraryValue $row = null): array
@@ -354,7 +368,7 @@ class FniLibraryController extends Controller
         $initials = $this->normalizeText($request->input('initials'));
         $office = $isSignatory
             ? OperationalLibraryValue::resolveSignatoryOffice($employeeName, $request->input('office') ?: data_get($row?->metadata, 'office'))
-            : (in_array($request->input('library_type'), ['dispatch_received_by', 'dispatch_driver'], true)
+            : (in_array($request->input('library_type'), ['dispatch_received_by', 'dispatch_driver', SotexRecipientLibrary::LIBRARY_TYPE], true)
                 ? $this->normalizeText($request->input('office'))
                 : '');
         $contactNumber = $request->input('library_type') === 'dispatch_driver'
@@ -381,7 +395,7 @@ class FniLibraryController extends Controller
         ]);
         $isSuperAdmin = $request->user()?->hasRole('Super Admin') ?? false;
         $canManageInventory = $this->canManageInventory($request->user());
-        $allowedTypes = $canManageInventory ? array_keys(OperationalLibraryValue::TYPES) : ['drrs_signatory', 'rros_ris_signatory', 'rros_dr_signatory', 'rros_stf_signatory', 'drn_prefix', 'response_letter_initials'];
+        $allowedTypes = $canManageInventory ? array_keys(OperationalLibraryValue::TYPES) : self::DRRS_OPERATIONAL_TYPES;
         if ($isSuperAdmin && ! $canManageInventory) {
             $allowedTypes[] = 'system_name';
             $allowedTypes[] = 'drims_signatory';
@@ -418,7 +432,9 @@ class FniLibraryController extends Controller
                             'office' => $data['office'] ?? '',
                             'id_number' => $data['id_number'] ?? null,
                         ], fn ($value) => $value !== null && $value !== '')
-                        : ($row?->metadata ?? null))));
+                        : ($data['library_type'] === SotexRecipientLibrary::LIBRARY_TYPE
+                            ? array_filter(['office' => $data['office'] ?? null], fn ($value) => filled($value))
+                            : ($row?->metadata ?? null)))));
         unset($data['short_name'], $data['document_type'], $data['position'], $data['suffix'], $data['designation'], $data['office'], $data['initials'], $data['contact_number'], $data['id_number']);
         if ($data['library_type'] === 'drrs_signatory' && ! in_array($data['context'], ['reviewed_by', 'approved_by'], true)) {
             throw ValidationException::withMessages(['context' => 'Use reviewed_by or approved_by as the signatory role.']);
@@ -437,6 +453,9 @@ class FniLibraryController extends Controller
         }
         if ($data['library_type'] === 'response_letter_initials' && $data['context'] !== 'response_letter') {
             throw ValidationException::withMessages(['context' => 'Use response_letter as the document context.']);
+        }
+        if ($data['library_type'] === SotexRecipientLibrary::LIBRARY_TYPE && ($lgu = app(SotexRecipientLibrary::class)->matchingLgu($data['value'])) !== null) {
+            throw ValidationException::withMessages(['value' => "LGUs come from the LGU directory ({$lgu}). Add only DSWD offices, agencies, and organizations here."]);
         }
         $this->rejectNormalizedDuplicate(OperationalLibraryValue::query()->where('library_type', $data['library_type']), $data['value'], $row?->id);
 

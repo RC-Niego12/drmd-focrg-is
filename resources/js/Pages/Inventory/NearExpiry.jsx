@@ -1,42 +1,62 @@
 import CalloutCard from '@/Components/CalloutCard';
-import SearchableSelect from '@/Components/SearchableSelect';
 import { formatExpiryMonth } from '@/Utils/dateFormat';
 import LookerMultiSelect from '@/Components/LookerMultiSelect';
-import { Head, useForm, usePage } from '@inertiajs/react';
-import { AlertTriangle, BarChart3, CalendarClock, CheckCircle2, ClipboardList, Eye, Filter, PackageCheck, Plus, X } from 'lucide-react';
+import { Head } from '@inertiajs/react';
+import { AlertTriangle, CalendarClock, Eye, Filter, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import AppLayout, { Card, DataTable, ExportableCard, TableActionButton } from '@/Layouts/AppLayout';
 import NearExpiryMonthSummary from '@/Components/NearExpiryMonthSummary';
 import SectionTabs from '@/Components/SectionTabs';
+import SotexPlanner from '@/Components/SotexPlanner';
 
 const number = (value) => Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const peso = (value) => `₱${Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const titleCase = (value) => String(value || '').replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 const chartColors = ['#3b82f6', '#f97316', '#a855f7', '#9dbb4f', '#2db6c4'];
+const TAB_STORAGE_KEY = 'dromis:near-expiry-tab';
+const NEAR_EXPIRY_TABS = ['expiry', 'ageing', 'plans', 'register'];
 const chartHoverColors = ['#2563eb', '#ea580c', '#9333ea', '#82983f', '#0891b2'];
 
-export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptions = {}, workspace = 'rros' }) {
-    const isRros = (usePage().props.auth.user?.roles ?? []).some((role) => ['RROS', 'RROS AA'].includes(role));
+export default function NearExpiry({ monitoring, sotex = {}, workspace = 'rros', canManageSotex = false }) {
     const isLguWorkspace = workspace === 'lgu';
-    const canCreatePlans = !isRros && !isLguWorkspace;
-    const [tab, setTab] = useState('expiry');
-    const [showFilters, setShowFilters] = useState(false);
-    const [filters, setFilters] = useState({ q: '', category: [], item: [], brand: [], warehouse: [], status: [] });
-    const [showPlanModal, setShowPlanModal] = useState(false);
-    const [detailRow, setDetailRow] = useState(null);
-    const form = useForm({
-        inventory_batch_id: '',
-        program_type: 'food_for_work',
-        beneficiary: '',
-        location: '',
-        quantity: '',
-        activity: '',
-        activity_date: '',
-        priority: 'high',
-        status: 'for_distribution',
-        remarks: '',
+    const canCreatePlans = !isLguWorkspace && canManageSotex;
+    const [tab, setTabState] = useState(() => {
+        if (typeof window === 'undefined') return 'expiry';
+        const saved = window.sessionStorage.getItem(TAB_STORAGE_KEY);
+        return NEAR_EXPIRY_TABS.includes(saved) && (!isLguWorkspace || ['expiry', 'ageing'].includes(saved)) ? saved : 'expiry';
     });
+    const setTab = (next) => setTabState((current) => (typeof next === 'function' ? next(current) : next));
+
+    useEffect(() => {
+        try {
+            window.sessionStorage.setItem(TAB_STORAGE_KEY, tab);
+        } catch {
+            // Storage can be unavailable (private mode); the tab still switches.
+        }
+    }, [tab]);
+    const [showFilters, setShowFilters] = useState(false);
+    const [filters, setFilters] = useState({ q: '', category: [], item: [], brand: [], warehouse: [], status: [], expiry_month: [], recipient: [] });
+    const [detailRow, setDetailRow] = useState(null);
+
+    useEffect(() => {
+        const sectionTab = {
+            'near-expiry-plans': 'plans',
+            'near-expiry-register': 'register',
+        };
+        const applySection = (sectionId) => {
+            if (sectionTab[sectionId]) {
+                setTab(sectionTab[sectionId]);
+                return;
+            }
+            if (['near-expiry-stock', 'near-expiry-item-breakdown', 'near-expiry-warehouse-breakdown'].includes(sectionId)) {
+                setTab((current) => (current === 'ageing' ? 'ageing' : 'expiry'));
+            }
+        };
+        applySection(window.location.hash.replace('#', ''));
+        const onNavigate = (event) => applySection(event.detail?.sectionId);
+        window.addEventListener('near-expiry:navigate', onNavigate);
+        return () => window.removeEventListener('near-expiry:navigate', onNavigate);
+    }, []);
 
     useEffect(() => {
         if (!detailRow) {
@@ -55,7 +75,6 @@ export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptio
 
     const expiryRows = monitoring?.expiryRows ?? [];
     const ageingRows = monitoring?.ageingRows ?? [];
-    const planRows = plans?.data ?? [];
     const filteredExpiry = useMemo(() => applyFilters(expiryRows, filters), [expiryRows, filters]);
     const filteredAgeing = useMemo(() => applyFilters(ageingRows, filters), [ageingRows, filters]);
     const activeRows = tab === 'ageing' ? filteredAgeing : filteredExpiry;
@@ -66,26 +85,15 @@ export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptio
         brands: optionValues(applyFilters(activeSourceRows, filters, 'brand'), 'brand'),
         warehouses: optionValues(applyFilters(activeSourceRows, filters, 'warehouse'), 'warehouse'),
         statuses: optionValues(applyFilters(activeSourceRows, filters, 'status'), 'status'),
+        expiryMonths: monthsInRows(applyFilters(activeSourceRows, filters, 'expiry_month')),
     }), [activeSourceRows, filters]);
+    const recipientOptions = useMemo(() => optionValues((sotex.plans ?? [])
+        .filter((plan) => ['item', 'brand', 'warehouse', 'expiry_month'].every((key) => selectedHas(filters, key, plan[key])))
+        .map((plan) => ({ recipient: plan.lgu })), 'recipient'), [sotex.plans, filters]);
+    const filterCount = activeFilterCount(filters, tab);
     const totalQty = activeRows.reduce((sum, row) => sum + Number(row.quantity ?? row.total ?? 0), 0);
     const totalCost = activeRows.reduce((sum, row) => sum + Number(row.cost ?? 0), 0);
     const statusSummaries = useMemo(() => statusSummaryCards(filteredExpiry), [filteredExpiry]);
-    const batchOptions = (nearExpiry?.data ?? []).map((batch) => ({
-        value: batch.id,
-        label: `${batch.item?.name ?? 'Item'} - ${batch.warehouse?.name ?? 'Warehouse'} - Exp: ${formatExpiryMonth(batch.expiration_date)}`,
-    }));
-
-    const submitPlan = (event) => {
-        event.preventDefault();
-        form.post('/near-expiry/plans', {
-            preserveScroll: true,
-            onSuccess: () => {
-                form.reset('beneficiary', 'location', 'quantity', 'activity', 'activity_date', 'remarks');
-                setShowPlanModal(false);
-            },
-        });
-    };
-
     return (
         <AppLayout title="Near Expiry">
             <Head title="Near Expiry" />
@@ -101,10 +109,6 @@ export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptio
                                 : 'Uses the local stockpile database and follows the reference sheet columns for Expiry status, expiry month, warehouse, category, item, brand/spec, quantity, cost, and month-based ageing.'}
                         </p>
                     </div>
-                    {canCreatePlans && <button type="button" onClick={() => setShowPlanModal(true)} className="inline-flex items-center justify-center gap-2 rounded-md bg-brand-600 px-4 py-2 text-sm font-black text-white shadow-sm hover:bg-brand-700">
-                        <Plus className="h-4 w-4" />
-                        Create Distribution Plan
-                    </button>}
                 </div>
             </ExportableCard>
 
@@ -124,25 +128,30 @@ export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptio
                         tabs={[
                             { id: 'expiry', label: 'Expiry' },
                             { id: 'ageing', label: 'Ageing' },
-                            ...(!isLguWorkspace ? [{ id: 'plans', label: 'Distribution Plan' }] : []),
+                            ...(!isLguWorkspace ? [
+                                { id: 'plans', label: 'Distribution Plan' },
+                                { id: 'register', label: 'Allocation Register' },
+                            ] : []),
                         ]}
                     />
                     <div className="flex flex-col gap-2 sm:flex-row">
                         <button type="button" onClick={() => setShowFilters(!showFilters)} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-black shadow-sm hover:bg-slate-50 dark:border-zinc-700 dark:bg-zinc-950 dark:hover:bg-zinc-900">
                             <Filter className="h-4 w-4" />
                             Filters
-                            {activeFilterCount(filters) > 0 && <span className="rounded-full bg-brand-600 px-2 py-0.5 text-xs text-white">{activeFilterCount(filters)}</span>}
+                            {filterCount > 0 && <span className="rounded-full bg-brand-600 px-2 py-0.5 text-xs text-white">{filterCount}</span>}
                         </button>
                         <input className="w-full sm:w-80" type="search" placeholder="Search monitoring table..." value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value })} />
                     </div>
                 </div>
 
                 {showFilters && (
-                    <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                    <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        {tab === 'register' && <SelectFilter label="Recipient" value={filters.recipient} options={recipientOptions} onChange={(value) => setFilters({ ...filters, recipient: value })} />}
                         <SelectFilter label="Category" value={filters.category} options={cascadingOptions.categories} onChange={(value) => setFilters({ ...filters, category: value })} />
                         <SelectFilter label="Item" value={filters.item} options={cascadingOptions.items} onChange={(value) => setFilters({ ...filters, item: value })} />
                         <SelectFilter label="Brand / Spec" value={filters.brand} options={cascadingOptions.brands} onChange={(value) => setFilters({ ...filters, brand: value })} />
                         <SelectFilter label="Warehouse" value={filters.warehouse} options={cascadingOptions.warehouses} onChange={(value) => setFilters({ ...filters, warehouse: value })} />
+                        <SelectFilter label="Expiry Month" value={filters.expiry_month} options={cascadingOptions.expiryMonths} onChange={(value) => setFilters({ ...filters, expiry_month: value })} />
                         <SelectFilter label="Status" value={filters.status} options={cascadingOptions.statuses} onChange={(value) => setFilters({ ...filters, status: value })} />
                     </div>
                 )}
@@ -156,7 +165,7 @@ export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptio
                 />
             )}
 
-            {tab !== 'plans' && (
+            {(tab === 'expiry' || tab === 'ageing') && (
                 <>
                     {tab === 'expiry' && (
                         <ExpiryTable
@@ -177,9 +186,11 @@ export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptio
                     )}
                 </>
             )}
-            {tab === 'plans' && <PlansSection rows={planRows} />}
+            {(tab === 'plans' || tab === 'register') && (
+                <SotexPlanner sotex={sotex} canEdit={canCreatePlans} section={tab} filters={filters} onOpenPlan={() => setTab('plans')} />
+            )}
 
-            {tab !== 'plans' && !isLguWorkspace && (
+            {(tab === 'expiry' || tab === 'ageing') && !isLguWorkspace && (
                 <div className="mt-6 grid gap-6 xl:grid-cols-2">
                     <BreakdownCard id="near-expiry-item-breakdown" title="Item-Level Breakdown" description="Shows which expiring or ageing items make up the largest share of the current filtered stockpile." rows={groupRows(activeRows, 'item')} />
                     <BreakdownCard id="near-expiry-warehouse-breakdown" title="Warehouse-Level Breakdown" description="Shows which warehouses currently hold the largest quantity of the filtered expiring or ageing stockpile." rows={groupRows(activeRows, 'warehouse')} />
@@ -187,10 +198,6 @@ export default function NearExpiry({ monitoring, nearExpiry, plans, libraryOptio
             )}
 
             {detailRow && <NearExpiryDetailModal row={detailRow} onClose={() => setDetailRow(null)} />}
-
-            {showPlanModal && (
-                <PlanModal form={form} batchOptions={batchOptions} libraryOptions={libraryOptions} onClose={() => setShowPlanModal(false)} onSubmit={submitPlan} />
-            )}
         </AppLayout>
     );
 }
@@ -527,80 +534,6 @@ function StickySummaryRow({ colSpan, values }) {
     );
 }
 
-function PlansSection({ rows }) {
-    return (
-        <ExportableCard
-            id="near-expiry-plans"
-            title="Distribution Plans"
-            className="mt-6 scroll-mt-28"
-            showExportButtons={true}
-            exportButtonProps={{ showOnlyFullscreen: true }}
-            renderHeader={({ exportButtons }) => (
-                <div className="mb-4 flex items-center justify-between">
-                    <div>
-                        <h2 className="text-lg font-black">Distribution Plans</h2>
-                        <p className="text-sm font-semibold text-slate-500 dark:text-zinc-400">Implementation records for monitored stockpile distribution.</p>
-                    </div>
-                    <div className="flex items-center gap-3">
-                        {exportButtons}
-                    </div>
-                </div>
-            )}>
-            <DataTable
-                stickyHeader
-                className="max-h-[calc(100vh-340px)] overflow-auto"
-                columns={['Program', 'Beneficiary', 'Location', { label: 'Quantity', align: 'right' }, 'Priority', 'Status']}
-                rows={rows.map((plan) => (
-                    <tr key={plan.id} className="transition hover:bg-brand-50/60 dark:hover:bg-brand-950/20">
-                        <td className="whitespace-nowrap px-4 py-3 font-black">{titleCase(plan.program_type)}</td>
-                        <td className="whitespace-nowrap px-4 py-3">{plan.beneficiary || '-'}</td>
-                        <td className="whitespace-nowrap px-4 py-3">{plan.location}</td>
-                        <td className="whitespace-nowrap px-4 py-3 text-right font-black">{number(plan.quantity)}</td>
-                        <td className="whitespace-nowrap px-4 py-3">{titleCase(plan.priority)}</td>
-                        <td className="whitespace-nowrap px-4 py-3">{titleCase(plan.status)}</td>
-                    </tr>
-                ))}
-            />
-        </ExportableCard>
-    );
-}
-
-function PlanModal({ form, batchOptions, libraryOptions = {}, onClose, onSubmit }) {
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4 backdrop-blur-sm">
-            <div className="max-h-[92vh] w-full max-w-2xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
-                <div className="h-1.5 bg-brand-600" />
-                <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 dark:border-zinc-800">
-                    <div>
-                        <p className="text-xs font-black uppercase tracking-wide text-slate-500 dark:text-zinc-400">Inventory Monitoring Action</p>
-                        <h2 className="text-lg font-black">Create Distribution Plan</h2>
-                    </div>
-                    <button type="button" onClick={onClose} className="rounded-md p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-800 dark:hover:bg-zinc-900 dark:hover:text-zinc-100">
-                        <X className="h-5 w-5" />
-                    </button>
-                </div>
-                <form className="max-h-[calc(92vh-5.5rem)] space-y-4 overflow-y-auto p-5" onSubmit={onSubmit}>
-                    <SearchableSelect label="Stock Batch" options={[{ value: '', label: 'Select batch' }, ...batchOptions]} value={form.data.inventory_batch_id} onChange={(value) => form.setData('inventory_batch_id', value)} placeholder="Search monitored batch..." />
-                    <div className="grid gap-3 sm:grid-cols-2">
-                        <label className="text-sm font-bold">Program Type<select className="mt-1 w-full" value={form.data.program_type} onChange={(event) => form.setData('program_type', event.target.value)}><option value="food_for_work">Food-for-Work</option><option value="non_food_for_work">Non-Food-for-Work</option><option value="relief_distribution">Relief Distribution</option><option value="other">Other</option></select></label>
-                        <label className="text-sm font-bold">Priority<select className="mt-1 w-full" value={form.data.priority} onChange={(event) => form.setData('priority', event.target.value)}><option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option><option value="urgent">Urgent</option></select></label>
-                    </div>
-                    <Field label="Beneficiary" suggestions={libraryOptions.recipient_requesting_party} value={form.data.beneficiary} onChange={(value) => form.setData('beneficiary', value)} />
-                    <Field label="Location *" suggestions={libraryOptions.delivery_site} value={form.data.location} onChange={(value) => form.setData('location', value)} />
-                    <div className="grid gap-3 sm:grid-cols-2">
-                        <Field label="Quantity *" type="number" value={form.data.quantity} onChange={(value) => form.setData('quantity', value)} />
-                        <Field label="Activity Date" type="date" value={form.data.activity_date} onChange={(value) => form.setData('activity_date', value)} />
-                    </div>
-                    <Field label="Activity" suggestions={libraryOptions.program_activity_type} value={form.data.activity} onChange={(value) => form.setData('activity', value)} />
-                    <label className="text-sm font-bold">Status<select className="mt-1 w-full" value={form.data.status} onChange={(event) => form.setData('status', event.target.value)}><option value="for_distribution">For Distribution</option><option value="scheduled">Scheduled</option><option value="distributed">Distributed</option><option value="cancelled">Cancelled</option></select></label>
-                    <Field label="Remarks" value={form.data.remarks} onChange={(value) => form.setData('remarks', value)} />
-                    <button disabled={form.processing} className="w-full rounded-md bg-brand-600 px-4 py-2.5 text-sm font-black text-white shadow-sm hover:bg-brand-700 disabled:opacity-70">{form.processing ? 'Saving...' : 'Save Distribution Plan'}</button>
-                </form>
-            </div>
-        </div>
-    );
-}
-
 function StatusBadge({ value }) {
     const style = getStatusStyle(value);
 
@@ -657,17 +590,6 @@ function getStatusStyle(value) {
     return { bg: '#dff7ea', color: '#0f5132' };
 }
 
-function Field({ label, value, onChange, type = 'text', suggestions = [] }) {
-    const listId = `near-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
-    return (
-        <label className="block text-sm font-bold">
-            {label}
-            <input className="mt-1 w-full" type={type} list={suggestions?.length ? listId : undefined} value={value} onChange={(event) => onChange(event.target.value)} />
-            {suggestions?.length > 0 && <datalist id={listId}>{suggestions.map((option) => <option key={option} value={option} />)}</datalist>}
-        </label>
-    );
-}
-
 function groupRows(rows, key) {
     const groups = {};
     rows.forEach((row) => {
@@ -707,8 +629,29 @@ function optionValues(rows, key) {
     return Array.from(new Set(rows.map((row) => row[key]).filter(Boolean))).sort();
 }
 
-function activeFilterCount(filters) {
-    return ['category', 'item', 'brand', 'warehouse', 'status'].filter((key) => Array.isArray(filters[key]) && filters[key].length > 0).length;
+function activeFilterCount(filters, tab) {
+    return ['category', 'item', 'brand', 'warehouse', 'status', 'expiry_month', ...(tab === 'register' ? ['recipient'] : [])].filter((key) => Array.isArray(filters[key]) && filters[key].length > 0).length;
+}
+
+function sortMonths(months) {
+    return Array.from(new Set(months.filter(Boolean))).sort((left, right) => new Date(`1 ${left}`) - new Date(`1 ${right}`));
+}
+
+function monthsInRows(rows) {
+    const found = [];
+    rows.forEach((row) => {
+        if (row.expiry_month) found.push(row.expiry_month);
+        Object.entries(row.months || {}).forEach(([month, amount]) => {
+            if (Number(amount) > 0) found.push(month);
+        });
+    });
+    return sortMonths(found);
+}
+
+function matchesExpiryMonth(row, filters) {
+    if (!Array.isArray(filters.expiry_month) || filters.expiry_month.length === 0) return true;
+    if (filters.expiry_month.includes(row.expiry_month)) return true;
+    return filters.expiry_month.some((month) => Number(row.months?.[month] || 0) > 0);
 }
 
 function selectedHas(filters, key, value) {
@@ -724,6 +667,7 @@ function applyFilters(rows, filters, except = null) {
             && (except === 'item' || selectedHas(filters, 'item', row.item))
             && (except === 'brand' || selectedHas(filters, 'brand', row.brand))
             && (except === 'warehouse' || selectedHas(filters, 'warehouse', row.warehouse))
-            && (except === 'status' || selectedHas(filters, 'status', row.status));
+            && (except === 'status' || selectedHas(filters, 'status', row.status))
+            && (except === 'expiry_month' || matchesExpiryMonth(row, filters));
     });
 }
